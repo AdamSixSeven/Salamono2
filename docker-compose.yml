@@ -1,0 +1,60 @@
+services:
+  # ──────────────────────────────────────────────
+  # Option A: CPU-only (demo / small pilot)
+  # Run with: docker compose up
+  # ──────────────────────────────────────────────
+  backend:
+    build: .
+    ports:
+      - "8000:8000"
+    env_file: .env
+    volumes:
+      - flagged_frames:/app/data/flagged_frames
+    restart: unless-stopped
+
+  # ──────────────────────────────────────────────
+  # Option B: GPU (production / multi-camera)
+  # Run with: docker compose --profile gpu up
+  # Requires: nvidia-docker runtime installed
+  # ──────────────────────────────────────────────
+  backend-gpu:
+    build:
+      context: .
+      dockerfile: Dockerfile.gpu
+    ports:
+      - "8000:8000"
+    env_file: .env
+    volumes:
+      - flagged_frames:/app/data/flagged_frames
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+    profiles:
+      - gpu
+
+  # ──────────────────────────────────────────────
+  # Nginx reverse proxy with HTTPS
+  # Run with: docker compose --profile https up
+  # Requires: SSL certs in ./nginx/certs/
+  # ──────────────────────────────────────────────
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/certs:/etc/nginx/certs:ro
+    depends_on:
+      - backend
+    restart: unless-stopped
+    profiles:
+      - https
+
+volumes:
+  flagged_frames:

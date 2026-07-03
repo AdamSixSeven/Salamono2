@@ -90,6 +90,66 @@ tools/          — narzedzia do testowania (symulator kamery)
 config.py       — centralna konfiguracja
 ```
 
+## Wdrozenie w chmurze (Docker)
+
+### Szybki start z Docker (CPU)
+
+```bash
+cp .env.example .env        # dostosuj konfiguracje
+docker compose up --build
+```
+
+Serwer dostepny na `http://<adres-ip>:8000`
+
+### Z GPU (produkcja / wiele kamer)
+
+Wymaga [nvidia-container-toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html).
+
+```bash
+cp .env.example .env
+# Ustaw w .env: YOLO_DEVICE=cuda:0
+docker compose --profile gpu up --build
+```
+
+### Z HTTPS (wymagane dla kamery przez internet)
+
+Przegladarki blokuja dostep do kamery (`getUserMedia`) na stronach bez HTTPS.
+Dwie opcje:
+
+**Opcja A — Cloudflare Tunnel (najlatwiej, darmowe):**
+```bash
+# 1. Uruchom backend
+docker compose up -d
+
+# 2. Zainstaluj cloudflared
+curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o /usr/local/bin/cloudflared
+chmod +x /usr/local/bin/cloudflared
+
+# 3. Stworz tunel (darmowe, bez domeny)
+cloudflared tunnel --url http://localhost:8000
+# Dostaniesz URL typu https://xxx-xxx.trycloudflare.com
+```
+
+**Opcja B — Nginx + Let's Encrypt (wlasna domena):**
+```bash
+# 1. Umiesc certyfikaty w nginx/certs/
+#    fullchain.pem + privkey.pem (np. z certbot)
+# 2. Uruchom z profilem https
+docker compose --profile https up --build
+```
+
+### Rekomendowane VM do GPU
+
+| Dostawca | GPU | Koszt | Uwagi |
+|---|---|---|---|
+| Runpod | RTX A4000 | ~$0.20/h | On-demand, latwy start |
+| Vast.ai | RTX 3060 | ~$0.15/h | Najtanszy, auction-based |
+| Hetzner | GTX 1080 | ~40 EUR/mies. | Staly serwer, EU |
+| Lambda | A10 | ~$0.60/h | Stabilny, US |
+
+Z GPU: YOLO przetwarza klatke w ~5-10ms (vs ~150ms na CPU).
+Jeden GPU obsluguje 5-10 kamer jednoczesnie przy 3 fps.
+
 ## Reguly zagrozen (MVP)
 
 1. **person_vehicle_overlap** — bounding box osoby naklada sie z pojazdem (DANGER)
