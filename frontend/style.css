@@ -1,0 +1,276 @@
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    background: #0f0f1a;
+    color: #e0e0e0;
+    min-height: 100vh;
+}
+
+header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 12px 20px;
+    background: #1a1a2e;
+    border-bottom: 1px solid #2a2a4a;
+}
+
+.header-left {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+}
+
+h1 {
+    font-size: 18px;
+    font-weight: 700;
+    letter-spacing: 2px;
+    color: #ffffff;
+}
+
+.header-right {
+    font-size: 13px;
+    color: #888;
+}
+
+.header-right strong {
+    color: #ccc;
+}
+
+.status {
+    font-size: 12px;
+    padding: 3px 10px;
+    border-radius: 12px;
+    font-weight: 600;
+}
+
+.status.connected {
+    background: #0a3d0a;
+    color: #4caf50;
+}
+
+.status.disconnected {
+    background: #3d0a0a;
+    color: #f44336;
+}
+
+/* Alarm banner */
+.alarm-banner {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    padding: 14px 20px;
+    background: #d32f2f;
+    color: white;
+    font-size: 20px;
+    font-weight: 700;
+    letter-spacing: 1px;
+}
+
+.alarm-banner.pulse {
+    animation: pulse 0.5s ease-in-out infinite alternate;
+}
+
+.alarm-banner.hidden {
+    display: none;
+}
+
+.alarm-icon {
+    font-size: 28px;
+}
+
+@keyframes pulse {
+    from { background: #d32f2f; }
+    to { background: #b71c1c; }
+}
+
+/* Main layout */
+main {
+    display: flex;
+    gap: 16px;
+    padding: 16px;
+    height: calc(100vh - 60px);
+}
+
+.live-view {
+    flex: 1;
+    position: relative;
+    background: #111;
+    border-radius: 8px;
+    overflow: hidden;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+#liveCanvas {
+    max-width: 100%;
+    max-height: 100%;
+    object-fit: contain;
+}
+
+.no-signal {
+    position: absolute;
+    text-align: center;
+    color: #555;
+}
+
+.no-signal p:first-child {
+    font-size: 24px;
+    font-weight: 600;
+    margin-bottom: 8px;
+}
+
+.no-signal .hint {
+    font-size: 14px;
+    color: #444;
+}
+
+.no-signal.hidden {
+    display: none;
+}
+
+/* Alert panel */
+.alert-panel {
+    width: 360px;
+    display: flex;
+    flex-direction: column;
+    background: #1a1a2e;
+    border-radius: 8px;
+    overflow: hidden;
+}
+
+.alert-panel h2 {
+    padding: 14px 16px;
+    font-size: 15px;
+    font-weight: 600;
+    border-bottom: 1px solid #2a2a4a;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.badge {
+    background: #d32f2f;
+    color: white;
+    font-size: 12px;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-weight: 700;
+}
+
+.alert-list {
+    flex: 1;
+    overflow-y: auto;
+    padding: 8px;
+}
+
+.alert-item {
+    display: flex;
+    gap: 10px;
+    padding: 10px;
+    margin-bottom: 6px;
+    background: #12121f;
+    border-radius: 6px;
+    border-left: 4px solid #d32f2f;
+    transition: background 0.2s;
+}
+
+.alert-item.warning {
+    border-left-color: #ff9800;
+}
+
+.alert-item:hover {
+    background: #1a1a30;
+}
+
+.alert-thumb {
+    width: 80px;
+    height: 60px;
+    object-fit: cover;
+    border-radius: 4px;
+    background: #222;
+}
+
+.alert-info {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+}
+
+.alert-time {
+    font-size: 11px;
+    color: #666;
+}
+
+.alert-rule {
+    font-size: 13px;
+    font-weight: 600;
+}
+
+.alert-severity {
+    font-size: 11px;
+    padding: 1px 6px;
+    border-radius: 4px;
+    font-weight: 700;
+    display: inline-block;
+    width: fit-content;
+}
+
+.alert-severity.danger {
+    background: #d32f2f;
+    color: white;
+}
+
+.alert-severity.warning {
+    background: #ff9800;
+    color: #111;
+}
+
+.alert-details {
+    font-size: 11px;
+    color: #888;
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+    main {
+        flex-direction: column;
+        height: auto;
+    }
+
+    .alert-panel {
+        width: 100%;
+        max-height: 300px;
+    }
+
+    .live-view {
+        min-height: 300px;
+    }
+
+    header {
+        flex-direction: column;
+        gap: 8px;
+    }
+}
+
+/* Scrollbar styling */
+.alert-list::-webkit-scrollbar {
+    width: 6px;
+}
+
+.alert-list::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+.alert-list::-webkit-scrollbar-thumb {
+    background: #333;
+    border-radius: 3px;
+}

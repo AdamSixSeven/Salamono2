@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Salamono — Kamera</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: system-ui, sans-serif;
+            background: #111;
+            color: #eee;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            min-height: 100vh;
+            padding: 16px;
+        }
+        h1 { font-size: 18px; margin-bottom: 12px; letter-spacing: 1px; }
+        #preview {
+            width: 100%;
+            max-width: 640px;
+            border-radius: 8px;
+            background: #222;
+        }
+        .controls {
+            margin: 16px 0;
+            display: flex;
+            gap: 12px;
+            flex-wrap: wrap;
+            justify-content: center;
+        }
+        button {
+            padding: 10px 24px;
+            font-size: 16px;
+            font-weight: 600;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+        }
+        #startBtn { background: #4caf50; color: white; }
+        #stopBtn { background: #f44336; color: white; }
+        #stopBtn:disabled, #startBtn:disabled {
+            opacity: 0.4;
+            cursor: not-allowed;
+        }
+        .config {
+            display: flex;
+            gap: 12px;
+            align-items: center;
+            margin-bottom: 12px;
+            flex-wrap: wrap;
+            justify-content: center;
+        }
+        .config label { font-size: 13px; color: #888; }
+        .config input {
+            padding: 6px 10px;
+            border: 1px solid #333;
+            border-radius: 4px;
+            background: #222;
+            color: #eee;
+            font-size: 14px;
+            width: 200px;
+        }
+        .config select {
+            padding: 6px 10px;
+            border: 1px solid #333;
+            border-radius: 4px;
+            background: #222;
+            color: #eee;
+        }
+        #statusBar {
+            font-size: 13px;
+            margin-top: 12px;
+            padding: 8px 16px;
+            border-radius: 6px;
+            text-align: center;
+        }
+        .status-ok { background: #0a3d0a; color: #4caf50; }
+        .status-err { background: #3d0a0a; color: #f44336; }
+        .status-idle { background: #222; color: #666; }
+        #stats { font-size: 12px; color: #666; margin-top: 8px; }
+    </style>
+</head>
+<body>
+    <h1>SALAMONO KAMERA</h1>
+
+    <div class="config">
+        <label>Serwer:</label>
+        <input type="text" id="serverUrl" placeholder="http://localhost:8000">
+        <label>FPS:</label>
+        <select id="fpsSelect">
+            <option value="1">1</option>
+            <option value="2" selected>2</option>
+            <option value="3">3</option>
+        </select>
+    </div>
+
+    <video id="preview" autoplay playsinline muted></video>
+
+    <div class="controls">
+        <button id="startBtn">Start</button>
+        <button id="stopBtn" disabled>Stop</button>
+    </div>
+
+    <div id="statusBar" class="status-idle">Gotowy do uruchomienia</div>
+    <div id="stats"></div>
+
+    <script>
+    (function() {
+        var video = document.getElementById("preview");
+        var startBtn = document.getElementById("startBtn");
+        var stopBtn = document.getElementById("stopBtn");
+        var serverInput = document.getElementById("serverUrl");
+        var fpsSelect = document.getElementById("fpsSelect");
+        var statusBar = document.getElementById("statusBar");
+        var statsEl = document.getElementById("stats");
+
+        var params = new URLSearchParams(location.search);
+        if (params.get("server")) {
+            serverInput.value = params.get("server");
+        } else {
+            serverInput.value = location.protocol + "//" + location.hostname + ":8000";
+        }
+
+        var intervalId = null;
+        var captureCanvas = document.createElement("canvas");
+        captureCanvas.width = 640;
+        captureCanvas.height = 480;
+        var captureCtx = captureCanvas.getContext("2d");
+        var framesSent = 0;
+        var errorsCount = 0;
+
+        startBtn.onclick = function() {
+            navigator.mediaDevices.getUserMedia({
+                video: { facingMode: "environment", width: 640, height: 480 }
+            }).then(function(stream) {
+                video.srcObject = stream;
+                startCapture();
+                startBtn.disabled = true;
+                stopBtn.disabled = false;
+            }).catch(function(err) {
+                statusBar.textContent = "Blad kamery: " + err.message;
+                statusBar.className = "status-err";
+            });
+        };
+
+        stopBtn.onclick = function() {
+            stopCapture();
+            if (video.srcObject) {
+                video.srcObject.getTracks().forEach(function(t) { t.stop(); });
+                video.srcObject = null;
+            }
+            startBtn.disabled = false;
+            stopBtn.disabled = true;
+            statusBar.textContent = "Zatrzymano";
+            statusBar.className = "status-idle";
+        };
+
+        function startCapture() {
+            var fps = parseInt(fpsSelect.value);
+            var interval = 1000 / fps;
+            framesSent = 0;
+            errorsCount = 0;
+
+            intervalId = setInterval(function() {
+                captureCtx.drawImage(video, 0, 0, 640, 480);
+                captureCanvas.toBlob(function(blob) {
+                    if (!blob) return;
+                    var form = new FormData();
+                    form.append("image", blob, "frame.jpg");
+                    form.append("camera_id", "phone_1");
+                    form.append("timestamp", String(Date.now() / 1000));
+
+                    var serverUrl = serverInput.value.replace(/\/$/, "");
+
+                    fetch(serverUrl + "/api/frame", {
+                        method: "POST",
+                        body: form
+                    }).then(function(resp) {
+                        if (resp.ok) {
+                            framesSent++;
+                            statusBar.textContent = "Wysylanie — klatka " + framesSent;
+                            statusBar.className = "status-ok";
+                            return resp.json();
+                        }
+                        throw new Error("HTTP " + resp.status);
+                    }).then(function(data) {
+                        var alerts = data.confirmed_alerts ? data.confirmed_alerts.length : 0;
+                        statsEl.textContent =
+                            "Wyslane: " + framesSent +
+                            " | Detekcja: " + (data.processing_ms || 0).toFixed(0) + "ms" +
+                            " | Alarmy: " + alerts +
+                            " | Bledy: " + errorsCount;
+                    }).catch(function() {
+                        errorsCount++;
+                        statusBar.textContent = "Blad polaczenia (" + errorsCount + ")";
+                        statusBar.className = "status-err";
+                    });
+                }, "image/jpeg", 0.7);
+            }, interval);
+        }
+
+        function stopCapture() {
+            if (intervalId) {
+                clearInterval(intervalId);
+                intervalId = null;
+            }
+        }
+    })();
+    </script>
+</body>
+</html>

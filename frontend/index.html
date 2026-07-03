@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Salamono Safety — Panel</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <header>
+        <div class="header-left">
+            <h1>SALAMONO SAFETY</h1>
+            <span id="connectionStatus" class="status disconnected">Rozlaczono</span>
+        </div>
+        <div class="header-right">
+            <span id="statsBar">
+                Klatki: <strong id="frameCount">0</strong> |
+                FPS: <strong id="fpsDisplay">0</strong> |
+                Alarmy: <strong id="alertCount">0</strong> |
+                Czas detekcji: <strong id="processingTime">0</strong>ms
+            </span>
+        </div>
+    </header>
+
+    <div id="alarmBanner" class="alarm-banner hidden">
+        <span class="alarm-icon">&#9888;</span>
+        <span id="alarmText">ALARM — Wykryto zagrozenie!</span>
+    </div>
+
+    <main>
+        <div class="live-view">
+            <canvas id="liveCanvas"></canvas>
+            <div id="noSignal" class="no-signal">
+                <p>Brak sygnalu</p>
+                <p class="hint">Uruchom kamere lub symulator</p>
+            </div>
+        </div>
+        <div class="alert-panel">
+            <h2>Historia alarmow <span id="alertTotal" class="badge">0</span></h2>
+            <div id="alertList" class="alert-list"></div>
+        </div>
+    </main>
+
+    <script src="app.js"></script>
+</body>
+</html>
