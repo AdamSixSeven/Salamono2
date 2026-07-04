@@ -1,8 +1,10 @@
+import base64
 import os
+import secrets
 import time
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
@@ -13,6 +15,9 @@ from backend.models import StatsOut
 from backend.routes import alerts, ingest, ws
 from backend.ws_manager import ConnectionManager
 from config import CONFIG
+
+PANEL_PASSWORD = os.getenv("PANEL_PASSWORD", "")
+PUBLIC_PATHS = {"/api/health"}
 
 
 @asynccontextmanager
@@ -39,6 +44,26 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def basic_auth(request: Request, call_next):
+    if not PANEL_PASSWORD or request.url.path in PUBLIC_PATHS:
+        return await call_next(request)
+    header = request.headers.get("Authorization", "")
+    if header.startswith("Basic "):
+        try:
+            decoded = base64.b64decode(header[6:]).decode("utf-8", "ignore")
+            _, _, pw = decoded.partition(":")
+            if secrets.compare_digest(pw, PANEL_PASSWORD):
+                return await call_next(request)
+        except Exception:
+            pass
+    return Response(
+        status_code=401,
+        content="Unauthorized",
+        headers={"WWW-Authenticate": 'Basic realm="Salamono"'},
+    )
 
 app.include_router(ingest.router, prefix="/api")
 app.include_router(alerts.router, prefix="/api")

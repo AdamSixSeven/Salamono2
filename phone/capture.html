@@ -120,7 +120,7 @@
         if (params.get("server")) {
             serverInput.value = params.get("server");
         } else {
-            serverInput.value = location.protocol + "//" + location.hostname + ":8000";
+            serverInput.value = location.origin;
         }
 
         var intervalId = null;
@@ -176,7 +176,8 @@
 
                     fetch(serverUrl + "/api/frame", {
                         method: "POST",
-                        body: form
+                        body: form,
+                        credentials: "same-origin"
                     }).then(function(resp) {
                         if (resp.ok) {
                             framesSent++;
