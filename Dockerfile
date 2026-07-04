@@ -12,6 +12,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Pre-download YOLO model so container starts instantly
 RUN python -c "from ultralytics import YOLO; YOLO('yolo11n.pt')"
 
+# Pre-download PPE checkpoint model (hardhat + vest + person, 6 MB)
+RUN apt-get update && apt-get install -y --no-install-recommends curl && \
+    curl -L -o ppe.pt "https://huggingface.co/Hansung-Cho/yolov8-ppe-detection/resolve/main/best.pt" && \
+    apt-get remove -y curl && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
+
 COPY config.py .
 COPY backend/ backend/
 COPY frontend/ frontend/

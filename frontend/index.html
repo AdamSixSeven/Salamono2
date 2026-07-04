@@ -11,6 +11,7 @@
         <div class="header-left">
             <h1>SALAMONO SAFETY</h1>
             <span id="connectionStatus" class="status disconnected">Rozlaczono</span>
+            <span id="modeIndicator" class="mode-indicator">Tryb: —</span>
         </div>
         <div class="header-right">
             <span id="statsBar">
@@ -33,6 +34,19 @@
             <div id="noSignal" class="no-signal">
                 <p>Brak sygnalu</p>
                 <p class="hint">Uruchom kamere lub symulator</p>
+            </div>
+            <div id="ppeBadge" class="ppe-badge hidden">
+                <div class="ppe-headline" id="ppeHeadline">—</div>
+                <div class="ppe-items">
+                    <div class="ppe-item" id="ppeHardhat">
+                        <span class="ppe-label">KASK</span>
+                        <span class="ppe-mark">—</span>
+                    </div>
+                    <div class="ppe-item" id="ppeVest">
+                        <span class="ppe-label">KAMIZELKA</span>
+                        <span class="ppe-mark">—</span>
+                    </div>
+                </div>
             </div>
         </div>
         <div class="alert-panel">

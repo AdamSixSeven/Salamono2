@@ -8,11 +8,18 @@
     const alarmText = document.getElementById("alarmText");
     const noSignal = document.getElementById("noSignal");
     const connectionStatus = document.getElementById("connectionStatus");
+    const modeIndicator = document.getElementById("modeIndicator");
     const frameCount = document.getElementById("frameCount");
     const fpsDisplay = document.getElementById("fpsDisplay");
     const alertCount = document.getElementById("alertCount");
     const alertTotal = document.getElementById("alertTotal");
     const processingTime = document.getElementById("processingTime");
+    const ppeBadge = document.getElementById("ppeBadge");
+    const ppeHeadline = document.getElementById("ppeHeadline");
+    const ppeHardhat = document.getElementById("ppeHardhat");
+    const ppeVest = document.getElementById("ppeVest");
+    const MODE_LABEL = { site: "Plac (pojazdy)", checkpoint: "Bramka (PPE)" };
+    let ppeHideTimeout = null;
 
     let ws = null;
     let totalAlerts = 0;
@@ -43,9 +50,75 @@
         ws.onmessage = function (event) {
             var data = JSON.parse(event.data);
             renderFrame(data);
+            updateMode(data);
             updateAlerts(data);
+            updatePPE(data);
             updateStats(data);
         };
+    }
+
+    function updateMode(data) {
+        var m = data.mode || "site";
+        modeIndicator.textContent = "Tryb: " + (MODE_LABEL[m] || m);
+    }
+
+    function updatePPE(data) {
+        if (data.mode !== "checkpoint") {
+            ppeBadge.classList.add("hidden");
+            return;
+        }
+        var checks = data.ppe_checks || [];
+        if (checks.length === 0) return;
+        var check = checks[0];
+        var ok = check.severity === "OK";
+
+        ppeBadge.classList.remove("hidden", "ok", "fail");
+        ppeBadge.classList.add(ok ? "ok" : "fail");
+        ppeHeadline.textContent = ok ? "PPE OK" : "BRAK: " + check.missing.map(function(m){return m.toUpperCase();}).join(" + ");
+
+        setPpeItem(ppeHardhat, check.has_hardhat);
+        setPpeItem(ppeVest, check.has_vest);
+
+        if (!ok) {
+            totalAlerts++;
+            var el = createPpeAlertElement(check);
+            alertList.insertBefore(el, alertList.firstChild);
+            while (alertList.children.length > 100) {
+                alertList.removeChild(alertList.lastChild);
+            }
+            alertTotal.textContent = totalAlerts;
+        }
+
+        if (ppeHideTimeout) clearTimeout(ppeHideTimeout);
+        ppeHideTimeout = setTimeout(function() {
+            ppeBadge.classList.add("hidden");
+        }, 6000);
+    }
+
+    function setPpeItem(el, ok) {
+        el.classList.remove("ok", "fail");
+        el.classList.add(ok ? "ok" : "fail");
+        el.querySelector(".ppe-mark").textContent = ok ? "✓" : "✗";
+    }
+
+    function createPpeAlertElement(check) {
+        var item = document.createElement("div");
+        item.className = "alert-item";
+        var date = new Date(check.timestamp * 1000);
+        var timeStr = date.getHours().toString().padStart(2, "0") + ":" +
+                      date.getMinutes().toString().padStart(2, "0") + ":" +
+                      date.getSeconds().toString().padStart(2, "0");
+        var thumbHtml = check.frame_thumbnail_url ?
+            '<img class="alert-thumb" src="' + check.frame_thumbnail_url + '">' : "";
+        item.innerHTML =
+            thumbHtml +
+            '<div class="alert-info">' +
+            '<span class="alert-time">' + timeStr + '</span>' +
+            '<span class="alert-rule">Brak PPE</span>' +
+            '<span class="alert-severity danger">DANGER</span>' +
+            '<span class="alert-details">Brak: ' + check.missing.join(", ") + '</span>' +
+            '</div>';
+        return item;
     }
 
     function renderFrame(data) {

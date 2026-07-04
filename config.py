@@ -27,10 +27,19 @@ class IngestConfig:
 
 
 @dataclass
+class PPEConfig:
+    model_path: str = "ppe.pt"
+    confidence: float = 0.35
+    min_person_height_frac: float = 0.30  # bbox height / frame height
+    entry_cooldown_sec: float = 4.0       # per-person cooldown between checks
+
+
+@dataclass
 class AppConfig:
     yolo: YOLOConfig = field(default_factory=YOLOConfig)
     danger: DangerConfig = field(default_factory=DangerConfig)
     ingest: IngestConfig = field(default_factory=IngestConfig)
+    ppe: PPEConfig = field(default_factory=PPEConfig)
     flagged_frames_dir: str = "data/flagged_frames"
     host: str = "0.0.0.0"
     port: int = 8000
@@ -52,6 +61,14 @@ def _from_env() -> AppConfig:
         cfg.danger.consecutive_frames_required = int(v)
     if v := os.getenv("DANGER_COOLDOWN_SEC"):
         cfg.danger.cooldown_seconds = float(v)
+    if v := os.getenv("PPE_MODEL"):
+        cfg.ppe.model_path = v
+    if v := os.getenv("PPE_CONFIDENCE"):
+        cfg.ppe.confidence = float(v)
+    if v := os.getenv("PPE_MIN_PERSON_HEIGHT_FRAC"):
+        cfg.ppe.min_person_height_frac = float(v)
+    if v := os.getenv("PPE_COOLDOWN_SEC"):
+        cfg.ppe.entry_cooldown_sec = float(v)
     if v := os.getenv("SERVER_PORT"):
         cfg.port = int(v)
     return cfg

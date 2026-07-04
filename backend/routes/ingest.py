@@ -8,7 +8,14 @@ from fastapi import APIRouter, File, Form, Request, UploadFile
 
 from backend.danger_rules import DangerEvent
 from backend.detector import Detection
-from backend.models import AlertOut, AlertSeverity, DetectionOut, FrameResultOut
+from backend.models import (
+    AlertOut,
+    AlertSeverity,
+    DetectionOut,
+    FrameResultOut,
+    PPECheckOut,
+)
+from backend.ppe_rules import PPEEvent
 
 router = APIRouter()
 
@@ -16,6 +23,9 @@ COLOR_PERSON = (0, 255, 0)
 COLOR_VEHICLE = (255, 136, 0)
 COLOR_DANGER = (0, 0, 255)
 COLOR_WARNING = (0, 165, 255)
+COLOR_HARDHAT = (255, 255, 0)
+COLOR_VEST = (0, 255, 255)
+COLOR_OK = (0, 200, 0)
 
 
 def _det_to_out(d: Detection) -> DetectionOut:
@@ -43,9 +53,23 @@ def _event_to_alert(e: DangerEvent, alert_id: str,
     )
 
 
-def _annotate(frame: np.ndarray, detections: list[Detection],
-              raw_dangers: list[DangerEvent],
-              confirmed: list[DangerEvent]) -> np.ndarray:
+def _ppe_to_out(e: PPEEvent, check_id: str,
+                thumb_url: str | None = None) -> PPECheckOut:
+    return PPECheckOut(
+        id=check_id,
+        severity=AlertSeverity(e.severity),
+        missing=e.missing,
+        has_hardhat=e.hardhat is not None,
+        has_vest=e.vest is not None,
+        person=_det_to_out(e.person),
+        timestamp=e.frame_timestamp,
+        frame_thumbnail_url=thumb_url,
+    )
+
+
+def _annotate_site(frame: np.ndarray, detections: list[Detection],
+                   raw_dangers: list[DangerEvent],
+                   confirmed: list[DangerEvent]) -> np.ndarray:
     out = frame.copy()
 
     for d in detections:
@@ -74,12 +98,6 @@ def _annotate(frame: np.ndarray, detections: list[Detection],
                       COLOR_DANGER, -1)
         cv2.addWeighted(overlay, 0.3, out, 0.7, 0, out)
 
-        pc = ((e.person.box[0] + e.person.box[2]) // 2,
-              (e.person.box[1] + e.person.box[3]) // 2)
-        hc = ((e.hazard.box[0] + e.hazard.box[2]) // 2,
-              (e.hazard.box[1] + e.hazard.box[3]) // 2)
-        cv2.line(out, pc, hc, COLOR_DANGER, 3, cv2.LINE_AA)
-
     if confirmed:
         cv2.rectangle(out, (0, 0), (out.shape[1], 40), COLOR_DANGER, -1)
         cv2.putText(out, f"ALARM — {len(confirmed)} danger(s)",
@@ -89,45 +107,72 @@ def _annotate(frame: np.ndarray, detections: list[Detection],
     return out
 
 
-@router.post("/frame", response_model=FrameResultOut)
-async def receive_frame(
-    request: Request,
-    image: UploadFile = File(...),
-    camera_id: str = Form(default="cam_default"),
-    timestamp: float = Form(default=None),
-):
-    t0 = time.monotonic()
+def _annotate_ppe(frame: np.ndarray, detections: list[Detection],
+                  events: list[PPEEvent]) -> np.ndarray:
+    out = frame.copy()
 
-    raw = await image.read()
-    arr = np.frombuffer(raw, np.uint8)
-    frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-    if frame is None:
-        return FrameResultOut(
-            frame_id=0, timestamp=0, detections=[], active_dangers=[],
-            confirmed_alerts=[], frame_jpeg_b64="", processing_ms=0,
-        )
+    for d in detections:
+        x1, y1, x2, y2 = d.box
+        if d.category == "person":
+            color = COLOR_PERSON
+        elif d.category == "hardhat":
+            color = COLOR_HARDHAT
+        elif d.category == "vest":
+            color = COLOR_VEST
+        else:
+            continue
+        cv2.rectangle(out, (x1, y1), (x2, y2), color, 2)
 
-    detections = request.app.state.detector.detect(frame)
-    now = timestamp or time.time()
+    banner_color = None
+    banner_text = None
+    for e in events:
+        if not e.confirmed:
+            continue
+        color = COLOR_DANGER if e.missing else COLOR_OK
+        overlay = out.copy()
+        cv2.rectangle(overlay,
+                      (e.person.box[0], e.person.box[1]),
+                      (e.person.box[2], e.person.box[3]),
+                      color, -1)
+        cv2.addWeighted(overlay, 0.25, out, 0.75, 0, out)
+        if e.missing:
+            banner_color = COLOR_DANGER
+            banner_text = "MISSING: " + " + ".join(m.upper() for m in e.missing)
+        else:
+            banner_color = COLOR_OK
+            banner_text = "PPE OK"
 
-    raw_dangers = request.app.state.danger_detector.evaluate(detections, now)
-    confirmed = request.app.state.temporal_filter.update(raw_dangers, now)
+    if banner_color and banner_text:
+        cv2.rectangle(out, (0, 0), (out.shape[1], 40), banner_color, -1)
+        cv2.putText(out, banner_text, (10, 28),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
 
-    annotated = _annotate(frame, detections, raw_dangers, confirmed)
+    return out
+
+
+async def _handle_site(request: Request, frame: np.ndarray, now: float,
+                        t0: float) -> FrameResultOut:
+    detector = request.app.state.detector
+    danger_detector = request.app.state.danger_detector
+    temporal_filter = request.app.state.temporal_filter
+    frame_store = request.app.state.frame_store
+
+    detections = detector.detect(frame)
+    raw_dangers = danger_detector.evaluate(detections, now)
+    confirmed = temporal_filter.update(raw_dangers, now)
+    annotated = _annotate_site(frame, detections, raw_dangers, confirmed)
 
     alert_outs = []
     for evt in confirmed:
         alert_id = uuid.uuid4().hex[:8]
-        thumb_url = request.app.state.frame_store.save(annotated, alert_id)
-        alert_out = _event_to_alert(evt, alert_id, thumb_url)
-        alert_outs.append(alert_out)
-        request.app.state.alert_history.append(alert_out)
+        thumb_url = frame_store.save(annotated, alert_id)
+        alert = _event_to_alert(evt, alert_id, thumb_url)
+        alert_outs.append(alert)
+        request.app.state.alert_history.append(alert)
         if len(request.app.state.alert_history) > 1000:
             request.app.state.alert_history.pop(0)
 
-    active_outs = []
-    for evt in raw_dangers:
-        active_outs.append(_event_to_alert(evt, "active"))
+    active_outs = [_event_to_alert(e, "active") for e in raw_dangers]
 
     _, jpeg_buf = cv2.imencode(".jpg", annotated,
                                [cv2.IMWRITE_JPEG_QUALITY, 75])
@@ -136,9 +181,10 @@ async def receive_frame(
     processing_ms = (time.monotonic() - t0) * 1000
     request.app.state.frame_counter += 1
 
-    result = FrameResultOut(
+    return FrameResultOut(
         frame_id=request.app.state.frame_counter,
         timestamp=now,
+        mode="site",
         detections=[_det_to_out(d) for d in detections],
         active_dangers=active_outs,
         confirmed_alerts=alert_outs,
@@ -146,6 +192,72 @@ async def receive_frame(
         processing_ms=round(processing_ms, 1),
     )
 
-    await request.app.state.ws_manager.broadcast_json(result.model_dump())
 
+async def _handle_checkpoint(request: Request, frame: np.ndarray, now: float,
+                              t0: float) -> FrameResultOut:
+    detector = request.app.state.ppe_detector
+    checker = request.app.state.ppe_checker
+    frame_store = request.app.state.frame_store
+
+    detections = detector.detect(frame)
+    events = checker.evaluate(detections, frame_h=frame.shape[0],
+                              frame_timestamp=now)
+    confirmed = checker.confirm(events, now)
+    annotated = _annotate_ppe(frame, detections, confirmed)
+
+    check_outs = []
+    for evt in confirmed:
+        cid = uuid.uuid4().hex[:8]
+        thumb_url = frame_store.save(annotated, cid)
+        out = _ppe_to_out(evt, cid, thumb_url)
+        check_outs.append(out)
+        request.app.state.alert_history.append(out)
+        if len(request.app.state.alert_history) > 1000:
+            request.app.state.alert_history.pop(0)
+
+    _, jpeg_buf = cv2.imencode(".jpg", annotated,
+                               [cv2.IMWRITE_JPEG_QUALITY, 75])
+    b64 = base64.b64encode(jpeg_buf).decode()
+
+    processing_ms = (time.monotonic() - t0) * 1000
+    request.app.state.frame_counter += 1
+
+    return FrameResultOut(
+        frame_id=request.app.state.frame_counter,
+        timestamp=now,
+        mode="checkpoint",
+        detections=[_det_to_out(d) for d in detections],
+        ppe_checks=check_outs,
+        frame_jpeg_b64=b64,
+        processing_ms=round(processing_ms, 1),
+    )
+
+
+@router.post("/frame", response_model=FrameResultOut)
+async def receive_frame(
+    request: Request,
+    image: UploadFile = File(...),
+    camera_id: str = Form(default="cam_default"),
+    timestamp: float = Form(default=None),
+    mode: str = Form(default="site"),
+):
+    t0 = time.monotonic()
+
+    raw = await image.read()
+    arr = np.frombuffer(raw, np.uint8)
+    frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    if frame is None:
+        return FrameResultOut(
+            frame_id=0, timestamp=0, mode=mode,
+            detections=[], frame_jpeg_b64="", processing_ms=0,
+        )
+
+    now = timestamp or time.time()
+
+    if mode == "checkpoint" and request.app.state.ppe_detector is not None:
+        result = await _handle_checkpoint(request, frame, now, t0)
+    else:
+        result = await _handle_site(request, frame, now, t0)
+
+    await request.app.state.ws_manager.broadcast_json(result.model_dump())
     return result

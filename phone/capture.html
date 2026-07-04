@@ -94,6 +94,11 @@
             <option value="2" selected>2</option>
             <option value="3">3</option>
         </select>
+        <label>Tryb:</label>
+        <select id="modeSelect">
+            <option value="site">Plac (pojazdy)</option>
+            <option value="checkpoint">Bramka (PPE)</option>
+        </select>
     </div>
 
     <video id="preview" autoplay playsinline muted></video>
@@ -113,6 +118,7 @@
         var stopBtn = document.getElementById("stopBtn");
         var serverInput = document.getElementById("serverUrl");
         var fpsSelect = document.getElementById("fpsSelect");
+        var modeSelect = document.getElementById("modeSelect");
         var statusBar = document.getElementById("statusBar");
         var statsEl = document.getElementById("stats");
 
@@ -122,6 +128,13 @@
         } else {
             serverInput.value = location.origin;
         }
+        var initialMode = params.get("mode") || localStorage.getItem("salamonoMode") || "site";
+        if (initialMode === "checkpoint" || initialMode === "site") {
+            modeSelect.value = initialMode;
+        }
+        modeSelect.onchange = function() {
+            localStorage.setItem("salamonoMode", modeSelect.value);
+        };
 
         var intervalId = null;
         var captureCanvas = document.createElement("canvas");
@@ -171,6 +184,7 @@
                     form.append("image", blob, "frame.jpg");
                     form.append("camera_id", "phone_1");
                     form.append("timestamp", String(Date.now() / 1000));
+                    form.append("mode", modeSelect.value);
 
                     var serverUrl = serverInput.value.replace(/\/$/, "");
 
@@ -187,9 +201,11 @@
                         }
                         throw new Error("HTTP " + resp.status);
                     }).then(function(data) {
-                        var alerts = data.confirmed_alerts ? data.confirmed_alerts.length : 0;
+                        var alerts = (data.confirmed_alerts ? data.confirmed_alerts.length : 0)
+                                   + (data.ppe_checks ? data.ppe_checks.filter(function(c){return c.severity==="DANGER";}).length : 0);
                         statsEl.textContent =
-                            "Wyslane: " + framesSent +
+                            "Tryb: " + (data.mode || "?") +
+                            " | Wyslane: " + framesSent +
                             " | Detekcja: " + (data.processing_ms || 0).toFixed(0) + "ms" +
                             " | Alarmy: " + alerts +
                             " | Bledy: " + errorsCount;

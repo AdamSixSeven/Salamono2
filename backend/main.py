@@ -9,9 +9,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from backend.danger_rules import DangerDetector, TemporalFilter
-from backend.detector import Detector
+from backend.detector import Detector, PPE_CATEGORIES
 from backend.frame_store import FrameStore
 from backend.models import StatsOut
+from backend.ppe_rules import PPEChecker
 from backend.routes import alerts, ingest, ws
 from backend.ws_manager import ConnectionManager
 from config import CONFIG
@@ -28,6 +29,22 @@ async def lifespan(app: FastAPI):
         required=CONFIG.danger.consecutive_frames_required,
         cooldown_sec=CONFIG.danger.cooldown_seconds,
     )
+    app.state.ppe_detector = None
+    app.state.ppe_checker = None
+    ppe_path = CONFIG.ppe.model_path
+    if os.path.exists(ppe_path):
+        try:
+            app.state.ppe_detector = Detector(
+                model_name=ppe_path,
+                categories=PPE_CATEGORIES,
+                confidence=CONFIG.ppe.confidence,
+            )
+            app.state.ppe_checker = PPEChecker()
+            print(f"[startup] PPE checkpoint mode ready ({ppe_path})")
+        except Exception as e:
+            print(f"[startup] PPE model failed to load: {e}")
+    else:
+        print(f"[startup] PPE model not found at {ppe_path}; checkpoint mode disabled")
     app.state.ws_manager = ConnectionManager()
     app.state.frame_store = FrameStore()
     app.state.frame_counter = 0
@@ -85,6 +102,14 @@ async def get_stats():
 @app.get("/api/health")
 async def health():
     return {"status": "ok"}
+
+
+@app.get("/api/modes")
+async def modes():
+    return {
+        "modes": ["site"] + (["checkpoint"] if app.state.ppe_detector else []),
+        "checkpoint_available": app.state.ppe_detector is not None,
+    }
 
 
 os.makedirs(CONFIG.flagged_frames_dir, exist_ok=True)
