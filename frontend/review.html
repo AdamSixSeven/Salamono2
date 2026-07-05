@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Salamono Safety — Historia zdarzen</title>
+    <link rel="stylesheet" href="style.css">
+    <link rel="stylesheet" href="review.css">
+</head>
+<body class="review-body">
+    <header>
+        <div class="header-left">
+            <h1>SALAMONO SAFETY</h1>
+            <span class="mode-indicator">Historia zdarzen</span>
+        </div>
+        <div class="header-right">
+            <a href="/" class="nav-link">← Panel na zywo</a>
+        </div>
+    </header>
+
+    <div class="review-filters">
+        <div class="filter-group">
+            <label>Tryb</label>
+            <select id="filterMode">
+                <option value="">Wszystkie</option>
+                <option value="site">Plac (pojazdy)</option>
+                <option value="checkpoint">Bramka (PPE)</option>
+            </select>
+        </div>
+        <div class="filter-group">
+            <label>Poziom</label>
+            <select id="filterSeverity">
+                <option value="">Wszystkie</option>
+                <option value="DANGER">DANGER</option>
+                <option value="WARNING">WARNING</option>
+            </select>
+        </div>
+        <div class="filter-group">
+            <label>Od</label>
+            <input type="datetime-local" id="filterSince">
+        </div>
+        <div class="filter-group">
+            <label>Do</label>
+            <input type="datetime-local" id="filterUntil">
+        </div>
+        <button id="applyFilters" class="btn-primary">Filtruj</button>
+        <button id="clearFilters" class="btn-secondary">Wyczysc</button>
+        <div class="filter-stats">
+            <span id="resultCount">—</span>
+        </div>
+    </div>
+
+    <main class="review-main">
+        <div id="reviewGrid" class="review-grid"></div>
+        <div id="reviewEmpty" class="review-empty hidden">
+            <p>Brak zdarzen do wyswietlenia</p>
+            <p class="hint">Zmien filtry lub uruchom kamere aby wygenerowac zdarzenia.</p>
+        </div>
+    </main>
+
+    <div id="lightbox" class="lightbox hidden">
+        <button id="lightboxClose" class="lightbox-close" aria-label="Zamknij">×</button>
+        <div class="lightbox-inner">
+            <img id="lightboxImg" alt="">
+            <div class="lightbox-info">
+                <h2 id="lightboxTitle">—</h2>
+                <div class="lightbox-meta">
+                    <div class="meta-row"><span class="meta-key">Czas</span><span class="meta-val" id="lightboxTime">—</span></div>
+                    <div class="meta-row"><span class="meta-key">Tryb</span><span class="meta-val" id="lightboxMode">—</span></div>
+                    <div class="meta-row"><span class="meta-key">Kamera</span><span class="meta-val" id="lightboxCamera">—</span></div>
+                    <div class="meta-row"><span class="meta-key">Regula</span><span class="meta-val" id="lightboxRule">—</span></div>
+                    <div class="meta-row"><span class="meta-key">Poziom</span><span class="meta-val" id="lightboxSeverity">—</span></div>
+                </div>
+                <details class="lightbox-details">
+                    <summary>Szczegoly techniczne</summary>
+                    <pre id="lightboxDetails">—</pre>
+                </details>
+            </div>
+        </div>
+    </div>
+
+    <script src="review.js"></script>
+</body>
+</html>

@@ -8,6 +8,7 @@ from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
+from backend.alert_storage import AlertStore
 from backend.danger_rules import DangerDetector, TemporalFilter
 from backend.detector import Detector, PPE_CATEGORIES
 from backend.frame_store import FrameStore
@@ -16,6 +17,8 @@ from backend.ppe_rules import PPEChecker
 from backend.routes import alerts, ingest, ws
 from backend.ws_manager import ConnectionManager
 from config import CONFIG
+
+ALERTS_LOG_PATH = os.path.join(CONFIG.flagged_frames_dir, "..", "alerts.jsonl")
 
 PANEL_PASSWORD = os.getenv("PANEL_PASSWORD", "")
 PUBLIC_PATHS = {"/api/health"}
@@ -47,8 +50,8 @@ async def lifespan(app: FastAPI):
         print(f"[startup] PPE model not found at {ppe_path}; checkpoint mode disabled")
     app.state.ws_manager = ConnectionManager()
     app.state.frame_store = FrameStore()
+    app.state.alert_store = AlertStore(ALERTS_LOG_PATH)
     app.state.frame_counter = 0
-    app.state.alert_history = []
     app.state.start_time = time.time()
     yield
 
@@ -93,7 +96,7 @@ async def get_stats():
     fps = app.state.frame_counter / elapsed if elapsed > 0 else 0
     return StatsOut(
         total_frames_processed=app.state.frame_counter,
-        total_alerts=len(app.state.alert_history),
+        total_alerts=app.state.alert_store.count(),
         uptime_seconds=round(elapsed, 1),
         current_fps=round(fps, 2),
     )

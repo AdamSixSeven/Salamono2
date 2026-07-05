@@ -11,6 +11,7 @@ from httpx import AsyncClient, ASGITransport
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from backend.main import app
+from backend.alert_storage import AlertStore
 from backend.detector import Detection
 from backend.danger_rules import DangerDetector, TemporalFilter
 from backend.ws_manager import ConnectionManager
@@ -39,8 +40,10 @@ def init_app_state(tmp_path):
     )
     app.state.ws_manager = ConnectionManager()
     app.state.frame_store = FrameStore(str(tmp_path / "flagged"))
+    app.state.alert_store = AlertStore(str(tmp_path / "alerts.jsonl"))
+    app.state.ppe_detector = None
+    app.state.ppe_checker = None
     app.state.frame_counter = 0
-    app.state.alert_history = []
     app.state.start_time = time.time()
 
 

@@ -9,6 +9,7 @@ from fastapi import APIRouter, File, Form, Request, UploadFile
 from backend.danger_rules import DangerEvent
 from backend.detector import Detection
 from backend.models import (
+    AlarmRecord,
     AlertOut,
     AlertSeverity,
     DetectionOut,
@@ -16,6 +17,61 @@ from backend.models import (
     PPECheckOut,
 )
 from backend.ppe_rules import PPEEvent
+
+SITE_RULE_DESCRIPTIONS = {
+    "person_vehicle_overlap": "Osoba w strefie pojazdu",
+    "person_near_vehicle": "Osoba blisko pojazdu",
+}
+
+
+def _site_record(alert: AlertOut, camera_id: str) -> AlarmRecord:
+    return AlarmRecord(
+        id=alert.id,
+        timestamp=alert.timestamp,
+        mode="site",
+        kind="site_hazard",
+        severity=alert.severity,
+        rule_name=alert.rule_name,
+        description=SITE_RULE_DESCRIPTIONS.get(alert.rule_name, alert.rule_name),
+        camera_id=camera_id,
+        thumbnail_url=alert.frame_thumbnail_url,
+        details={
+            "distance_px": alert.distance_px,
+            "overlap_iou": alert.overlap_iou,
+            "person_confidence": alert.person.confidence,
+            "hazard_confidence": alert.hazard.confidence,
+            "person_box": alert.person.box,
+            "hazard_box": alert.hazard.box,
+            "hazard_class": alert.hazard.class_name,
+        },
+    )
+
+
+def _ppe_record(check: PPECheckOut, camera_id: str) -> AlarmRecord:
+    missing_pretty = {"hardhat": "kask", "vest": "kamizelka"}
+    missing_labels = [missing_pretty.get(m, m) for m in check.missing]
+    if missing_labels:
+        desc = "Brak PPE: " + " + ".join(missing_labels)
+    else:
+        desc = "PPE OK"
+    return AlarmRecord(
+        id=check.id,
+        timestamp=check.timestamp,
+        mode="checkpoint",
+        kind="ppe_missing",
+        severity=check.severity,
+        rule_name="missing_" + "_".join(check.missing) if check.missing else "ppe_ok",
+        description=desc,
+        camera_id=camera_id,
+        thumbnail_url=check.frame_thumbnail_url,
+        details={
+            "missing": check.missing,
+            "has_hardhat": check.has_hardhat,
+            "has_vest": check.has_vest,
+            "person_confidence": check.person.confidence,
+            "person_box": check.person.box,
+        },
+    )
 
 router = APIRouter()
 
@@ -151,11 +207,12 @@ def _annotate_ppe(frame: np.ndarray, detections: list[Detection],
 
 
 async def _handle_site(request: Request, frame: np.ndarray, now: float,
-                        t0: float) -> FrameResultOut:
+                        t0: float, camera_id: str) -> FrameResultOut:
     detector = request.app.state.detector
     danger_detector = request.app.state.danger_detector
     temporal_filter = request.app.state.temporal_filter
     frame_store = request.app.state.frame_store
+    alert_store = request.app.state.alert_store
 
     detections = detector.detect(frame)
     raw_dangers = danger_detector.evaluate(detections, now)
@@ -168,9 +225,7 @@ async def _handle_site(request: Request, frame: np.ndarray, now: float,
         thumb_url = frame_store.save(annotated, alert_id)
         alert = _event_to_alert(evt, alert_id, thumb_url)
         alert_outs.append(alert)
-        request.app.state.alert_history.append(alert)
-        if len(request.app.state.alert_history) > 1000:
-            request.app.state.alert_history.pop(0)
+        alert_store.append(_site_record(alert, camera_id))
 
     active_outs = [_event_to_alert(e, "active") for e in raw_dangers]
 
@@ -194,10 +249,11 @@ async def _handle_site(request: Request, frame: np.ndarray, now: float,
 
 
 async def _handle_checkpoint(request: Request, frame: np.ndarray, now: float,
-                              t0: float) -> FrameResultOut:
+                              t0: float, camera_id: str) -> FrameResultOut:
     detector = request.app.state.ppe_detector
     checker = request.app.state.ppe_checker
     frame_store = request.app.state.frame_store
+    alert_store = request.app.state.alert_store
 
     detections = detector.detect(frame)
     events = checker.evaluate(detections, frame_h=frame.shape[0],
@@ -211,9 +267,8 @@ async def _handle_checkpoint(request: Request, frame: np.ndarray, now: float,
         thumb_url = frame_store.save(annotated, cid)
         out = _ppe_to_out(evt, cid, thumb_url)
         check_outs.append(out)
-        request.app.state.alert_history.append(out)
-        if len(request.app.state.alert_history) > 1000:
-            request.app.state.alert_history.pop(0)
+        if evt.missing:
+            alert_store.append(_ppe_record(out, camera_id))
 
     _, jpeg_buf = cv2.imencode(".jpg", annotated,
                                [cv2.IMWRITE_JPEG_QUALITY, 75])
@@ -255,9 +310,9 @@ async def receive_frame(
     now = timestamp or time.time()
 
     if mode == "checkpoint" and request.app.state.ppe_detector is not None:
-        result = await _handle_checkpoint(request, frame, now, t0)
+        result = await _handle_checkpoint(request, frame, now, t0, camera_id)
     else:
-        result = await _handle_site(request, frame, now, t0)
+        result = await _handle_site(request, frame, now, t0, camera_id)
 
     await request.app.state.ws_manager.broadcast_json(result.model_dump())
     return result

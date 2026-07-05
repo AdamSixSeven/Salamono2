@@ -36,6 +36,9 @@ h1 {
 .header-right {
     font-size: 13px;
     color: #888;
+    display: flex;
+    align-items: center;
+    gap: 16px;
 }
 
 .header-right strong {

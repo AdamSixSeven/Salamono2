@@ -51,6 +51,20 @@ class FrameResultOut(BaseModel):
     processing_ms: float
 
 
+class AlarmRecord(BaseModel):
+    """Unified persistent record for both site hazards and PPE violations."""
+    id: str
+    timestamp: float
+    mode: str                        # "site" or "checkpoint"
+    kind: str                        # "site_hazard" | "ppe_missing"
+    severity: AlertSeverity
+    rule_name: str
+    description: str                 # human-readable, e.g. "Osoba w strefie pojazdu"
+    camera_id: str = "cam_default"
+    thumbnail_url: str | None = None
+    details: dict = {}
+
+
 class StatsOut(BaseModel):
     total_frames_processed: int
     total_alerts: int
