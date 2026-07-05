@@ -14,11 +14,14 @@ from backend.detector import Detector, PPE_CATEGORIES
 from backend.frame_store import FrameStore
 from backend.models import StatsOut
 from backend.ppe_rules import PPEChecker
-from backend.routes import alerts, ingest, ws
+from backend.routes import alerts, ingest, ws, zones
 from backend.ws_manager import ConnectionManager
+from backend.zone_rules import ZoneBreachDetector, ZoneTemporalFilter
+from backend.zones_store import ZoneStore
 from config import CONFIG
 
 ALERTS_LOG_PATH = os.path.join(CONFIG.flagged_frames_dir, "..", "alerts.jsonl")
+ZONES_PATH = os.path.join(CONFIG.flagged_frames_dir, "..", "zones.json")
 
 PANEL_PASSWORD = os.getenv("PANEL_PASSWORD", "")
 PUBLIC_PATHS = {"/api/health"}
@@ -51,6 +54,12 @@ async def lifespan(app: FastAPI):
     app.state.ws_manager = ConnectionManager()
     app.state.frame_store = FrameStore()
     app.state.alert_store = AlertStore(ALERTS_LOG_PATH)
+    app.state.zone_store = ZoneStore(ZONES_PATH)
+    app.state.zone_detector = ZoneBreachDetector()
+    app.state.zone_temporal_filter = ZoneTemporalFilter(
+        required=CONFIG.danger.consecutive_frames_required,
+        cooldown_sec=CONFIG.danger.cooldown_seconds,
+    )
     app.state.frame_counter = 0
     app.state.start_time = time.time()
     yield
@@ -87,6 +96,7 @@ async def basic_auth(request: Request, call_next):
 
 app.include_router(ingest.router, prefix="/api")
 app.include_router(alerts.router, prefix="/api")
+app.include_router(zones.router, prefix="/api")
 app.include_router(ws.router)
 
 

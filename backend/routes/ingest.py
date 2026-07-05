@@ -15,8 +15,10 @@ from backend.models import (
     DetectionOut,
     FrameResultOut,
     PPECheckOut,
+    ZoneBreachOut,
 )
 from backend.ppe_rules import PPEEvent
+from backend.zone_rules import ZoneBreachEvent
 
 SITE_RULE_DESCRIPTIONS = {
     "person_vehicle_overlap": "Osoba w strefie pojazdu",
@@ -43,6 +45,26 @@ def _site_record(alert: AlertOut, camera_id: str) -> AlarmRecord:
             "person_box": alert.person.box,
             "hazard_box": alert.hazard.box,
             "hazard_class": alert.hazard.class_name,
+        },
+    )
+
+
+def _zone_record(breach: ZoneBreachOut, camera_id: str) -> AlarmRecord:
+    return AlarmRecord(
+        id=breach.id,
+        timestamp=breach.timestamp,
+        mode="site",
+        kind="zone_breach",
+        severity=breach.severity,
+        rule_name="zone_" + breach.zone_id,
+        description=f"Wejscie w strefe: {breach.zone_name}",
+        camera_id=camera_id,
+        thumbnail_url=breach.frame_thumbnail_url,
+        details={
+            "zone_id": breach.zone_id,
+            "zone_name": breach.zone_name,
+            "person_confidence": breach.person.confidence,
+            "person_box": breach.person.box,
         },
     )
 
@@ -82,6 +104,8 @@ COLOR_WARNING = (0, 165, 255)
 COLOR_HARDHAT = (255, 255, 0)
 COLOR_VEST = (0, 255, 255)
 COLOR_OK = (0, 200, 0)
+COLOR_ZONE_WARN = (0, 200, 255)
+COLOR_ZONE_DANGER = (60, 60, 255)
 
 
 def _det_to_out(d: Detection) -> DetectionOut:
@@ -109,6 +133,19 @@ def _event_to_alert(e: DangerEvent, alert_id: str,
     )
 
 
+def _zone_to_out(e: ZoneBreachEvent, breach_id: str,
+                  thumb_url: str | None = None) -> ZoneBreachOut:
+    return ZoneBreachOut(
+        id=breach_id,
+        zone_id=e.zone.id,
+        zone_name=e.zone.name,
+        severity=AlertSeverity(e.severity),
+        person=_det_to_out(e.person),
+        timestamp=e.frame_timestamp,
+        frame_thumbnail_url=thumb_url,
+    )
+
+
 def _ppe_to_out(e: PPEEvent, check_id: str,
                 thumb_url: str | None = None) -> PPECheckOut:
     return PPECheckOut(
@@ -121,6 +158,42 @@ def _ppe_to_out(e: PPEEvent, check_id: str,
         timestamp=e.frame_timestamp,
         frame_thumbnail_url=thumb_url,
     )
+
+
+def _annotate_zones(frame: np.ndarray, zones: list,
+                    active_breaches: list[ZoneBreachEvent]) -> np.ndarray:
+    if not zones:
+        return frame
+    h, w = frame.shape[:2]
+    breached_ids = {b.zone.id for b in active_breaches}
+    out = frame
+    overlay = frame.copy()
+    for z in zones:
+        if not z.active or len(z.polygon) < 3:
+            continue
+        pts = np.array(
+            [[int(round(x * w)), int(round(y * h))] for x, y in z.polygon],
+            dtype=np.int32,
+        )
+        is_danger = z.severity == "DANGER"
+        base_color = COLOR_ZONE_DANGER if is_danger else COLOR_ZONE_WARN
+        breached = z.id in breached_ids
+        cv2.fillPoly(overlay, [pts], base_color)
+        alpha = 0.35 if breached else 0.15
+        cv2.addWeighted(overlay, alpha, out, 1 - alpha, 0, out)
+        border = COLOR_DANGER if breached else base_color
+        thickness = 3 if breached else 2
+        cv2.polylines(out, [pts], isClosed=True, color=border,
+                      thickness=thickness, lineType=cv2.LINE_AA)
+        label_x, label_y = int(pts[0][0]), max(20, int(pts[0][1]) - 8)
+        label = z.name
+        (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 1)
+        cv2.rectangle(out, (label_x, label_y - th - 4),
+                      (label_x + tw + 6, label_y + 2), border, -1)
+        cv2.putText(out, label, (label_x + 3, label_y - 2),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1,
+                    cv2.LINE_AA)
+    return out
 
 
 def _annotate_site(frame: np.ndarray, detections: list[Detection],
@@ -213,11 +286,23 @@ async def _handle_site(request: Request, frame: np.ndarray, now: float,
     temporal_filter = request.app.state.temporal_filter
     frame_store = request.app.state.frame_store
     alert_store = request.app.state.alert_store
+    zone_store = request.app.state.zone_store
+    zone_detector = request.app.state.zone_detector
+    zone_temporal_filter = request.app.state.zone_temporal_filter
 
     detections = detector.detect(frame)
     raw_dangers = danger_detector.evaluate(detections, now)
     confirmed = temporal_filter.update(raw_dangers, now)
-    annotated = _annotate_site(frame, detections, raw_dangers, confirmed)
+
+    zones = zone_store.for_camera(camera_id)
+    fh, fw = frame.shape[:2]
+    raw_zone_breaches = zone_detector.evaluate(
+        detections, zones, fw, fh, now,
+    )
+    confirmed_zone_breaches = zone_temporal_filter.update(raw_zone_breaches, now)
+
+    annotated = _annotate_zones(frame, zones, raw_zone_breaches)
+    annotated = _annotate_site(annotated, detections, raw_dangers, confirmed)
 
     alert_outs = []
     for evt in confirmed:
@@ -227,7 +312,16 @@ async def _handle_site(request: Request, frame: np.ndarray, now: float,
         alert_outs.append(alert)
         alert_store.append(_site_record(alert, camera_id))
 
+    zone_breach_outs = []
+    for zevt in confirmed_zone_breaches:
+        bid = uuid.uuid4().hex[:8]
+        thumb_url = frame_store.save(annotated, bid)
+        bout = _zone_to_out(zevt, bid, thumb_url)
+        zone_breach_outs.append(bout)
+        alert_store.append(_zone_record(bout, camera_id))
+
     active_outs = [_event_to_alert(e, "active") for e in raw_dangers]
+    active_zone_outs = [_zone_to_out(z, "active") for z in raw_zone_breaches]
 
     _, jpeg_buf = cv2.imencode(".jpg", annotated,
                                [cv2.IMWRITE_JPEG_QUALITY, 75])
@@ -243,6 +337,8 @@ async def _handle_site(request: Request, frame: np.ndarray, now: float,
         detections=[_det_to_out(d) for d in detections],
         active_dangers=active_outs,
         confirmed_alerts=alert_outs,
+        active_zone_breaches=active_zone_outs,
+        confirmed_zone_breaches=zone_breach_outs,
         frame_jpeg_b64=b64,
         processing_ms=round(processing_ms, 1),
     )

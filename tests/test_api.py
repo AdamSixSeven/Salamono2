@@ -16,6 +16,8 @@ from backend.detector import Detection
 from backend.danger_rules import DangerDetector, TemporalFilter
 from backend.ws_manager import ConnectionManager
 from backend.frame_store import FrameStore
+from backend.zone_rules import ZoneBreachDetector, ZoneTemporalFilter
+from backend.zones_store import ZoneStore
 from config import CONFIG
 
 
@@ -41,6 +43,12 @@ def init_app_state(tmp_path):
     app.state.ws_manager = ConnectionManager()
     app.state.frame_store = FrameStore(str(tmp_path / "flagged"))
     app.state.alert_store = AlertStore(str(tmp_path / "alerts.jsonl"))
+    app.state.zone_store = ZoneStore(str(tmp_path / "zones.json"))
+    app.state.zone_detector = ZoneBreachDetector()
+    app.state.zone_temporal_filter = ZoneTemporalFilter(
+        required=CONFIG.danger.consecutive_frames_required,
+        cooldown_sec=CONFIG.danger.cooldown_seconds,
+    )
     app.state.ppe_detector = None
     app.state.ppe_checker = None
     app.state.frame_counter = 0

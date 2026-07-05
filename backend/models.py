@@ -39,6 +39,16 @@ class PPECheckOut(BaseModel):
     frame_thumbnail_url: str | None = None
 
 
+class ZoneBreachOut(BaseModel):
+    id: str
+    zone_id: str
+    zone_name: str
+    severity: AlertSeverity
+    person: DetectionOut
+    timestamp: float
+    frame_thumbnail_url: str | None = None
+
+
 class FrameResultOut(BaseModel):
     frame_id: int
     timestamp: float
@@ -47,6 +57,8 @@ class FrameResultOut(BaseModel):
     active_dangers: list[AlertOut] = []
     confirmed_alerts: list[AlertOut] = []
     ppe_checks: list[PPECheckOut] = []
+    active_zone_breaches: list[ZoneBreachOut] = []
+    confirmed_zone_breaches: list[ZoneBreachOut] = []
     frame_jpeg_b64: str
     processing_ms: float
 

@@ -196,10 +196,190 @@ main {
     justify-content: center;
 }
 
+.canvas-stack {
+    position: relative;
+    max-width: 100%;
+    max-height: 100%;
+    display: inline-block;
+    line-height: 0;
+}
+
 #liveCanvas {
     max-width: 100%;
     max-height: 100%;
     object-fit: contain;
+    display: block;
+}
+
+#zoneCanvas {
+    position: absolute;
+    top: 0;
+    left: 0;
+    pointer-events: none;
+    width: 100%;
+    height: 100%;
+}
+
+.canvas-stack.drawing #zoneCanvas {
+    pointer-events: auto;
+    cursor: crosshair;
+}
+
+/* Zone toolbar */
+.zone-toolbar {
+    position: absolute;
+    left: 16px;
+    bottom: 16px;
+    width: 300px;
+    padding: 12px 14px;
+    background: rgba(15, 15, 26, 0.92);
+    border: 1px solid #2a2a4a;
+    border-radius: 10px;
+    backdrop-filter: blur(6px);
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+    font-size: 13px;
+    z-index: 5;
+}
+
+.zone-toolbar-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 10px;
+}
+
+.zone-title {
+    font-size: 12px;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    color: #7ab7ff;
+    font-weight: 700;
+}
+
+.zone-toolbar button {
+    background: #1e2a4a;
+    color: #e0e0e0;
+    border: 1px solid #2a2a4a;
+    padding: 6px 12px;
+    font-size: 12px;
+    font-weight: 600;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: background 0.15s;
+}
+
+.zone-toolbar button:hover:not(:disabled) {
+    background: #2a3a6a;
+}
+
+.zone-toolbar button:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+
+.zone-toolbar button.danger {
+    background: transparent;
+    border-color: #d32f2f;
+    color: #ff7676;
+    padding: 2px 8px;
+    font-size: 11px;
+}
+
+.zone-toolbar button.danger:hover {
+    background: rgba(211, 47, 47, 0.15);
+}
+
+.zone-list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    max-height: 140px;
+    overflow-y: auto;
+    margin-bottom: 6px;
+}
+
+.zone-list:empty::before {
+    content: "Brak stref. Kliknij + Nowa strefa.";
+    color: #666;
+    font-size: 11px;
+    padding: 4px 0;
+}
+
+.zone-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 5px 8px;
+    background: #12121f;
+    border-radius: 5px;
+    border-left: 3px solid #d32f2f;
+}
+
+.zone-row.warning {
+    border-left-color: #ff9800;
+}
+
+.zone-row-name {
+    font-size: 12px;
+    font-weight: 600;
+    color: #ddd;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 180px;
+}
+
+.zone-row-sev {
+    font-size: 10px;
+    color: #888;
+    margin-right: auto;
+    margin-left: 8px;
+}
+
+.zone-draw-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding-top: 8px;
+    border-top: 1px solid #2a2a4a;
+}
+
+.zone-draw-panel.hidden {
+    display: none;
+}
+
+.zone-draw-panel input,
+.zone-draw-panel select {
+    background: #12121f;
+    color: #e0e0e0;
+    border: 1px solid #2a2a4a;
+    border-radius: 5px;
+    padding: 6px 8px;
+    font-size: 12px;
+    font-family: inherit;
+}
+
+.zone-draw-actions {
+    display: flex;
+    gap: 6px;
+}
+
+.zone-draw-actions button {
+    flex: 1;
+}
+
+.zone-hint {
+    font-size: 10px;
+    color: #777;
+    line-height: 1.4;
+}
+
+.zone-list::-webkit-scrollbar {
+    width: 4px;
+}
+.zone-list::-webkit-scrollbar-thumb {
+    background: #333;
+    border-radius: 2px;
 }
 
 .no-signal {
