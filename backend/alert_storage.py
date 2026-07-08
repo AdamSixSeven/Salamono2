@@ -51,6 +51,7 @@ class AlertStore:
         self,
         mode: str | None = None,
         severity: str | None = None,
+        kind: str | None = None,
         since: float | None = None,
         until: float | None = None,
         limit: int = 100,
@@ -62,12 +63,34 @@ class AlertStore:
             records = [r for r in records if r.mode == mode]
         if severity:
             records = [r for r in records if r.severity == severity]
+        if kind:
+            records = [r for r in records if r.kind == kind]
         if since is not None:
             records = [r for r in records if r.timestamp >= since]
         if until is not None:
             records = [r for r in records if r.timestamp <= until]
         records.sort(key=lambda r: r.timestamp, reverse=True)
         return records[offset:offset + limit]
+
+    def summary(self, since: float | None = None,
+                until: float | None = None) -> dict:
+        """Aggregate counts for the PIP audit-trail dashboard."""
+        with self._lock:
+            records = list(self._records)
+        if since is not None:
+            records = [r for r in records if r.timestamp >= since]
+        if until is not None:
+            records = [r for r in records if r.timestamp <= until]
+        by_sev: dict[str, int] = {}
+        by_kind: dict[str, int] = {}
+        for r in records:
+            by_sev[r.severity] = by_sev.get(r.severity, 0) + 1
+            by_kind[r.kind] = by_kind.get(r.kind, 0) + 1
+        return {
+            "total": len(records),
+            "by_severity": by_sev,
+            "by_kind": by_kind,
+        }
 
     def get(self, record_id: str) -> AlarmRecord | None:
         with self._lock:
