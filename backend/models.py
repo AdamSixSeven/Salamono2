@@ -49,6 +49,28 @@ class ZoneBreachOut(BaseModel):
     frame_thumbnail_url: str | None = None
 
 
+class MarkerDetectionOut(BaseModel):
+    marker_id: int
+    corners: list[list[float]]       # 4 corners as [[x, y], ...]
+    center: list[float]              # [cx, cy]
+
+
+class PersonDistanceOut(BaseModel):
+    """Distance of a detected person from the calibrated reference area,
+    measured in metres. `distance_m` is signed: negative → inside area."""
+    person_box: list[int]            # [x1, y1, x2, y2]
+    distance_m: float
+    inside: bool
+
+
+class CalibrationOut(BaseModel):
+    camera_id: str
+    marker_ids: list[int]
+    width_m: float
+    height_m: float
+    created_at: float
+
+
 class FrameResultOut(BaseModel):
     frame_id: int
     timestamp: float
@@ -59,6 +81,9 @@ class FrameResultOut(BaseModel):
     ppe_checks: list[PPECheckOut] = []
     active_zone_breaches: list[ZoneBreachOut] = []
     confirmed_zone_breaches: list[ZoneBreachOut] = []
+    markers: list[MarkerDetectionOut] = []
+    person_distances: list[PersonDistanceOut] = []
+    calibration_active: bool = False
     frame_jpeg_b64: str
     processing_ms: float
 

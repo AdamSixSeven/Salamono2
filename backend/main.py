@@ -9,12 +9,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from backend.alert_storage import AlertStore
+from backend.calibration import CalibrationStore
 from backend.danger_rules import DangerDetector, TemporalFilter
 from backend.detector import Detector, PPE_CATEGORIES
 from backend.frame_store import FrameStore
+from backend.marker_detector import MarkerDetector
 from backend.models import StatsOut
 from backend.ppe_rules import PPEChecker
-from backend.routes import alerts, ingest, ws, zones
+from backend.routes import alerts, calibration, ingest, ws, zones
 from backend.ws_manager import ConnectionManager
 from backend.zone_rules import ZoneBreachDetector, ZoneTemporalFilter
 from backend.zones_store import ZoneStore
@@ -22,6 +24,7 @@ from config import CONFIG
 
 ALERTS_LOG_PATH = os.path.join(CONFIG.flagged_frames_dir, "..", "alerts.jsonl")
 ZONES_PATH = os.path.join(CONFIG.flagged_frames_dir, "..", "zones.json")
+CALIBRATION_PATH = os.path.join(CONFIG.flagged_frames_dir, "..", "calibration.json")
 
 PANEL_PASSWORD = os.getenv("PANEL_PASSWORD", "")
 PUBLIC_PATHS = {"/api/health"}
@@ -60,6 +63,8 @@ async def lifespan(app: FastAPI):
         required=CONFIG.danger.consecutive_frames_required,
         cooldown_sec=CONFIG.danger.cooldown_seconds,
     )
+    app.state.marker_detector = MarkerDetector()
+    app.state.calibration_store = CalibrationStore(CALIBRATION_PATH)
     app.state.frame_counter = 0
     app.state.start_time = time.time()
     yield
@@ -97,6 +102,7 @@ async def basic_auth(request: Request, call_next):
 app.include_router(ingest.router, prefix="/api")
 app.include_router(alerts.router, prefix="/api")
 app.include_router(zones.router, prefix="/api")
+app.include_router(calibration.router, prefix="/api")
 app.include_router(ws.router)
 
 

@@ -5,7 +5,7 @@ uvicorn[standard]>=0.32.0
 python-multipart>=0.0.12
 
 # Image processing
-opencv-python-headless>=4.10.0
+opencv-contrib-python-headless>=4.10.0
 numpy>=1.26.0
 
 # Already a fastapi dep, pinned explicitly
