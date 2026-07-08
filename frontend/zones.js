@@ -131,40 +131,65 @@
         }
     }
 
-    function drawOverlay() {
-        syncCanvasSize();
-        const w = zoneCanvas.width;
-        const h = zoneCanvas.height;
-        zoneCtx.clearRect(0, 0, w, h);
-        if (!drawing) return;
+    function colorsFor(severity) {
+        return severity === "WARNING"
+            ? { stroke: "#ff9800", fill: "rgba(255, 152, 0, 0.2)" }
+            : { stroke: "#ff4d4d", fill: "rgba(255, 77, 77, 0.2)" };
+    }
 
-        // draft polygon
-        if (draftPoly.length > 0) {
-            zoneCtx.save();
-            zoneCtx.lineWidth = 2;
-            zoneCtx.strokeStyle = severitySelect.value === "WARNING"
-                ? "#ff9800" : "#ff4d4d";
-            zoneCtx.fillStyle = severitySelect.value === "WARNING"
-                ? "rgba(255, 152, 0, 0.2)" : "rgba(255, 77, 77, 0.2)";
-            zoneCtx.beginPath();
-            draftPoly.forEach((pt, i) => {
-                const px = pt[0] * w, py = pt[1] * h;
-                if (i === 0) zoneCtx.moveTo(px, py);
-                else zoneCtx.lineTo(px, py);
-            });
-            if (draftPoly.length >= 3) {
-                zoneCtx.closePath();
-                zoneCtx.fill();
-            }
-            zoneCtx.stroke();
-            // vertex dots
+    function drawPolygon(poly, colors, opts) {
+        opts = opts || {};
+        const w = zoneCanvas.width, h = zoneCanvas.height;
+        if (poly.length < 1) return;
+        zoneCtx.save();
+        zoneCtx.lineWidth = opts.lineWidth || 2;
+        zoneCtx.setLineDash(opts.dashed ? [8, 4] : []);
+        zoneCtx.strokeStyle = colors.stroke;
+        zoneCtx.fillStyle = colors.fill;
+        zoneCtx.beginPath();
+        poly.forEach((pt, i) => {
+            const px = pt[0] * w, py = pt[1] * h;
+            if (i === 0) zoneCtx.moveTo(px, py);
+            else zoneCtx.lineTo(px, py);
+        });
+        if (poly.length >= 3) { zoneCtx.closePath(); zoneCtx.fill(); }
+        zoneCtx.stroke();
+        if (opts.vertices) {
             zoneCtx.fillStyle = "#fff";
-            draftPoly.forEach(pt => {
+            poly.forEach(pt => {
                 zoneCtx.beginPath();
                 zoneCtx.arc(pt[0] * w, pt[1] * h, 4, 0, Math.PI * 2);
                 zoneCtx.fill();
             });
-            zoneCtx.restore();
+        }
+        if (opts.label) {
+            const first = poly[0];
+            zoneCtx.font = "600 13px system-ui, sans-serif";
+            zoneCtx.fillStyle = colors.stroke;
+            zoneCtx.strokeStyle = "rgba(0,0,0,0.7)";
+            zoneCtx.lineWidth = 3;
+            zoneCtx.strokeText(opts.label, first[0] * w + 6, first[1] * h - 6);
+            zoneCtx.fillText(opts.label, first[0] * w + 6, first[1] * h - 6);
+        }
+        zoneCtx.restore();
+    }
+
+    function drawOverlay() {
+        syncCanvasSize();
+        const w = zoneCanvas.width, h = zoneCanvas.height;
+        zoneCtx.clearRect(0, 0, w, h);
+
+        // saved zones — always visible so user sees where geofence actually is
+        zones.forEach(z => {
+            if (!z.active || !z.polygon || z.polygon.length < 3) return;
+            drawPolygon(z.polygon, colorsFor(z.severity), { label: z.name });
+        });
+
+        // draft polygon (while user is drawing a new one)
+        if (drawing && draftPoly.length > 0) {
+            drawPolygon(draftPoly, colorsFor(severitySelect.value), {
+                dashed: true, vertices: true,
+            });
         }
     }
 
@@ -220,10 +245,20 @@
     cancelBtn.addEventListener("click", cancelDrawing);
     saveBtn.addEventListener("click", commitDrawing);
 
-    // Keep overlay canvas sized to live canvas + redraw on each frame
-    const observer = new MutationObserver(() => { if (drawing) drawOverlay(); });
+    // Keep overlay canvas sized to live canvas + redraw whenever the underlying
+    // frame changes so saved zones stay visible on top of every rendered frame.
+    const observer = new MutationObserver(() => drawOverlay());
     observer.observe(liveCanvas, { attributes: true, attributeFilter: ["width", "height"] });
-    window.addEventListener("resize", () => { if (drawing) drawOverlay(); });
+    window.addEventListener("resize", () => drawOverlay());
+
+    // Overlay canvas is cleared implicitly when we resize it in syncCanvasSize.
+    // A background RAF loop keeps zones visible even when the live frame stops
+    // changing dimensions (which happens once camera settles into steady state).
+    function tick() {
+        if (drawing || zones.length > 0) drawOverlay();
+        requestAnimationFrame(tick);
+    }
+    requestAnimationFrame(tick);
 
     fetchZones();
 })();

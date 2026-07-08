@@ -90,9 +90,10 @@
         <input type="text" id="serverUrl" placeholder="http://localhost:8000">
         <label>FPS:</label>
         <select id="fpsSelect">
-            <option value="1">1</option>
-            <option value="2" selected>2</option>
-            <option value="3">3</option>
+            <option value="2">2</option>
+            <option value="5">5</option>
+            <option value="10" selected>10</option>
+            <option value="15">15</option>
         </select>
         <label>Tryb:</label>
         <select id="modeSelect">
@@ -138,17 +139,24 @@
 
         var intervalId = null;
         var captureCanvas = document.createElement("canvas");
-        captureCanvas.width = 640;
-        captureCanvas.height = 480;
         var captureCtx = captureCanvas.getContext("2d");
         var framesSent = 0;
         var errorsCount = 0;
+        // Target dłuższy bok — YOLO i tak resize do 640, dłuższe krawędzie
+        // to tylko więcej bandwidth. Zachowujemy natywne proporcje kamery,
+        // żeby YOLO nie widziało zniekształconych osób.
+        var TARGET_LONG_EDGE = 960;
 
         startBtn.onclick = function() {
             navigator.mediaDevices.getUserMedia({
-                video: { facingMode: "environment", width: 640, height: 480 }
+                video: {
+                    facingMode: "environment",
+                    width:  { ideal: 1280 },
+                    height: { ideal: 720 }
+                }
             }).then(function(stream) {
                 video.srcObject = stream;
+                video.addEventListener("loadedmetadata", sizeCaptureCanvas, { once: true });
                 startCapture();
                 startBtn.disabled = true;
                 stopBtn.disabled = false;
@@ -157,6 +165,15 @@
                 statusBar.className = "status-err";
             });
         };
+
+        function sizeCaptureCanvas() {
+            var vw = video.videoWidth || 640;
+            var vh = video.videoHeight || 480;
+            var long = Math.max(vw, vh);
+            var scale = long > TARGET_LONG_EDGE ? TARGET_LONG_EDGE / long : 1;
+            captureCanvas.width  = Math.round(vw * scale);
+            captureCanvas.height = Math.round(vh * scale);
+        }
 
         stopBtn.onclick = function() {
             stopCapture();
@@ -177,7 +194,8 @@
             errorsCount = 0;
 
             intervalId = setInterval(function() {
-                captureCtx.drawImage(video, 0, 0, 640, 480);
+                if (!captureCanvas.width || !captureCanvas.height) sizeCaptureCanvas();
+                captureCtx.drawImage(video, 0, 0, captureCanvas.width, captureCanvas.height);
                 captureCanvas.toBlob(function(blob) {
                     if (!blob) return;
                     var form = new FormData();
