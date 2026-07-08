@@ -80,6 +80,19 @@
         .status-err { background: #3d0a0a; color: #f44336; }
         .status-idle { background: #222; color: #666; }
         #stats { font-size: 12px; color: #666; margin-top: 8px; }
+        .voice-toggle {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 13px;
+            color: #eee;
+            padding: 6px 10px;
+            border: 1px solid #333;
+            border-radius: 4px;
+            background: #222;
+            cursor: pointer;
+        }
+        .voice-toggle input { accent-color: #4caf50; }
     </style>
 </head>
 <body>
@@ -100,6 +113,10 @@
             <option value="site">Plac (pojazdy)</option>
             <option value="checkpoint">Bramka (PPE)</option>
         </select>
+        <label class="voice-toggle">
+            <input type="checkbox" id="voiceToggle" checked>
+            <span>Ostrzeżenia głosowe</span>
+        </label>
     </div>
 
     <video id="preview" autoplay playsinline muted></video>
@@ -120,8 +137,90 @@
         var serverInput = document.getElementById("serverUrl");
         var fpsSelect = document.getElementById("fpsSelect");
         var modeSelect = document.getElementById("modeSelect");
+        var voiceToggle = document.getElementById("voiceToggle");
         var statusBar = document.getElementById("statusBar");
         var statsEl = document.getElementById("stats");
+
+        // ---- Voice warnings (Web Speech API) ------------------------------
+        // Michał S. (2026-07-08): najważniejszy filar produktu — komunikat
+        // głosowy on-site gdy pracownik zbliża się do strefy niebezpiecznej.
+        var voiceSupported = "speechSynthesis" in window;
+        var voiceCooldownMs = 5000;
+        var lastSpokenAt = {}; // message-key → epoch ms
+        var plVoice = null;
+
+        var storedVoice = localStorage.getItem("salamonoVoice");
+        if (storedVoice !== null) voiceToggle.checked = storedVoice === "1";
+        voiceToggle.onchange = function() {
+            localStorage.setItem("salamonoVoice", voiceToggle.checked ? "1" : "0");
+            if (!voiceToggle.checked && voiceSupported) speechSynthesis.cancel();
+        };
+
+        function pickPolishVoice() {
+            if (!voiceSupported) return;
+            var voices = speechSynthesis.getVoices();
+            plVoice = voices.find(function(v) { return v.lang === "pl-PL"; })
+                   || voices.find(function(v) { return v.lang && v.lang.startsWith("pl"); })
+                   || null;
+        }
+        if (voiceSupported) {
+            pickPolishVoice();
+            speechSynthesis.onvoiceschanged = pickPolishVoice;
+        }
+
+        function speak(text, key, priority) {
+            if (!voiceSupported || !voiceToggle.checked) return;
+            var now = Date.now();
+            var last = lastSpokenAt[key] || 0;
+            if (now - last < voiceCooldownMs) return;
+            lastSpokenAt[key] = now;
+            if (priority === "danger") speechSynthesis.cancel();
+            var u = new SpeechSynthesisUtterance(text);
+            u.lang = "pl-PL";
+            if (plVoice) u.voice = plVoice;
+            u.rate = priority === "danger" ? 1.15 : 1.0;
+            u.volume = 1.0;
+            u.pitch = priority === "danger" ? 1.15 : 1.0;
+            speechSynthesis.speak(u);
+        }
+
+        function announceAlerts(data) {
+            if (!voiceToggle.checked) return;
+
+            // Zone breaches — najważniejszy alert wg Michała
+            // (uwaga żuraw / uwaga szyb / uwaga wykop).
+            (data.confirmed_zone_breaches || []).forEach(function(b) {
+                var isDanger = b.severity === "DANGER";
+                var text = isDanger
+                    ? "Stop! Strefa niebezpieczna: " + b.zone_name
+                    : "Uwaga: " + b.zone_name;
+                speak(text, "zone_" + b.zone_id + "_" + b.severity,
+                      isDanger ? "danger" : "warning");
+            });
+
+            // Site hazards — osoba obok pojazdu / w strefie pojazdu.
+            (data.confirmed_alerts || []).forEach(function(a) {
+                var isOverlap = a.rule_name === "person_vehicle_overlap";
+                var isDanger = a.severity === "DANGER";
+                var text = isOverlap
+                    ? "Stop! Osoba w strefie pojazdu"
+                    : "Uwaga: osoba zbyt blisko pojazdu";
+                speak(text, "hazard_" + a.rule_name,
+                      isDanger ? "danger" : "warning");
+            });
+
+            // PPE — brak kaska / kamizelki na bramce wejściowej.
+            (data.ppe_checks || []).forEach(function(c) {
+                if (c.severity !== "DANGER" || !c.missing || !c.missing.length) return;
+                var pieces = c.missing.map(function(m) {
+                    if (m === "hardhat") return "kaska ochronnego";
+                    if (m === "vest") return "kamizelki odblaskowej";
+                    return m;
+                });
+                var text = "Uwaga: brak " + pieces.join(" oraz ");
+                speak(text, "ppe_" + c.missing.slice().sort().join("_"), "danger");
+            });
+        }
 
         var params = new URLSearchParams(location.search);
         if (params.get("server")) {
@@ -219,6 +318,7 @@
                         }
                         throw new Error("HTTP " + resp.status);
                     }).then(function(data) {
+                        announceAlerts(data);
                         var alerts = (data.confirmed_alerts ? data.confirmed_alerts.length : 0)
                                    + (data.ppe_checks ? data.ppe_checks.filter(function(c){return c.severity==="DANGER";}).length : 0);
                         statsEl.textContent =
