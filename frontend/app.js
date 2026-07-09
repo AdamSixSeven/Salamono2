@@ -27,6 +27,12 @@
     let fpsFrames = 0;
     let fpsLastTime = performance.now();
     let alarmTimeout = null;
+    // Drop out-of-order frames. FastAPI may finish requests in a different
+    // order than they arrived when processing takes 150-200ms, so a stale
+    // frame can land after a newer one. Track the newest timestamp we've
+    // rendered and ignore anything older.
+    let lastRenderedTs = 0;
+    let droppedFrames = 0;
 
     function connectWebSocket() {
         const protocol = location.protocol === "https:" ? "wss:" : "ws:";
@@ -49,6 +55,12 @@
 
         ws.onmessage = function (event) {
             var data = JSON.parse(event.data);
+            var ts = data.timestamp || 0;
+            if (ts && ts < lastRenderedTs) {
+                droppedFrames++;
+                return;
+            }
+            lastRenderedTs = ts;
             renderFrame(data);
             updateMode(data);
             updateAlerts(data);

@@ -236,15 +236,19 @@
             localStorage.setItem("salamonoMode", modeSelect.value);
         };
 
-        var intervalId = null;
+        var loopTimer = null;
         var captureCanvas = document.createElement("canvas");
         var captureCtx = captureCanvas.getContext("2d");
         var framesSent = 0;
+        var framesSkipped = 0;
         var errorsCount = 0;
-        // Target dłuższy bok — YOLO i tak resize do 640, dłuższe krawędzie
-        // to tylko więcej bandwidth. Zachowujemy natywne proporcje kamery,
-        // żeby YOLO nie widziało zniekształconych osób.
-        var TARGET_LONG_EDGE = 960;
+        var inFlight = false;      // true dopóki poprzednia klatka nie wróciła
+        var running = false;
+        var lastProcMs = 0;
+        // Target dłuższy bok. YOLO robi resize do 640 wewnętrznie, ale
+        // wysyłanie 960px z telefonu na Railway to duży JPEG (~150KB) —
+        // zejście do 640 tnie payload ~2x bez utraty jakości detekcji.
+        var TARGET_LONG_EDGE = 640;
 
         startBtn.onclick = function() {
             navigator.mediaDevices.getUserMedia({
@@ -286,61 +290,89 @@
             statusBar.className = "status-idle";
         };
 
+        function scheduleNext(minInterval) {
+            if (!running) return;
+            loopTimer = setTimeout(sendOneFrame, minInterval);
+        }
+
+        function sendOneFrame() {
+            if (!running) return;
+            // Backpressure: jeśli poprzednia klatka jeszcze leci, poczekaj.
+            // Tempo wysyłania samo dostraja się do throughput backendu.
+            if (inFlight) {
+                framesSkipped++;
+                scheduleNext(20);
+                return;
+            }
+            if (!captureCanvas.width || !captureCanvas.height) sizeCaptureCanvas();
+            captureCtx.drawImage(video, 0, 0, captureCanvas.width, captureCanvas.height);
+            captureCanvas.toBlob(function(blob) {
+                if (!blob || !running) { scheduleNext(50); return; }
+                inFlight = true;
+                var fps = parseInt(fpsSelect.value) || 10;
+                var targetInterval = 1000 / fps;
+                var t0 = performance.now();
+
+                var form = new FormData();
+                form.append("image", blob, "frame.jpg");
+                form.append("camera_id", "phone_1");
+                form.append("timestamp", String(Date.now() / 1000));
+                form.append("mode", modeSelect.value);
+                var serverUrl = serverInput.value.replace(/\/$/, "");
+
+                fetch(serverUrl + "/api/frame", {
+                    method: "POST",
+                    body: form,
+                    credentials: "same-origin"
+                }).then(function(resp) {
+                    if (resp.ok) {
+                        framesSent++;
+                        statusBar.textContent = "Wysylanie — klatka " + framesSent;
+                        statusBar.className = "status-ok";
+                        return resp.json();
+                    }
+                    throw new Error("HTTP " + resp.status);
+                }).then(function(data) {
+                    announceAlerts(data);
+                    lastProcMs = data.processing_ms || 0;
+                    var alerts = (data.confirmed_alerts ? data.confirmed_alerts.length : 0)
+                               + (data.ppe_checks ? data.ppe_checks.filter(function(c){return c.severity==="DANGER";}).length : 0);
+                    statsEl.textContent =
+                        "Tryb: " + (data.mode || "?") +
+                        " | Wyslane: " + framesSent +
+                        " | Detekcja: " + lastProcMs.toFixed(0) + "ms" +
+                        " | Alarmy: " + alerts +
+                        " | Pominiete: " + framesSkipped +
+                        " | Bledy: " + errorsCount;
+                }).catch(function() {
+                    errorsCount++;
+                    statusBar.textContent = "Blad polaczenia (" + errorsCount + ")";
+                    statusBar.className = "status-err";
+                }).finally(function() {
+                    inFlight = false;
+                    // Round-trip zajął `rtt` ms. Jeśli backend jest wolniejszy
+                    // niż nasz target FPS, wysyłamy natychmiast (kolejny gate
+                    // to i tak inFlight). Jeśli szybszy — spimy do targetu.
+                    var rtt = performance.now() - t0;
+                    var wait = Math.max(0, targetInterval - rtt);
+                    scheduleNext(wait);
+                });
+            }, "image/jpeg", 0.7);
+        }
+
         function startCapture() {
-            var fps = parseInt(fpsSelect.value);
-            var interval = 1000 / fps;
             framesSent = 0;
+            framesSkipped = 0;
             errorsCount = 0;
-
-            intervalId = setInterval(function() {
-                if (!captureCanvas.width || !captureCanvas.height) sizeCaptureCanvas();
-                captureCtx.drawImage(video, 0, 0, captureCanvas.width, captureCanvas.height);
-                captureCanvas.toBlob(function(blob) {
-                    if (!blob) return;
-                    var form = new FormData();
-                    form.append("image", blob, "frame.jpg");
-                    form.append("camera_id", "phone_1");
-                    form.append("timestamp", String(Date.now() / 1000));
-                    form.append("mode", modeSelect.value);
-
-                    var serverUrl = serverInput.value.replace(/\/$/, "");
-
-                    fetch(serverUrl + "/api/frame", {
-                        method: "POST",
-                        body: form,
-                        credentials: "same-origin"
-                    }).then(function(resp) {
-                        if (resp.ok) {
-                            framesSent++;
-                            statusBar.textContent = "Wysylanie — klatka " + framesSent;
-                            statusBar.className = "status-ok";
-                            return resp.json();
-                        }
-                        throw new Error("HTTP " + resp.status);
-                    }).then(function(data) {
-                        announceAlerts(data);
-                        var alerts = (data.confirmed_alerts ? data.confirmed_alerts.length : 0)
-                                   + (data.ppe_checks ? data.ppe_checks.filter(function(c){return c.severity==="DANGER";}).length : 0);
-                        statsEl.textContent =
-                            "Tryb: " + (data.mode || "?") +
-                            " | Wyslane: " + framesSent +
-                            " | Detekcja: " + (data.processing_ms || 0).toFixed(0) + "ms" +
-                            " | Alarmy: " + alerts +
-                            " | Bledy: " + errorsCount;
-                    }).catch(function() {
-                        errorsCount++;
-                        statusBar.textContent = "Blad polaczenia (" + errorsCount + ")";
-                        statusBar.className = "status-err";
-                    });
-                }, "image/jpeg", 0.7);
-            }, interval);
+            inFlight = false;
+            running = true;
+            sendOneFrame();
         }
 
         function stopCapture() {
-            if (intervalId) {
-                clearInterval(intervalId);
-                intervalId = null;
-            }
+            running = false;
+            if (loopTimer) { clearTimeout(loopTimer); loopTimer = null; }
+            inFlight = false;
         }
     })();
     </script>
