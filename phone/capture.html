@@ -339,7 +339,10 @@
 
                 var form = new FormData();
                 form.append("image", blob, "frame.jpg");
-                form.append("camera_id", "phone_1");
+                // Must match CAMERA_ID in frontend/zones.js — otherwise the
+                // backend looks up zones for a different camera and returns
+                // an empty polygon set even when markers are visible.
+                form.append("camera_id", "cam_default");
                 form.append("timestamp", String(Date.now() / 1000));
                 form.append("mode", modeSelect.value);
                 var serverUrl = serverInput.value.replace(/\/$/, "");
