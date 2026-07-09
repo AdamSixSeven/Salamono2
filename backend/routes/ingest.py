@@ -419,6 +419,26 @@ async def _handle_site(request: Request, frame: np.ndarray, now: float,
     calibration_store = request.app.state.calibration_store
 
     detections = detector.detect(frame)
+
+    # Debug: inject a synthetic person into the detection list for N frames.
+    # Adam wanted to test the alarm without physically walking into the zone.
+    inj = request.app.state.debug_inject_person
+    if inj and inj.get("remaining", 0) > 0:
+        fh_i, fw_i = frame.shape[:2]
+        x1n, y1n, x2n, y2n = inj["box_norm"]
+        fake = Detection(
+            class_id=0,
+            class_name="person",
+            category="person",
+            box=(int(x1n * fw_i), int(y1n * fh_i),
+                 int(x2n * fw_i), int(y2n * fh_i)),
+            confidence=float(inj["confidence"]),
+        )
+        detections.append(fake)
+        inj["remaining"] -= 1
+        if inj["remaining"] <= 0:
+            request.app.state.debug_inject_person = None
+
     raw_dangers = danger_detector.evaluate(detections, now)
     confirmed = temporal_filter.update(raw_dangers, now)
 

@@ -16,7 +16,7 @@ from backend.frame_store import FrameStore
 from backend.marker_detector import MarkerDetector
 from backend.models import StatsOut
 from backend.ppe_rules import PPEChecker
-from backend.routes import alerts, calibration, ingest, ws, zones
+from backend.routes import alerts, calibration, debug, ingest, ws, zones
 from backend.ws_manager import ConnectionManager
 from backend.zone_rules import ZoneBreachDetector, ZoneTemporalFilter
 from backend.zones_store import ZoneStore
@@ -68,6 +68,9 @@ async def lifespan(app: FastAPI):
     # In-memory cache of last-seen polygon per marker-defined zone.
     # Format: {(camera_id, zone_id): (polygon_normalized, last_seen_ts)}
     app.state.marker_zone_cache = {}
+    # Debug: inject a synthetic person detection into the next N frames.
+    # None when idle. See backend/routes/debug.py.
+    app.state.debug_inject_person = None
     app.state.frame_counter = 0
     app.state.start_time = time.time()
     yield
@@ -106,6 +109,7 @@ app.include_router(ingest.router, prefix="/api")
 app.include_router(alerts.router, prefix="/api")
 app.include_router(zones.router, prefix="/api")
 app.include_router(calibration.router, prefix="/api")
+app.include_router(debug.router, prefix="/api")
 app.include_router(ws.router)
 
 
