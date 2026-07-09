@@ -65,6 +65,9 @@ async def lifespan(app: FastAPI):
     )
     app.state.marker_detector = MarkerDetector()
     app.state.calibration_store = CalibrationStore(CALIBRATION_PATH)
+    # In-memory cache of last-seen polygon per marker-defined zone.
+    # Format: {(camera_id, zone_id): (polygon_normalized, last_seen_ts)}
+    app.state.marker_zone_cache = {}
     app.state.frame_counter = 0
     app.state.start_time = time.time()
     yield

@@ -56,7 +56,8 @@
             <div id="zoneToolbar" class="zone-toolbar">
                 <div class="zone-toolbar-row">
                     <span class="zone-title">Strefy niebezpieczne</span>
-                    <button id="zoneDrawBtn" type="button">+ Nowa strefa</button>
+                    <button id="zoneDrawBtn" type="button">+ Rysuj</button>
+                    <button id="markerZoneBtn" type="button">+ Z markerów</button>
                 </div>
                 <div id="zoneList" class="zone-list"></div>
                 <div id="zoneDrawPanel" class="zone-draw-panel hidden">
@@ -70,6 +71,19 @@
                         <button id="zoneCancelBtn" type="button">Anuluj</button>
                     </div>
                     <div class="zone-hint">Klikaj na obraz aby postawic wierzcholki. Dwuklik lub Enter zamyka polygon (min. 3 punkty).</div>
+                </div>
+                <div id="markerZonePanel" class="zone-draw-panel hidden">
+                    <input id="markerZoneName" type="text" placeholder="Nazwa (np. Wykop przy dźwigu)" maxlength="40">
+                    <input id="markerZoneIds" type="text" placeholder="ID markerów: 10, 20, 30, 40" maxlength="80">
+                    <select id="markerZoneSeverity">
+                        <option value="DANGER">DANGER</option>
+                        <option value="WARNING">WARNING</option>
+                    </select>
+                    <div class="zone-draw-actions">
+                        <button id="markerZoneSaveBtn" type="button">Zapisz</button>
+                        <button id="markerZoneCancelBtn" type="button">Anuluj</button>
+                    </div>
+                    <div class="zone-hint">Rozłóż markery na ziemi w narożnikach strefy. Wpisz ich ID w kolejności (obrys). Backend rozpozna polygon z aktualnych klatek. Widoczne markery = strefa aktywna.</div>
                 </div>
             </div>
         </div>

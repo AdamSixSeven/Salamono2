@@ -53,6 +53,7 @@ def init_app_state(tmp_path):
     app.state.zone_temporal_filter = ZoneTemporalFilter(required=1, cooldown_sec=0.5)
     app.state.marker_detector = MarkerDetector()
     app.state.calibration_store = CalibrationStore(str(tmp_path / "calibration.json"))
+    app.state.marker_zone_cache = {}
     app.state.ppe_detector = None
     app.state.ppe_checker = None
     app.state.frame_counter = 0

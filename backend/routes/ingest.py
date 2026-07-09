@@ -113,6 +113,53 @@ COLOR_ZONE_DANGER = (60, 60, 255)
 COLOR_MARKER = (255, 0, 255)
 COLOR_MARKER_ACTIVE = (0, 255, 255)
 
+# How long a marker-defined zone remembers its last polygon after all
+# corner markers stop being visible. Keeps the zone alive across brief
+# occlusions instead of flickering off for a frame or two.
+MARKER_ZONE_CACHE_TTL = 2.0
+
+
+def _resolve_marker_zones(zones, markers, camera_id: str,
+                          cache: dict, now: float,
+                          frame_w: int, frame_h: int):
+    """Return zones with their polygon field filled in from marker positions.
+
+    - Regular (polygon) zones pass through unchanged.
+    - Marker-defined zones: if all corner markers visible → recompute polygon
+      from their centres and refresh cache. If some missing → fall back to
+      last-seen polygon if fresh (< MARKER_ZONE_CACHE_TTL), otherwise drop
+      the zone from this frame.
+    """
+    by_id = {m.marker_id: m for m in markers}
+    resolved = []
+    for z in zones:
+        if not z.marker_ids:
+            resolved.append(z)
+            continue
+        centres = []
+        all_visible = True
+        for mid in z.marker_ids:
+            m = by_id.get(int(mid))
+            if m is None:
+                all_visible = False
+                break
+            cx, cy = m.center
+            centres.append([cx / frame_w, cy / frame_h])
+        cache_key = (camera_id, z.id)
+        if all_visible:
+            cache[cache_key] = (centres, now)
+            polygon = centres
+        else:
+            cached = cache.get(cache_key)
+            if cached and (now - cached[1]) < MARKER_ZONE_CACHE_TTL:
+                polygon = cached[0]
+            else:
+                continue
+        z_copy = z.model_copy()
+        z_copy.polygon = polygon
+        resolved.append(z_copy)
+    return resolved
+
 
 def _marker_to_out(m: MarkerDetection) -> MarkerDetectionOut:
     return MarkerDetectionOut(
@@ -376,12 +423,20 @@ async def _handle_site(request: Request, frame: np.ndarray, now: float,
 
     zones = zone_store.for_camera(camera_id)
     fh, fw = frame.shape[:2]
+
+    markers = marker_detector.detect(frame)
+    # Marker-defined zones get their polygon recomputed from live markers
+    # before running breach evaluation.
+    zones = _resolve_marker_zones(
+        zones, markers, camera_id,
+        request.app.state.marker_zone_cache,
+        now, fw, fh,
+    )
     raw_zone_breaches = zone_detector.evaluate(
         detections, zones, fw, fh, now,
     )
     confirmed_zone_breaches = zone_temporal_filter.update(raw_zone_breaches, now)
 
-    markers = marker_detector.detect(frame)
     calibration = calibration_store.get(camera_id)
     persons = [d for d in detections if d.category == "person"]
     person_distances = _person_distances(persons, calibration)

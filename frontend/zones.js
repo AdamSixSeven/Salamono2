@@ -14,6 +14,13 @@
     const severitySelect = document.getElementById("zoneSeverity");
     const saveBtn = document.getElementById("zoneSaveBtn");
     const cancelBtn = document.getElementById("zoneCancelBtn");
+    const markerZoneBtn = document.getElementById("markerZoneBtn");
+    const markerPanel = document.getElementById("markerZonePanel");
+    const markerName = document.getElementById("markerZoneName");
+    const markerIds = document.getElementById("markerZoneIds");
+    const markerSeverity = document.getElementById("markerZoneSeverity");
+    const markerSaveBtn = document.getElementById("markerZoneSaveBtn");
+    const markerCancelBtn = document.getElementById("markerZoneCancelBtn");
 
     let zones = [];              // saved zones from server
     let drawing = false;
@@ -34,7 +41,9 @@
     async function saveZones(nextZones) {
         const payload = { zones: nextZones.map(z => ({
             id: z.id, name: z.name, severity: z.severity,
-            polygon: z.polygon, active: z.active !== false,
+            polygon: z.polygon || [],
+            marker_ids: z.marker_ids || [],
+            active: z.active !== false,
         })) };
         const r = await fetch(`/api/zones/${CAMERA_ID}`, {
             method: "PUT",
@@ -57,7 +66,10 @@
             row.className = "zone-row" + (z.severity === "WARNING" ? " warning" : "");
             const name = document.createElement("span");
             name.className = "zone-row-name";
-            name.textContent = z.name;
+            const suffix = z.marker_ids && z.marker_ids.length
+                ? " · markery [" + z.marker_ids.join(",") + "]"
+                : "";
+            name.textContent = z.name + suffix;
             const sev = document.createElement("span");
             sev.className = "zone-row-sev";
             sev.textContent = z.severity;
@@ -244,6 +256,46 @@
     drawBtn.addEventListener("click", startDrawing);
     cancelBtn.addEventListener("click", cancelDrawing);
     saveBtn.addEventListener("click", commitDrawing);
+
+    function openMarkerPanel() {
+        markerPanel.classList.remove("hidden");
+        drawPanel.classList.add("hidden");
+        drawBtn.disabled = true;
+        markerZoneBtn.disabled = true;
+        markerName.value = "";
+        markerIds.value = "";
+        markerName.focus();
+    }
+    function closeMarkerPanel() {
+        markerPanel.classList.add("hidden");
+        drawBtn.disabled = false;
+        markerZoneBtn.disabled = false;
+    }
+    async function commitMarkerZone() {
+        const ids = markerIds.value
+            .split(/[\s,;]+/).map(s => s.trim()).filter(Boolean)
+            .map(s => parseInt(s, 10)).filter(n => !isNaN(n));
+        if (ids.length < 3) {
+            alert("Podaj co najmniej 3 ID markerów (np. 10, 20, 30, 40).");
+            return;
+        }
+        const next = zones.concat([{
+            name: (markerName.value || "Strefa z markerów").trim().slice(0, 40),
+            severity: markerSeverity.value,
+            polygon: [],
+            marker_ids: ids,
+            active: true,
+        }]);
+        try {
+            await saveZones(next);
+            closeMarkerPanel();
+        } catch (e) {
+            alert("Nie udało się zapisać: " + e.message);
+        }
+    }
+    if (markerZoneBtn) markerZoneBtn.addEventListener("click", openMarkerPanel);
+    if (markerCancelBtn) markerCancelBtn.addEventListener("click", closeMarkerPanel);
+    if (markerSaveBtn) markerSaveBtn.addEventListener("click", commitMarkerZone);
 
     // Keep overlay canvas sized to live canvas + redraw whenever the underlying
     // frame changes so saved zones stay visible on top of every rendered frame.

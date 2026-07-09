@@ -168,19 +168,35 @@
             speechSynthesis.onvoiceschanged = pickPolishVoice;
         }
 
+        // Cooldown zależny od priorytetu — krzyk PPE powtarzamy szybciej
+        // (2s) bo chcemy żeby pracownik faktycznie zareagował, nie tylko
+        // usłyszał raz.
+        var COOLDOWN_MS = { shout: 2000, danger: 5000, warning: 5000 };
+
         function speak(text, key, priority) {
             if (!voiceSupported || !voiceToggle.checked) return;
             var now = Date.now();
             var last = lastSpokenAt[key] || 0;
-            if (now - last < voiceCooldownMs) return;
+            var cd = COOLDOWN_MS[priority] || 5000;
+            if (now - last < cd) return;
             lastSpokenAt[key] = now;
-            if (priority === "danger") speechSynthesis.cancel();
+            if (priority === "danger" || priority === "shout") {
+                speechSynthesis.cancel();
+            }
             var u = new SpeechSynthesisUtterance(text);
             u.lang = "pl-PL";
             if (plVoice) u.voice = plVoice;
-            u.rate = priority === "danger" ? 1.15 : 1.0;
+            if (priority === "shout") {
+                u.rate = 1.25;
+                u.pitch = 1.35;
+            } else if (priority === "danger") {
+                u.rate = 1.15;
+                u.pitch = 1.15;
+            } else {
+                u.rate = 1.0;
+                u.pitch = 1.0;
+            }
             u.volume = 1.0;
-            u.pitch = priority === "danger" ? 1.15 : 1.0;
             speechSynthesis.speak(u);
         }
 
@@ -209,16 +225,24 @@
                       isDanger ? "danger" : "warning");
             });
 
-            // PPE — brak kaska / kamizelki na bramce wejściowej.
+            // PPE — krzyk bezpośrednio na pracownika. Adam W. + Michał S.
+            // (2026-07-09): brak kaska/kamizelki = pracownik ma zareagować
+            // NATYCHMIAST, nie usłyszeć subtelne "uwaga". Wyższy pitch/rate,
+            // krótszy cooldown (2s), formy rozkazujące.
             (data.ppe_checks || []).forEach(function(c) {
                 if (c.severity !== "DANGER" || !c.missing || !c.missing.length) return;
-                var pieces = c.missing.map(function(m) {
-                    if (m === "hardhat") return "kaska ochronnego";
-                    if (m === "vest") return "kamizelki odblaskowej";
-                    return m;
-                });
-                var text = "Uwaga: brak " + pieces.join(" oraz ");
-                speak(text, "ppe_" + c.missing.slice().sort().join("_"), "danger");
+                var missing = c.missing.slice().sort();
+                var text;
+                if (missing.indexOf("hardhat") >= 0 && missing.indexOf("vest") >= 0) {
+                    text = "HEJ! Kask i kamizelka natychmiast!";
+                } else if (missing.indexOf("hardhat") >= 0) {
+                    text = "HEJ! Załóż kask!";
+                } else if (missing.indexOf("vest") >= 0) {
+                    text = "HEJ! Ubierz kamizelkę!";
+                } else {
+                    text = "HEJ! Załóż sprzęt ochronny!";
+                }
+                speak(text, "ppe_" + missing.join("_"), "shout");
             });
         }
 

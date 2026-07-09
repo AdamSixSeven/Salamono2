@@ -11,6 +11,7 @@ class ZoneIn(BaseModel):
     name: str = "Strefa"
     severity: str = "DANGER"
     polygon: list[list[float]] = Field(default_factory=list)
+    marker_ids: list[int] = Field(default_factory=list)
     active: bool = True
 
 
@@ -27,6 +28,16 @@ def _validate_polygon(poly: list[list[float]]) -> None:
         x, y = pt
         if not (0.0 <= x <= 1.0 and 0.0 <= y <= 1.0):
             raise HTTPException(400, "polygon vertices must be normalized 0..1")
+
+
+def _validate_marker_ids(ids: list[int]) -> None:
+    if len(ids) < 3:
+        raise HTTPException(400, "marker_ids requires >= 3 IDs to form a polygon")
+    if len(set(ids)) != len(ids):
+        raise HTTPException(400, "marker_ids must be unique")
+    for mid in ids:
+        if not (0 <= int(mid) < 1000):
+            raise HTTPException(400, "marker_ids must be non-negative integers < 1000")
 
 
 @router.get("/zones")
@@ -51,13 +62,19 @@ async def set_zones(request: Request, camera_id: str, payload: ZonesPayload):
     valid_severities = {"WARNING", "DANGER"}
     zones: list[Zone] = []
     for z_in in payload.zones:
-        _validate_polygon(z_in.polygon)
+        # Marker-defined zones don't need a polygon up front — backend
+        # resolves it from live marker detections each frame.
+        if z_in.marker_ids:
+            _validate_marker_ids(z_in.marker_ids)
+        else:
+            _validate_polygon(z_in.polygon)
         if z_in.severity not in valid_severities:
             raise HTTPException(400, f"severity must be one of {valid_severities}")
         z = Zone(
             name=z_in.name.strip() or "Strefa",
             severity=z_in.severity,
             polygon=z_in.polygon,
+            marker_ids=list(z_in.marker_ids),
             active=z_in.active,
         )
         if z_in.id:
