@@ -22,7 +22,8 @@
     const markerSaveBtn = document.getElementById("markerZoneSaveBtn");
     const markerCancelBtn = document.getElementById("markerZoneCancelBtn");
 
-    let zones = [];              // saved zones from server
+    let zones = [];              // saved zones from server (name/severity/marker_ids)
+    let livePolygons = {};       // zone_id → resolved polygon from latest frame
     let drawing = false;
     let draftPoly = [];          // [[x_norm, y_norm], ...]
 
@@ -186,6 +187,15 @@
         zoneCtx.restore();
     }
 
+    function polygonFor(z) {
+        // Marker-zones store no polygon on disk; use whatever backend
+        // resolved for the most recent frame. Regular polygon-zones fall
+        // back to their persisted polygon so they render even before the
+        // first WS message arrives.
+        if (livePolygons[z.id]) return livePolygons[z.id];
+        return z.polygon || [];
+    }
+
     function drawOverlay() {
         syncCanvasSize();
         const w = zoneCanvas.width, h = zoneCanvas.height;
@@ -193,8 +203,13 @@
 
         // saved zones — always visible so user sees where geofence actually is
         zones.forEach(z => {
-            if (!z.active || !z.polygon || z.polygon.length < 3) return;
-            drawPolygon(z.polygon, colorsFor(z.severity), { label: z.name });
+            if (z.active === false) return;
+            const poly = polygonFor(z);
+            if (poly.length < 3) return;
+            const label = z.marker_ids && z.marker_ids.length
+                ? z.name + " · [" + z.marker_ids.join(",") + "]"
+                : z.name;
+            drawPolygon(poly, colorsFor(z.severity), { label: label });
         });
 
         // draft polygon (while user is drawing a new one)
@@ -311,6 +326,20 @@
         requestAnimationFrame(tick);
     }
     requestAnimationFrame(tick);
+
+    // WebSocket streams a resolved polygon for every zone in every frame.
+    // For marker-zones this is the ONLY source of the polygon (they store
+    // an empty polygon on disk). We also refresh the zone list from the
+    // server payload so marker_ids/name updates without a hard reload.
+    document.addEventListener("perimetr-frame", function (evt) {
+        const d = evt.detail || {};
+        const active = d.active_zones || [];
+        // Rebuild livePolygons from scratch so zones that lost visibility
+        // (and dropped from the resolver) disappear from the overlay.
+        const next = {};
+        active.forEach(a => { if (a.id && a.polygon) next[a.id] = a.polygon; });
+        livePolygons = next;
+    });
 
     fetchZones();
 })();

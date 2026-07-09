@@ -66,6 +66,8 @@
             updateAlerts(data);
             updatePPE(data);
             updateStats(data);
+            // Broadcast to any listeners (zones.js draws overlays from this).
+            document.dispatchEvent(new CustomEvent("perimetr-frame", { detail: data }));
         };
     }
 

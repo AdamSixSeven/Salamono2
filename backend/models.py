@@ -71,6 +71,19 @@ class CalibrationOut(BaseModel):
     created_at: float
 
 
+class ActiveZoneOut(BaseModel):
+    """Zone with its polygon resolved for the current frame.
+
+    Sent per frame over WebSocket so frontends can draw the polygon
+    even for marker-defined zones (whose stored polygon is empty and
+    only exists at runtime from live ArUco detections)."""
+    id: str
+    name: str
+    severity: str
+    polygon: list[list[float]]
+    marker_ids: list[int] = []
+
+
 class FrameResultOut(BaseModel):
     frame_id: int
     timestamp: float
@@ -83,6 +96,7 @@ class FrameResultOut(BaseModel):
     confirmed_zone_breaches: list[ZoneBreachOut] = []
     markers: list[MarkerDetectionOut] = []
     person_distances: list[PersonDistanceOut] = []
+    active_zones: list[ActiveZoneOut] = []
     calibration_active: bool = False
     frame_jpeg_b64: str
     processing_ms: float

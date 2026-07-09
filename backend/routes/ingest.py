@@ -11,6 +11,7 @@ from backend.danger_rules import DangerEvent
 from backend.detector import Detection
 from backend.marker_detector import MarkerDetection
 from backend.models import (
+    ActiveZoneOut,
     AlarmRecord,
     AlertOut,
     AlertSeverity,
@@ -466,6 +467,20 @@ async def _handle_site(request: Request, frame: np.ndarray, now: float,
     active_outs = [_event_to_alert(e, "active") for e in raw_dangers]
     active_zone_outs = [_zone_to_out(z, "active") for z in raw_zone_breaches]
 
+    # Ship the resolved zones so the frontend can draw marker-zone polygons
+    # (their stored polygon is empty; the live one only exists in memory).
+    active_zones_out = [
+        ActiveZoneOut(
+            id=z.id,
+            name=z.name,
+            severity=z.severity,
+            polygon=z.polygon,
+            marker_ids=list(z.marker_ids or []),
+        )
+        for z in zones
+        if z.active and z.polygon and len(z.polygon) >= 3
+    ]
+
     _, jpeg_buf = cv2.imencode(".jpg", annotated,
                                [cv2.IMWRITE_JPEG_QUALITY, 75])
     b64 = base64.b64encode(jpeg_buf).decode()
@@ -484,6 +499,7 @@ async def _handle_site(request: Request, frame: np.ndarray, now: float,
         confirmed_zone_breaches=zone_breach_outs,
         markers=[_marker_to_out(m) for m in markers],
         person_distances=person_distances,
+        active_zones=active_zones_out,
         calibration_active=calibration is not None,
         frame_jpeg_b64=b64,
         processing_ms=round(processing_ms, 1),
