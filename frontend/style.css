@@ -733,3 +733,90 @@ input, select { font-family: inherit; }
 
 .px-mono { font-family: var(--font-mono); }
 .px-sep  { color: var(--ink-4); }
+
+/* ============================================================
+   Pair-phone modal
+   ============================================================ */
+
+.px-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(10, 10, 10, 0.55);
+}
+.px-modal-backdrop.hidden { display: none; }
+
+.px-modal {
+  position: relative;
+  width: 100%;
+  max-width: 380px;
+  background: var(--surface);
+  border: 1px solid var(--ink);
+  padding: 32px 28px 24px;
+  text-align: center;
+}
+
+.px-modal-close {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  background: transparent;
+  border: none;
+  color: var(--ink-3);
+  cursor: pointer;
+}
+.px-modal-close:hover { color: var(--ink); }
+.px-modal-close svg { width: 18px; height: 18px; }
+
+.px-modal-title {
+  font-family: var(--font-display);
+  font-size: 22px;
+  font-weight: 400;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink);
+}
+.px-modal-sub {
+  margin: 6px 0 20px;
+  font-size: 13px;
+  color: var(--ink-3);
+  line-height: 1.4;
+}
+
+.px-qr-frame {
+  display: inline-flex;
+  padding: 14px;
+  background: var(--surface);
+  border: 1px solid var(--border-2);
+}
+.px-qr-frame img { display: block; width: 240px; height: 240px; }
+
+.px-modal-urlrow {
+  display: flex;
+  gap: 8px;
+  margin: 20px 0 10px;
+}
+.px-modal-urlrow input {
+  flex: 1;
+  min-width: 0;
+  padding: 8px 10px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink-2);
+  background: var(--surface-2);
+  border: 1px solid var(--border-2);
+}
+.px-modal-hint {
+  font-size: 11px;
+  color: var(--ink-4);
+  line-height: 1.4;
+}

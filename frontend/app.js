@@ -188,10 +188,54 @@
         document.body.removeChild(a);
     });
 
-    pairPhoneBtn.addEventListener("click", () => {
-        // Placeholder: pełny modal QR w kolejnej iteracji.
-        const url = new URL("/phone/capture.html", location.origin).toString();
-        prompt("Skopiuj URL i otwórz na telefonie:", url);
+    // ---------- Phone pair QR modal ----------------------------
+    const pairModal = document.getElementById("pairModal");
+    const pairModalClose = document.getElementById("pairModalClose");
+    const pairQrImg = document.getElementById("pairQrImg");
+    const pairUrlInput = document.getElementById("pairUrl");
+    const pairCopyBtn = document.getElementById("pairCopyBtn");
+
+    // Capture URL points the phone back at THIS server. `server` param makes
+    // the phone POST frames here even when it opened the page from a QR that
+    // was scanned off a different-origin screen (iframe pitch embed).
+    function captureUrl() {
+        const u = new URL("/phone/capture.html", location.origin);
+        u.searchParams.set("server", location.origin);
+        return u.toString();
+    }
+
+    function openPairModal() {
+        const url = captureUrl();
+        pairUrlInput.value = url;
+        // QR rendered server-side (SVG) — no CDN dependency for the demo.
+        pairQrImg.src = "/api/pair-qr?target=" + encodeURIComponent(url);
+        pairModal.classList.remove("hidden");
+    }
+    function closePairModal() {
+        pairModal.classList.add("hidden");
+    }
+
+    pairPhoneBtn.addEventListener("click", openPairModal);
+    pairModalClose.addEventListener("click", closePairModal);
+    pairModal.addEventListener("click", (e) => {
+        if (e.target === pairModal) closePairModal();  // click backdrop
+    });
+    document.addEventListener("keydown", (e) => {
+        if (e.key === "Escape" && !pairModal.classList.contains("hidden")) closePairModal();
+    });
+    pairCopyBtn.addEventListener("click", () => {
+        const done = () => {
+            const prev = pairCopyBtn.textContent;
+            pairCopyBtn.textContent = "Skopiowano";
+            setTimeout(() => { pairCopyBtn.textContent = prev; }, 1500);
+        };
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(pairUrlInput.value).then(done, () => {
+                pairUrlInput.select(); document.execCommand("copy"); done();
+            });
+        } else {
+            pairUrlInput.select(); document.execCommand("copy"); done();
+        }
     });
 
     // ---------- WebSocket ----------------------------------

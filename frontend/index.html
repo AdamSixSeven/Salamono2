@@ -185,6 +185,24 @@
 
 </main>
 
+<div class="px-modal-backdrop hidden" id="pairModal">
+    <div class="px-modal" role="dialog" aria-modal="true" aria-labelledby="pairModalTitle">
+        <button class="px-modal-close" id="pairModalClose" aria-label="Zamknij">
+            <i data-lucide="x"></i>
+        </button>
+        <div class="px-modal-title" id="pairModalTitle">Podłącz telefon</div>
+        <div class="px-modal-sub">Zeskanuj kod aparatem telefonu, żeby uruchomić kamerę on-site.</div>
+        <div class="px-qr-frame">
+            <img id="pairQrImg" alt="Kod QR do sparowania telefonu" width="240" height="240">
+        </div>
+        <div class="px-modal-urlrow">
+            <input type="text" id="pairUrl" readonly>
+            <button class="px-btn" id="pairCopyBtn">Kopiuj</button>
+        </div>
+        <div class="px-modal-hint" id="pairHint">Kod prowadzi do <span class="px-mono">/phone/capture.html</span> na tym serwerze.</div>
+    </div>
+</div>
+
 <script src="app.js"></script>
 <script src="zones.js"></script>
 <script>
