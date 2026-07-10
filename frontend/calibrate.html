@@ -4,204 +4,301 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Perimetr — Kalibracja kamery</title>
+    <link rel="stylesheet" href="style.css">
+    <script src="https://unpkg.com/lucide@latest" defer></script>
     <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body {
-            font-family: system-ui, sans-serif;
-            background: #111;
-            color: #eee;
-            padding: 24px;
+        .calib-wrap {
             max-width: 900px;
             margin: 0 auto;
+            padding: 24px;
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
         }
-        h1 { font-size: 22px; letter-spacing: 1px; margin-bottom: 8px; }
-        p.subtitle { color: #888; margin-bottom: 24px; font-size: 14px; }
-        section { background: #1a1a1a; padding: 20px; border-radius: 8px; margin-bottom: 20px; }
-        h2 { font-size: 15px; color: #4caf50; margin-bottom: 12px; letter-spacing: 0.5px; }
-        video, canvas { width: 100%; border-radius: 6px; background: #222; }
-        .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; margin-bottom: 12px; }
-        label { font-size: 13px; color: #aaa; min-width: 120px; }
-        input, select {
-            padding: 8px 10px;
-            background: #222;
-            color: #eee;
-            border: 1px solid #333;
+        .calib-hero {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            padding-bottom: 12px;
+            border-bottom: 1px solid var(--rule);
+        }
+        .calib-hero h1 {
+            font-family: var(--font-display);
+            font-weight: 300;
+            font-size: 36px;
+            line-height: 1;
+            letter-spacing: -0.005em;
+            color: var(--ink);
+            margin: 0;
+        }
+        .calib-hero p {
+            font-size: 14px;
+            color: var(--ink-3);
+            line-height: 1.5;
+            max-width: 640px;
+        }
+        .calib-step {
+            background: var(--surface);
+            border: 1px solid var(--rule);
+            border-radius: 2px;
+            padding: 20px;
+        }
+        .calib-step h2 {
+            font-family: var(--font-display);
+            font-weight: 400;
+            font-size: 18px;
+            letter-spacing: 0.06em;
+            text-transform: uppercase;
+            color: var(--msbp-red);
+            margin-bottom: 12px;
+        }
+        video, canvas {
+            width: 100%;
             border-radius: 4px;
-            font-size: 14px;
-            min-width: 120px;
+            background: var(--video-bg);
         }
-        button {
-            padding: 10px 20px;
-            font-size: 14px;
+        .calib-row {
+            display: flex;
+            gap: 12px;
+            flex-wrap: wrap;
+            align-items: flex-end;
+            margin-bottom: 12px;
+        }
+        .calib-field {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+            flex: 1;
+            min-width: 140px;
+        }
+        .calib-field label {
+            font-size: 11px;
             font-weight: 600;
-            border: none;
-            border-radius: 6px;
-            cursor: pointer;
+            letter-spacing: 0.14em;
+            text-transform: uppercase;
+            color: var(--ink-3);
         }
-        .primary { background: #4caf50; color: white; }
-        .secondary { background: #333; color: #eee; }
-        .danger { background: #f44336; color: white; }
-        button:disabled { opacity: 0.4; cursor: not-allowed; }
-        .status { padding: 10px 14px; border-radius: 6px; font-size: 13px; margin-top: 8px; }
-        .status-ok { background: #0a3d0a; color: #4caf50; }
-        .status-err { background: #3d0a0a; color: #f44336; }
-        .status-info { background: #0a2f3d; color: #4dabf7; }
-        .status-idle { background: #222; color: #888; }
-        pre { background: #0a0a0a; padding: 12px; border-radius: 4px; font-size: 12px;
-              color: #b0b0b0; overflow-x: auto; margin-top: 8px; }
-        .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+        .calib-field input {
+            padding: 8px 10px;
+            border: 1px solid var(--border-2);
+            border-radius: 2px;
+            font-size: 13px;
+            color: var(--ink);
+            background: var(--surface);
+            font-family: var(--font-mono);
+        }
+        .calib-field input:focus { outline: none; border-color: var(--ink); }
+        .calib-actions { display: flex; gap: 10px; flex-wrap: wrap; }
+        .status {
+            padding: 10px 14px;
+            border-radius: 2px;
+            font-size: 12px;
+            font-family: var(--font-mono);
+            margin-top: 8px;
+        }
+        .status-ok  { background: var(--ok-tint); color: var(--ok-ink); }
+        .status-err { background: var(--msbp-red-tint); color: var(--msbp-red-ink); }
+        .status-info { background: rgba(43, 43, 43, 0.05); color: var(--ink-2); }
+        .status-idle { background: var(--bg-3); color: var(--ink-3); }
+        pre {
+            background: #0A0A0A;
+            color: #FAFAF8;
+            padding: 12px;
+            border-radius: 2px;
+            font-family: var(--font-mono);
+            font-size: 12px;
+            overflow-x: auto;
+            margin-top: 8px;
+        }
     </style>
 </head>
 <body>
-    <h1>KALIBRACJA KAMERY</h1>
-    <p class="subtitle">Rozstaw 4 markery ArUco (4×4_50) w rogach obszaru referencyjnego,
-        wpisz IDs i wymiary, złap klatkę. Backend policzy homografię — od tej chwili
-        każdy pracownik w kadrze ma pomiar odległości od strefy w metrach.</p>
 
-    <section>
-        <h2>1. Podgląd kamery</h2>
+<header class="px-header">
+    <div class="px-header-left">
+        <a href="/" style="text-decoration:none"><span class="px-logo">perimetr</span></a>
+        <nav class="px-nav">
+            <a href="/">Podgląd</a>
+            <a href="/review.html">Historia</a>
+            <a href="/calibrate.html" class="active">Kalibracja</a>
+        </nav>
+    </div>
+    <div class="px-header-right">
+        <a href="/" class="px-btn">← Wróć do panelu</a>
+    </div>
+</header>
+
+<div class="calib-wrap">
+
+    <div class="calib-hero">
+        <h1>Kalibracja kamery</h1>
+        <p>Rozłóż 4 markery ArUco (4×4_50) w rogach obszaru referencyjnego,
+        wpisz IDs i wymiary, złap klatkę. Backend policzy homografię —
+        od tej chwili każdy pracownik w kadrze ma pomiar odległości od strefy w metrach.</p>
+    </div>
+
+    <section class="calib-step">
+        <h2>1 · Podgląd kamery</h2>
         <video id="preview" autoplay playsinline muted></video>
-        <div class="row" style="margin-top: 12px;">
-            <button id="startBtn" class="primary">Uruchom kamerę</button>
-            <button id="stopBtn" class="secondary" disabled>Stop</button>
+        <div class="calib-actions" style="margin-top:12px">
+            <button class="px-btn px-btn--danger" id="startBtn">
+                <i data-lucide="play"></i>Uruchom kamerę
+            </button>
+            <button class="px-btn" id="stopBtn" disabled>Stop</button>
         </div>
     </section>
 
-    <section>
-        <h2>2. Konfiguracja obszaru referencyjnego</h2>
-        <div class="row">
-            <label>Camera ID:</label>
-            <input id="cameraId" value="cam_default">
+    <section class="calib-step">
+        <h2>2 · Obszar referencyjny</h2>
+        <div class="calib-row">
+            <div class="calib-field">
+                <label>Camera ID</label>
+                <input id="cameraId" value="cam_default">
+            </div>
+            <div class="calib-field">
+                <label>ID markerów (TL, TR, BR, BL)</label>
+                <input id="markerIds" placeholder="10, 20, 30, 40" value="10, 20, 30, 40">
+            </div>
         </div>
-        <div class="row">
-            <label>ID markerów (TL, TR, BR, BL):</label>
-            <input id="markerIds" placeholder="10, 20, 30, 40" value="10, 20, 30, 40">
-        </div>
-        <div class="grid">
-            <div class="row"><label>Szerokość (m):</label>
+        <div class="calib-row">
+            <div class="calib-field">
+                <label>Szerokość (m)</label>
                 <input id="widthM" type="number" step="0.1" min="0.1" value="3.0">
             </div>
-            <div class="row"><label>Wysokość (m):</label>
+            <div class="calib-field">
+                <label>Wysokość (m)</label>
                 <input id="heightM" type="number" step="0.1" min="0.1" value="3.0">
             </div>
         </div>
-        <div class="row">
-            <button id="calibrateBtn" class="primary" disabled>Wykonaj kalibrację</button>
-            <button id="clearBtn" class="danger">Usuń istniejącą</button>
+        <div class="calib-actions">
+            <button class="px-btn px-btn--danger" id="calibrateBtn" disabled>
+                <i data-lucide="target"></i>Wykonaj kalibrację
+            </button>
+            <button class="px-btn" id="clearBtn">Usuń istniejącą</button>
         </div>
         <div id="status" class="status status-idle">Uruchom kamerę żeby wystartować.</div>
-        <pre id="output" style="display: none;"></pre>
+        <pre id="output" style="display:none"></pre>
     </section>
 
-    <section>
-        <h2>3. Aktualny stan</h2>
-        <button id="refreshBtn" class="secondary">Odśwież</button>
+    <section class="calib-step">
+        <h2>3 · Aktualny stan</h2>
+        <div class="calib-actions">
+            <button class="px-btn" id="refreshBtn">
+                <i data-lucide="refresh-cw"></i>Odśwież
+            </button>
+        </div>
         <pre id="current"></pre>
     </section>
 
-    <script>
-    (function () {
-        var video = document.getElementById("preview");
-        var startBtn = document.getElementById("startBtn");
-        var stopBtn = document.getElementById("stopBtn");
-        var calibrateBtn = document.getElementById("calibrateBtn");
-        var clearBtn = document.getElementById("clearBtn");
-        var refreshBtn = document.getElementById("refreshBtn");
-        var status = document.getElementById("status");
-        var output = document.getElementById("output");
-        var current = document.getElementById("current");
-        var cameraIdInput = document.getElementById("cameraId");
-        var markerIdsInput = document.getElementById("markerIds");
-        var widthMInput = document.getElementById("widthM");
-        var heightMInput = document.getElementById("heightM");
+</div>
 
-        var captureCanvas = document.createElement("canvas");
-        var captureCtx = captureCanvas.getContext("2d");
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+    if (window.lucide) window.lucide.createIcons();
+});
 
-        function setStatus(msg, cls) {
-            status.textContent = msg;
-            status.className = "status status-" + cls;
+(function () {
+    const video = document.getElementById("preview");
+    const startBtn = document.getElementById("startBtn");
+    const stopBtn = document.getElementById("stopBtn");
+    const calibrateBtn = document.getElementById("calibrateBtn");
+    const clearBtn = document.getElementById("clearBtn");
+    const refreshBtn = document.getElementById("refreshBtn");
+    const status = document.getElementById("status");
+    const output = document.getElementById("output");
+    const current = document.getElementById("current");
+    const cameraIdInput = document.getElementById("cameraId");
+    const markerIdsInput = document.getElementById("markerIds");
+    const widthMInput = document.getElementById("widthM");
+    const heightMInput = document.getElementById("heightM");
+
+    const captureCanvas = document.createElement("canvas");
+    const captureCtx = captureCanvas.getContext("2d");
+
+    function setStatus(msg, cls) {
+        status.textContent = msg;
+        status.className = "status status-" + cls;
+    }
+
+    function sizeCanvas() {
+        const vw = video.videoWidth || 1280;
+        const vh = video.videoHeight || 720;
+        captureCanvas.width = vw;
+        captureCanvas.height = vh;
+    }
+
+    startBtn.onclick = function () {
+        navigator.mediaDevices.getUserMedia({
+            video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 720 } }
+        }).then(function (stream) {
+            video.srcObject = stream;
+            video.addEventListener("loadedmetadata", sizeCanvas, { once: true });
+            startBtn.disabled = true;
+            stopBtn.disabled = false;
+            calibrateBtn.disabled = false;
+            setStatus("Kamera pracuje. Ustaw obraz tak, żeby były widoczne wszystkie 4 markery.", "info");
+        }).catch(function (err) {
+            setStatus("Nie można otworzyć kamery: " + err.message, "err");
+        });
+    };
+
+    stopBtn.onclick = function () {
+        if (video.srcObject) {
+            video.srcObject.getTracks().forEach(function (t) { t.stop(); });
+            video.srcObject = null;
         }
+        startBtn.disabled = false;
+        stopBtn.disabled = true;
+        calibrateBtn.disabled = true;
+        setStatus("Zatrzymano.", "idle");
+    };
 
-        function sizeCanvas() {
-            var vw = video.videoWidth || 1280;
-            var vh = video.videoHeight || 720;
-            captureCanvas.width = vw;
-            captureCanvas.height = vh;
-        }
+    calibrateBtn.onclick = function () {
+        if (!captureCanvas.width) sizeCanvas();
+        captureCtx.drawImage(video, 0, 0, captureCanvas.width, captureCanvas.height);
+        captureCanvas.toBlob(function (blob) {
+            const form = new FormData();
+            form.append("image", blob, "frame.jpg");
+            form.append("marker_ids", markerIdsInput.value.replace(/\s/g, ""));
+            form.append("width_m", widthMInput.value);
+            form.append("height_m", heightMInput.value);
+            const cam = encodeURIComponent(cameraIdInput.value || "cam_default");
+            setStatus("Przetwarzanie klatki…", "info");
+            fetch("/api/calibration/" + cam, { method: "POST", body: form })
+                .then(function (r) { return r.json().then(function (b) { return { ok: r.ok, body: b }; }); })
+                .then(function (res) {
+                    if (res.ok) {
+                        setStatus("Kalibracja zapisana ✓", "ok");
+                        output.style.display = "block";
+                        output.textContent = JSON.stringify(res.body, null, 2);
+                        fetchCurrent();
+                    } else {
+                        setStatus("Błąd: " + (res.body.detail || JSON.stringify(res.body)), "err");
+                    }
+                }).catch(function (e) { setStatus("Błąd sieci: " + e.message, "err"); });
+        }, "image/jpeg", 0.85);
+    };
 
-        startBtn.onclick = function () {
-            navigator.mediaDevices.getUserMedia({
-                video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 720 } }
-            }).then(function (stream) {
-                video.srcObject = stream;
-                video.addEventListener("loadedmetadata", sizeCanvas, { once: true });
-                startBtn.disabled = true;
-                stopBtn.disabled = false;
-                calibrateBtn.disabled = false;
-                setStatus("Kamera pracuje. Ustaw obraz tak, żeby były widoczne wszystkie 4 markery.", "info");
-            }).catch(function (err) {
-                setStatus("Nie można otworzyć kamery: " + err.message, "err");
+    clearBtn.onclick = function () {
+        const cam = encodeURIComponent(cameraIdInput.value || "cam_default");
+        fetch("/api/calibration/" + cam, { method: "DELETE" })
+            .then(function (r) {
+                if (r.ok) { setStatus("Kalibracja usunięta.", "info"); fetchCurrent(); }
+                else { setStatus("Nic do usunięcia.", "idle"); }
             });
-        };
+    };
 
-        stopBtn.onclick = function () {
-            if (video.srcObject) {
-                video.srcObject.getTracks().forEach(function (t) { t.stop(); });
-                video.srcObject = null;
-            }
-            startBtn.disabled = false;
-            stopBtn.disabled = true;
-            calibrateBtn.disabled = true;
-            setStatus("Zatrzymano.", "idle");
-        };
+    function fetchCurrent() {
+        const cam = encodeURIComponent(cameraIdInput.value || "cam_default");
+        fetch("/api/calibration/" + cam).then(function (r) {
+            if (r.ok) { return r.json().then(function (b) { current.textContent = JSON.stringify(b, null, 2); }); }
+            current.textContent = "Brak zapisanej kalibracji.";
+        });
+    }
 
-        calibrateBtn.onclick = function () {
-            if (!captureCanvas.width) sizeCanvas();
-            captureCtx.drawImage(video, 0, 0, captureCanvas.width, captureCanvas.height);
-            captureCanvas.toBlob(function (blob) {
-                var form = new FormData();
-                form.append("image", blob, "frame.jpg");
-                form.append("marker_ids", markerIdsInput.value.replace(/\s/g, ""));
-                form.append("width_m", widthMInput.value);
-                form.append("height_m", heightMInput.value);
-                var cam = encodeURIComponent(cameraIdInput.value || "cam_default");
-                setStatus("Przetwarzanie klatki…", "info");
-                fetch("/api/calibration/" + cam, { method: "POST", body: form })
-                    .then(function (r) { return r.json().then(function (b) { return { ok: r.ok, body: b }; }); })
-                    .then(function (res) {
-                        if (res.ok) {
-                            setStatus("Kalibracja zapisana ✓", "ok");
-                            output.style.display = "block";
-                            output.textContent = JSON.stringify(res.body, null, 2);
-                            fetchCurrent();
-                        } else {
-                            setStatus("Błąd: " + (res.body.detail || JSON.stringify(res.body)), "err");
-                        }
-                    }).catch(function (e) { setStatus("Błąd sieci: " + e.message, "err"); });
-            }, "image/jpeg", 0.85);
-        };
-
-        clearBtn.onclick = function () {
-            var cam = encodeURIComponent(cameraIdInput.value || "cam_default");
-            fetch("/api/calibration/" + cam, { method: "DELETE" })
-                .then(function (r) {
-                    if (r.ok) { setStatus("Kalibracja usunięta.", "info"); fetchCurrent(); }
-                    else { setStatus("Nic do usunięcia.", "idle"); }
-                });
-        };
-
-        function fetchCurrent() {
-            var cam = encodeURIComponent(cameraIdInput.value || "cam_default");
-            fetch("/api/calibration/" + cam).then(function (r) {
-                if (r.ok) { return r.json().then(function (b) { current.textContent = JSON.stringify(b, null, 2); }); }
-                current.textContent = "Brak zapisanej kalibracji.";
-            });
-        }
-
-        refreshBtn.onclick = fetchCurrent;
-        fetchCurrent();
-    })();
-    </script>
+    refreshBtn.onclick = fetchCurrent;
+    fetchCurrent();
+})();
+</script>
 </body>
 </html>

@@ -3,20 +3,46 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Salamono — Kamera</title>
+    <title>Perimetr — Kamera on-site</title>
+    <link rel="stylesheet" href="/tokens/msbp.css">
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
-            font-family: system-ui, sans-serif;
-            background: #111;
-            color: #eee;
+            font-family: var(--font-sans, system-ui, sans-serif);
+            background: #0A0A0A;
+            color: #FAFAF8;
             display: flex;
             flex-direction: column;
             align-items: center;
             min-height: 100vh;
             padding: 16px;
         }
-        h1 { font-size: 18px; margin-bottom: 12px; letter-spacing: 1px; }
+        .brand {
+            display: inline-flex;
+            align-items: center;
+            border: 3px solid #DD211C;
+            border-radius: 12px;
+            padding: 1px 14px 5px;
+            margin-bottom: 12px;
+        }
+        .brand-word {
+            font-family: var(--font-display, "Barlow Condensed", sans-serif);
+            font-size: 27px;
+            font-weight: 300;
+            line-height: 1;
+            letter-spacing: 0.045em;
+            color: #DD211C;
+            text-transform: lowercase;
+        }
+        h1 {
+            font-family: var(--font-display, "Barlow Condensed", sans-serif);
+            font-size: 14px;
+            font-weight: 400;
+            letter-spacing: 0.24em;
+            text-transform: uppercase;
+            color: #A8A8A8;
+            margin-bottom: 12px;
+        }
         #preview {
             width: 100%;
             max-width: 640px;
@@ -38,8 +64,8 @@
             border-radius: 6px;
             cursor: pointer;
         }
-        #startBtn { background: #4caf50; color: white; }
-        #stopBtn { background: #f44336; color: white; }
+        #startBtn { background: #DD211C; color: #FAFAF8; letter-spacing: 0.14em; text-transform: uppercase; border-radius: 2px; }
+        #stopBtn { background: #2B2B2B; color: #FAFAF8; letter-spacing: 0.14em; text-transform: uppercase; border-radius: 2px; }
         #stopBtn:disabled, #startBtn:disabled {
             opacity: 0.4;
             cursor: not-allowed;
@@ -76,10 +102,10 @@
             border-radius: 6px;
             text-align: center;
         }
-        .status-ok { background: #0a3d0a; color: #4caf50; }
-        .status-err { background: #3d0a0a; color: #f44336; }
-        .status-idle { background: #222; color: #666; }
-        #stats { font-size: 12px; color: #666; margin-top: 8px; }
+        .status-ok { background: rgba(31, 122, 77, 0.15); color: #64d38c; }
+        .status-err { background: rgba(221, 33, 28, 0.15); color: #ff8480; }
+        .status-idle { background: #1a1a1a; color: #6B6B6B; }
+        #stats { font-size: 12px; color: #6B6B6B; margin-top: 8px; font-family: var(--font-mono, monospace); }
         .voice-toggle {
             display: flex;
             align-items: center;
@@ -96,7 +122,8 @@
     </style>
 </head>
 <body>
-    <h1>SALAMONO KAMERA</h1>
+    <span class="brand"><span class="brand-word">perimetr</span></span>
+    <h1>Kamera on-site</h1>
 
     <div class="config">
         <label>Serwer:</label>

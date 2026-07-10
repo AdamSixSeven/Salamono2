@@ -3,97 +3,194 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Salamono Safety — Panel</title>
+    <title>Perimetr — Panel kierownika</title>
     <link rel="stylesheet" href="style.css">
-    <link rel="stylesheet" href="review.css">
+    <script src="https://unpkg.com/lucide@latest" defer></script>
 </head>
 <body>
-    <header>
-        <div class="header-left">
-            <h1>SALAMONO SAFETY</h1>
-            <span id="connectionStatus" class="status disconnected">Rozlaczono</span>
-            <span id="modeIndicator" class="mode-indicator">Tryb: —</span>
-        </div>
-        <div class="header-right">
-            <span id="statsBar">
-                Klatki: <strong id="frameCount">0</strong> |
-                FPS: <strong id="fpsDisplay">0</strong> |
-                Alarmy: <strong id="alertCount">0</strong> |
-                Czas detekcji: <strong id="processingTime">0</strong>ms
-            </span>
-            <a href="/review.html" class="nav-link">Historia →</a>
-        </div>
-    </header>
 
-    <div id="alarmBanner" class="alarm-banner hidden">
-        <span class="alarm-icon">&#9888;</span>
-        <span id="alarmText">ALARM — Wykryto zagrozenie!</span>
+<header class="px-header">
+    <div class="px-header-left">
+        <span class="px-logo">perimetr</span>
+        <nav class="px-nav">
+            <a href="/" class="active">Podgląd</a>
+            <a href="/review.html">Historia</a>
+            <a href="/calibrate.html">Kalibracja</a>
+        </nav>
     </div>
+    <div class="px-header-right">
+        <div class="px-segmented" id="modeSegmented">
+            <button type="button" data-mode="site" class="active">Plac</button>
+            <button type="button" data-mode="checkpoint">Bramka</button>
+        </div>
+        <div class="px-status" id="connectionStatus">
+            <span class="px-status-dot"></span>
+            <span id="connectionText">Łączenie…</span>
+        </div>
+        <span class="px-alarm-tag hidden" id="headerAlarmTag">1 aktywny alarm</span>
+        <button class="px-btn" id="pairPhoneBtn">
+            <i data-lucide="qr-code"></i>Podłącz telefon
+        </button>
+    </div>
+</header>
 
-    <main>
-        <div class="live-view">
-            <div class="canvas-stack" id="canvasStack">
-                <canvas id="liveCanvas"></canvas>
-                <canvas id="zoneCanvas"></canvas>
-            </div>
-            <div id="noSignal" class="no-signal">
-                <p>Brak sygnalu</p>
-                <p class="hint">Uruchom kamere lub symulator</p>
-            </div>
-            <div id="ppeBadge" class="ppe-badge hidden">
-                <div class="ppe-headline" id="ppeHeadline">—</div>
-                <div class="ppe-items">
-                    <div class="ppe-item" id="ppeHardhat">
-                        <span class="ppe-label">KASK</span>
-                        <span class="ppe-mark">—</span>
-                    </div>
-                    <div class="ppe-item" id="ppeVest">
-                        <span class="ppe-label">KAMIZELKA</span>
-                        <span class="ppe-mark">—</span>
-                    </div>
+<div class="px-alarm-banner hidden" id="alarmBanner">
+    <div>
+        <div class="px-alarm-title" id="alarmTitle">STOP — Osoba w strefie</div>
+        <div class="px-alarm-meta" id="alarmMeta">—</div>
+    </div>
+    <div class="px-alarm-actions">
+        <button class="px-btn px-btn--solid" id="alarmAckBtn">Potwierdź alarm</button>
+        <button class="px-btn" id="alarmMuteBtn">Wycisz 5 min</button>
+    </div>
+</div>
+
+<main class="px-main">
+
+    <section class="px-col-left">
+
+        <div class="px-cam-bar">
+            <div class="px-cam-card">
+                <span class="px-status-dot"></span>
+                <div>
+                    <div class="px-cam-card-name">KAM-01 · Plac główny</div>
+                    <div class="px-cam-card-meta" id="camMeta">1920×1080 · 0 kl/s</div>
                 </div>
             </div>
-            <div id="zoneToolbar" class="zone-toolbar">
-                <div class="zone-toolbar-row">
-                    <span class="zone-title">Strefy niebezpieczne</span>
-                    <button id="zoneDrawBtn" type="button">+ Rysuj</button>
-                    <button id="markerZoneBtn" type="button">+ Z markerów</button>
-                </div>
-                <div id="zoneList" class="zone-list"></div>
-                <div id="zoneDrawPanel" class="zone-draw-panel hidden">
-                    <input id="zoneName" type="text" placeholder="Nazwa (np. Wykop A)" maxlength="40">
-                    <select id="zoneSeverity">
-                        <option value="DANGER">DANGER</option>
-                        <option value="WARNING">WARNING</option>
-                    </select>
-                    <div class="zone-draw-actions">
-                        <button id="zoneSaveBtn" type="button" disabled>Zapisz</button>
-                        <button id="zoneCancelBtn" type="button">Anuluj</button>
+            <button class="px-cam-add" type="button">
+                <i data-lucide="plus"></i>Dodaj kamerę
+            </button>
+            <div class="px-layers">
+                <span class="px-layers-label">Warstwy</span>
+                <span class="msbp-tag msbp-tag--solid msbp-tag--btn" data-layer="boxes">Bboxy</span>
+                <span class="msbp-tag msbp-tag--solid msbp-tag--btn" data-layer="zones">Strefy</span>
+                <span class="msbp-tag msbp-tag--solid msbp-tag--btn" data-layer="markers">Markery</span>
+                <span class="msbp-tag msbp-tag--solid msbp-tag--btn" data-layer="distances">Odległości</span>
+            </div>
+        </div>
+
+        <div class="px-video" id="canvasStack">
+            <canvas id="liveCanvas"></canvas>
+            <canvas id="zoneCanvas" class="px-canvas-overlay"></canvas>
+
+            <div class="px-video-no-signal" id="noSignal">
+                <p>Brak sygnału</p>
+                <p class="hint">Uruchom kamerę lub symulator</p>
+            </div>
+
+            <div class="px-video-chip px-video-chip--tl" id="liveChip">
+                <span class="px-live-dot"></span>
+                <span id="liveText">LIVE · KAM-01 · —</span>
+            </div>
+
+            <div class="px-video-chip px-video-chip--br" id="markerChip">ArUco 0 · homografia —</div>
+
+            <div class="px-ppe-badge hidden" id="ppeBadge">
+                <div class="px-ppe-headline" id="ppeHeadline">—</div>
+                <div class="px-ppe-items">
+                    <div class="px-ppe-item" id="ppeHardhat">
+                        <span class="px-ppe-mark">—</span>
+                        <span>KASK</span>
                     </div>
-                    <div class="zone-hint">Klikaj na obraz aby postawic wierzcholki. Dwuklik lub Enter zamyka polygon (min. 3 punkty).</div>
-                </div>
-                <div id="markerZonePanel" class="zone-draw-panel hidden">
-                    <input id="markerZoneName" type="text" placeholder="Nazwa (np. Wykop przy dźwigu)" maxlength="40">
-                    <input id="markerZoneIds" type="text" placeholder="ID markerów: 10, 20, 30, 40" maxlength="80">
-                    <select id="markerZoneSeverity">
-                        <option value="DANGER">DANGER</option>
-                        <option value="WARNING">WARNING</option>
-                    </select>
-                    <div class="zone-draw-actions">
-                        <button id="markerZoneSaveBtn" type="button">Zapisz</button>
-                        <button id="markerZoneCancelBtn" type="button">Anuluj</button>
+                    <div class="px-ppe-item" id="ppeVest">
+                        <span class="px-ppe-mark">—</span>
+                        <span>KAMIZELKA</span>
                     </div>
-                    <div class="zone-hint">Rozłóż markery na ziemi w narożnikach strefy. Wpisz ich ID w kolejności (obrys). Backend rozpozna polygon z aktualnych klatek. Widoczne markery = strefa aktywna.</div>
                 </div>
             </div>
         </div>
-        <div class="alert-panel">
-            <h2>Historia alarmow <span id="alertTotal" class="badge">0</span></h2>
-            <div id="alertList" class="alert-list"></div>
-        </div>
-    </main>
 
-    <script src="app.js"></script>
-    <script src="zones.js"></script>
+        <div class="px-video-status" id="videoStatus">
+            <span>WS: <span id="wsStatus">łączenie</span></span>
+            <span class="sep">·</span>
+            <span>klatki <span id="frameCount">0</span></span>
+            <span class="sep">·</span>
+            <span>detekcja <span id="processingTime">0</span> ms</span>
+            <span class="sep">·</span>
+            <span id="fpsLine">— kl/s</span>
+            <span class="sep">·</span>
+            <span>YOLOv11n</span>
+            <span class="grow"></span>
+            <button type="button" class="px-btn px-btn--link" id="snapshotBtn">Zrzut klatki</button>
+        </div>
+
+    </section>
+
+    <aside class="px-col-right">
+
+        <div class="px-card" id="zonesCard">
+            <div class="px-card-hd">
+                <span class="px-card-title">Strefy niebezpieczne</span>
+                <span class="px-mono" style="color:var(--msbp-red);font-weight:600;font-size:12px" id="zonesCount">0</span>
+            </div>
+            <div class="px-zone-actions">
+                <button type="button" class="px-btn" id="zoneDrawBtn">
+                    <i data-lucide="pentagon"></i>Rysuj polygon
+                </button>
+                <button type="button" class="px-btn" id="markerZoneBtn">
+                    <i data-lucide="scan"></i>Z markerów
+                </button>
+            </div>
+
+            <div class="px-zone-list" id="zoneList"></div>
+
+            <span class="px-card-hint">
+                Rysowanie: klikaj wierzchołki na podglądzie, dwuklik zamyka polygon.
+            </span>
+
+            <div class="px-draw-panel hidden" id="zoneDrawPanel">
+                <input id="zoneName" type="text" placeholder="Nazwa (np. Wykop A)" maxlength="40">
+                <select id="zoneSeverity">
+                    <option value="DANGER">Danger</option>
+                    <option value="WARNING">Warning</option>
+                </select>
+                <div class="px-draw-actions">
+                    <button type="button" class="px-btn px-btn--solid" id="zoneSaveBtn" disabled>Zapisz</button>
+                    <button type="button" class="px-btn" id="zoneCancelBtn">Anuluj</button>
+                </div>
+                <span class="px-draw-hint">Klikaj wierzchołki na podglądzie. Dwuklik zamyka polygon (min. 3 pkt).</span>
+            </div>
+
+            <div class="px-marker-panel hidden" id="markerZonePanel">
+                <input id="markerZoneName" type="text" placeholder="Nazwa (np. Strefa dźwigu)" maxlength="40">
+                <input id="markerZoneIds" type="text" placeholder="ID markerów: 10, 20, 30, 40" maxlength="80">
+                <select id="markerZoneSeverity">
+                    <option value="DANGER">Danger</option>
+                    <option value="WARNING">Warning</option>
+                </select>
+                <div class="px-draw-actions">
+                    <button type="button" class="px-btn px-btn--solid" id="markerZoneSaveBtn">Zapisz</button>
+                    <button type="button" class="px-btn" id="markerZoneCancelBtn">Anuluj</button>
+                </div>
+                <span class="px-draw-hint">Rozłóż markery ArUco na ziemi w narożnikach strefy, wpisz ID w kolejności (obwód).</span>
+            </div>
+        </div>
+
+        <div class="px-card" style="flex:1;min-height:0">
+            <div class="px-card-hd">
+                <span class="px-card-title">Historia alarmów <span class="px-mono" style="color:var(--msbp-red);font-weight:600;font-size:12px" id="alertTotal">0</span></span>
+                <a href="/review.html" class="px-btn--red-link" style="font-size:11px;font-weight:600;letter-spacing:0.1em;text-transform:uppercase;text-decoration:none">Pełna historia →</a>
+            </div>
+            <div class="px-alarms-filters" id="alarmsFilters">
+                <span class="msbp-tag msbp-tag--solid msbp-tag--btn active" data-filter="">Wszystkie</span>
+                <span class="msbp-tag msbp-tag--outline msbp-tag--btn" data-filter="DANGER">Danger</span>
+                <span class="msbp-tag msbp-tag--outline msbp-tag--btn" data-filter="WARNING">Warning</span>
+            </div>
+            <div class="px-alarms-list" id="alertList">
+                <div class="px-alarms-empty" id="alertsEmpty">Brak alarmów</div>
+            </div>
+        </div>
+
+    </aside>
+
+</main>
+
+<script src="app.js"></script>
+<script src="zones.js"></script>
+<script>
+  document.addEventListener("DOMContentLoaded", () => {
+    if (window.lucide) window.lucide.createIcons();
+  });
+</script>
 </body>
 </html>

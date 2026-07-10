@@ -76,7 +76,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="Salamono Safety", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="Perimetr", version="0.1.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -102,7 +102,7 @@ async def basic_auth(request: Request, call_next):
     return Response(
         status_code=401,
         content="Unauthorized",
-        headers={"WWW-Authenticate": 'Basic realm="Salamono"'},
+        headers={"WWW-Authenticate": 'Basic realm="Perimetr"'},
     )
 
 app.include_router(ingest.router, prefix="/api")

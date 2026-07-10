@@ -1,8 +1,10 @@
-# Salamono Safety — MVP
+# Perimetr — MVP
 
 System bezpieczenstwa na budowie oparty o AI i wizje komputerowa.
-Automatycznie wykrywa niebezpieczne sytuacje (pracownik za blisko pojazdu)
-i alarmuje kierownika budowy w czasie rzeczywistym.
+Automatycznie wykrywa niebezpieczne sytuacje (pracownik za blisko pojazdu,
+wejscie w strefe niebezpieczna, brak PPE na bramce) i alarmuje kierownika
+budowy w czasie rzeczywistym. Repo nadal fizycznie nazywa sie `Salamono2` —
+przemianowanie po rejestracji domeny/TM.
 
 ## Architektura
 
