@@ -64,6 +64,32 @@ Parametry mozna ustawic przez zmienne srodowiskowe:
 | `DANGER_CONSECUTIVE_FRAMES` | `3` | Ile klatek z rzedu = alarm |
 | `DANGER_COOLDOWN_SEC` | `10` | Przerwa miedzy powtornymi alarmami |
 | `SERVER_PORT` | `8000` | Port serwera |
+| `PANEL_PASSWORD` | `` (off) | Jesli ustawione, panel wymaga HTTP basic auth |
+| `DEMO_TOKEN` | `` (off) | Jesli ustawione, `?demo=<TOKEN>` omija auth i ustawia cookie |
+
+### Demo w iframe (pitch)
+
+Zeby wkleic panel jako iframe do slajdu pitcha:
+
+1. Na Railway ustaw `DEMO_TOKEN` na losowy sekret, np.:
+   ```bash
+   openssl rand -hex 24
+   ```
+2. W slajdzie HTML wklej:
+   ```html
+   <iframe src="https://twoj-railway.up.railway.app/?demo=TWOJ_TOKEN"
+           style="width:100%;height:100%;border:0"
+           allow="camera; microphone; autoplay"></iframe>
+   ```
+3. Pierwszy request ustawia cookie `perimetr_demo` (12h, `SameSite=None; Secure`),
+   wiec kolejne fetchi assetow i WebSocket przechodza bez query paramu.
+
+CSP `frame-ancestors *` jest ustawiane przez backend automatycznie,
+aby iframe dzialal z dowolnego origin.
+
+**Bezpieczenstwo:** token to `secrets.compare_digest`-owy check, ale ma tylko
+jeden poziom (wszystko-albo-nic). Do prod z wieloma uzytkownikami dodaj OAuth
+albo per-user access tokens.
 
 ## API
 

@@ -27,6 +27,11 @@ ZONES_PATH = os.path.join(CONFIG.flagged_frames_dir, "..", "zones.json")
 CALIBRATION_PATH = os.path.join(CONFIG.flagged_frames_dir, "..", "calibration.json")
 
 PANEL_PASSWORD = os.getenv("PANEL_PASSWORD", "")
+DEMO_TOKEN = os.getenv("DEMO_TOKEN", "")
+DEMO_COOKIE = "perimetr_demo"
+# 12-hour cookie so a pitch can run without re-auth even after tab reloads.
+DEMO_COOKIE_MAX_AGE = 12 * 60 * 60
+
 PUBLIC_PATHS = {"/api/health"}
 
 
@@ -76,7 +81,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="Perimetr", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="Perimetr", version="1.0.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -87,9 +92,39 @@ app.add_middleware(
 
 
 @app.middleware("http")
+async def frame_headers(request: Request, call_next):
+    """Allow iframe embedding from any origin (Adam wkleja panel do pitch
+    HTML). CSP frame-ancestors * jest nowoczesną wersją X-Frame-Options
+    ALLOWALL i honorują ją Chrome / Firefox / Safari."""
+    response = await call_next(request)
+    response.headers.setdefault("Content-Security-Policy", "frame-ancestors *")
+    return response
+
+
+@app.middleware("http")
 async def basic_auth(request: Request, call_next):
     if not PANEL_PASSWORD or request.url.path in PUBLIC_PATHS:
         return await call_next(request)
+
+    # 1) Demo token via query param — sets a cookie so subsequent asset
+    #    requests (style.css, tokens/msbp.css, app.js…) pass through.
+    if DEMO_TOKEN and request.query_params.get("demo") == DEMO_TOKEN:
+        response = await call_next(request)
+        response.set_cookie(
+            key=DEMO_COOKIE,
+            value=DEMO_TOKEN,
+            max_age=DEMO_COOKIE_MAX_AGE,
+            httponly=True,
+            secure=True,
+            samesite="none",     # required for cross-origin iframe embeds
+        )
+        return response
+
+    # 2) Demo cookie set earlier in the same session — silent pass.
+    if DEMO_TOKEN and request.cookies.get(DEMO_COOKIE) == DEMO_TOKEN:
+        return await call_next(request)
+
+    # 3) Classic HTTP basic auth.
     header = request.headers.get("Authorization", "")
     if header.startswith("Basic "):
         try:
@@ -99,6 +134,7 @@ async def basic_auth(request: Request, call_next):
                 return await call_next(request)
         except Exception:
             pass
+
     return Response(
         status_code=401,
         content="Unauthorized",
