@@ -22,7 +22,7 @@ class DangerConfig:
 @dataclass
 class IngestConfig:
     max_frame_size_bytes: int = 2_000_000
-    target_fps: float = 3.0
+    target_fps: float = 10.0
     jpeg_quality: int = 80
 
 

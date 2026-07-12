@@ -12,6 +12,11 @@ class Zone(BaseModel):
     name: str = "Strefa"
     severity: str = "DANGER"                  # WARNING or DANGER
     polygon: list[list[float]] = []           # [[x, y], ...] normalized 0-1
+    # Optional: if non-empty, this zone is *defined by ArUco markers*.
+    # Polygon is recomputed in each frame from marker centres (ordered by
+    # the list here, so [10, 20, 30, 40] gives TL → TR → BR → BL).
+    # `polygon` field is used as fallback cache written to disk.
+    marker_ids: list[int] = []
     active: bool = True
     created_at: float = Field(default_factory=time.time)
 

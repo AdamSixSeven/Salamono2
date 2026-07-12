@@ -6,14 +6,19 @@ import cv2
 import numpy as np
 from fastapi import APIRouter, File, Form, Request, UploadFile
 
+from backend.calibration import Calibration
 from backend.danger_rules import DangerEvent
 from backend.detector import Detection
+from backend.marker_detector import MarkerDetection
 from backend.models import (
+    ActiveZoneOut,
     AlarmRecord,
     AlertOut,
     AlertSeverity,
     DetectionOut,
     FrameResultOut,
+    MarkerDetectionOut,
+    PersonDistanceOut,
     PPECheckOut,
     ZoneBreachOut,
 )
@@ -106,6 +111,127 @@ COLOR_VEST = (0, 255, 255)
 COLOR_OK = (0, 200, 0)
 COLOR_ZONE_WARN = (0, 200, 255)
 COLOR_ZONE_DANGER = (60, 60, 255)
+COLOR_MARKER = (255, 0, 255)
+COLOR_MARKER_ACTIVE = (0, 255, 255)
+
+# How long a marker-defined zone remembers its last polygon after all
+# corner markers stop being visible. Keeps the zone alive across brief
+# occlusions instead of flickering off for a frame or two.
+MARKER_ZONE_CACHE_TTL = 2.0
+
+
+def _resolve_marker_zones(zones, markers, camera_id: str,
+                          cache: dict, now: float,
+                          frame_w: int, frame_h: int):
+    """Return zones with their polygon field filled in from marker positions.
+
+    - Regular (polygon) zones pass through unchanged.
+    - Marker-defined zones: if all corner markers visible → recompute polygon
+      from their centres and refresh cache. If some missing → fall back to
+      last-seen polygon if fresh (< MARKER_ZONE_CACHE_TTL), otherwise drop
+      the zone from this frame.
+    """
+    by_id = {m.marker_id: m for m in markers}
+    resolved = []
+    for z in zones:
+        if not z.marker_ids:
+            resolved.append(z)
+            continue
+        centres = []
+        all_visible = True
+        for mid in z.marker_ids:
+            m = by_id.get(int(mid))
+            if m is None:
+                all_visible = False
+                break
+            cx, cy = m.center
+            centres.append([cx / frame_w, cy / frame_h])
+        cache_key = (camera_id, z.id)
+        if all_visible:
+            cache[cache_key] = (centres, now)
+            polygon = centres
+        else:
+            cached = cache.get(cache_key)
+            if cached and (now - cached[1]) < MARKER_ZONE_CACHE_TTL:
+                polygon = cached[0]
+            else:
+                continue
+        z_copy = z.model_copy()
+        z_copy.polygon = polygon
+        resolved.append(z_copy)
+    return resolved
+
+
+def _marker_to_out(m: MarkerDetection) -> MarkerDetectionOut:
+    return MarkerDetectionOut(
+        marker_id=m.marker_id,
+        corners=[[float(x), float(y)] for x, y in m.corners],
+        center=[float(m.center[0]), float(m.center[1])],
+    )
+
+
+def _person_distances(persons: list[Detection],
+                      calibration: Calibration | None,
+                      ) -> list[PersonDistanceOut]:
+    if calibration is None:
+        return []
+    out: list[PersonDistanceOut] = []
+    for p in persons:
+        x1, y1, x2, y2 = p.box
+        foot_x = (x1 + x2) / 2.0
+        foot_y = float(y2)
+        d = calibration.distance_to_boundary_m(foot_x, foot_y)
+        out.append(PersonDistanceOut(
+            person_box=[int(x1), int(y1), int(x2), int(y2)],
+            distance_m=round(d, 2),
+            inside=d <= 0.0,
+        ))
+    return out
+
+
+def _annotate_markers(frame: np.ndarray,
+                      markers: list[MarkerDetection],
+                      calibration_ids: set[int]) -> np.ndarray:
+    if not markers:
+        return frame
+    out = frame
+    for m in markers:
+        pts = np.array([[int(round(x)), int(round(y))] for x, y in m.corners],
+                       dtype=np.int32)
+        color = COLOR_MARKER_ACTIVE if m.marker_id in calibration_ids else COLOR_MARKER
+        cv2.polylines(out, [pts], isClosed=True, color=color, thickness=2,
+                      lineType=cv2.LINE_AA)
+        cx, cy = m.center
+        cv2.putText(out, f"ID {m.marker_id}",
+                    (int(cx) - 20, int(cy) + 4),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2, cv2.LINE_AA)
+    return out
+
+
+def _annotate_person_distances(frame: np.ndarray,
+                               distances: list[PersonDistanceOut]) -> np.ndarray:
+    if not distances:
+        return frame
+    out = frame
+    for d in distances:
+        x1, y1, x2, y2 = d.person_box
+        if d.inside:
+            label = f"WEWNATRZ ({abs(d.distance_m):.1f} m od granicy)"
+            color = COLOR_DANGER
+        else:
+            label = f"{d.distance_m:.1f} m od strefy"
+            color = COLOR_OK if d.distance_m > 1.5 else COLOR_WARNING
+        (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 1)
+        # Draw slightly below the person bbox top so it doesn't collide with
+        # the class label rendered above the bbox by _annotate_site.
+        text_x = x1
+        text_y = min(y2 + th + 8, frame.shape[0] - 4)
+        cv2.rectangle(out, (text_x, text_y - th - 4),
+                      (text_x + tw + 6, text_y + 2), color, -1)
+        cv2.putText(out, label, (text_x + 3, text_y - 2),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1,
+                    cv2.LINE_AA)
+    return out
 
 
 def _det_to_out(d: Detection) -> DetectionOut:
@@ -289,20 +415,58 @@ async def _handle_site(request: Request, frame: np.ndarray, now: float,
     zone_store = request.app.state.zone_store
     zone_detector = request.app.state.zone_detector
     zone_temporal_filter = request.app.state.zone_temporal_filter
+    marker_detector = request.app.state.marker_detector
+    calibration_store = request.app.state.calibration_store
 
     detections = detector.detect(frame)
+
+    # Debug: inject a synthetic person into the detection list for N frames.
+    # Adam wanted to test the alarm without physically walking into the zone.
+    inj = request.app.state.debug_inject_person
+    if inj and inj.get("remaining", 0) > 0:
+        fh_i, fw_i = frame.shape[:2]
+        x1n, y1n, x2n, y2n = inj["box_norm"]
+        fake = Detection(
+            class_id=0,
+            class_name="person",
+            category="person",
+            box=(int(x1n * fw_i), int(y1n * fh_i),
+                 int(x2n * fw_i), int(y2n * fh_i)),
+            confidence=float(inj["confidence"]),
+        )
+        detections.append(fake)
+        inj["remaining"] -= 1
+        if inj["remaining"] <= 0:
+            request.app.state.debug_inject_person = None
+
     raw_dangers = danger_detector.evaluate(detections, now)
     confirmed = temporal_filter.update(raw_dangers, now)
 
     zones = zone_store.for_camera(camera_id)
     fh, fw = frame.shape[:2]
+
+    markers = marker_detector.detect(frame)
+    # Marker-defined zones get their polygon recomputed from live markers
+    # before running breach evaluation.
+    zones = _resolve_marker_zones(
+        zones, markers, camera_id,
+        request.app.state.marker_zone_cache,
+        now, fw, fh,
+    )
     raw_zone_breaches = zone_detector.evaluate(
         detections, zones, fw, fh, now,
     )
     confirmed_zone_breaches = zone_temporal_filter.update(raw_zone_breaches, now)
 
+    calibration = calibration_store.get(camera_id)
+    persons = [d for d in detections if d.category == "person"]
+    person_distances = _person_distances(persons, calibration)
+
     annotated = _annotate_zones(frame, zones, raw_zone_breaches)
     annotated = _annotate_site(annotated, detections, raw_dangers, confirmed)
+    calibration_ids = set(calibration.marker_ids) if calibration else set()
+    annotated = _annotate_markers(annotated, markers, calibration_ids)
+    annotated = _annotate_person_distances(annotated, person_distances)
 
     alert_outs = []
     for evt in confirmed:
@@ -323,6 +487,20 @@ async def _handle_site(request: Request, frame: np.ndarray, now: float,
     active_outs = [_event_to_alert(e, "active") for e in raw_dangers]
     active_zone_outs = [_zone_to_out(z, "active") for z in raw_zone_breaches]
 
+    # Ship the resolved zones so the frontend can draw marker-zone polygons
+    # (their stored polygon is empty; the live one only exists in memory).
+    active_zones_out = [
+        ActiveZoneOut(
+            id=z.id,
+            name=z.name,
+            severity=z.severity,
+            polygon=z.polygon,
+            marker_ids=list(z.marker_ids or []),
+        )
+        for z in zones
+        if z.active and z.polygon and len(z.polygon) >= 3
+    ]
+
     _, jpeg_buf = cv2.imencode(".jpg", annotated,
                                [cv2.IMWRITE_JPEG_QUALITY, 75])
     b64 = base64.b64encode(jpeg_buf).decode()
@@ -339,6 +517,10 @@ async def _handle_site(request: Request, frame: np.ndarray, now: float,
         confirmed_alerts=alert_outs,
         active_zone_breaches=active_zone_outs,
         confirmed_zone_breaches=zone_breach_outs,
+        markers=[_marker_to_out(m) for m in markers],
+        person_distances=person_distances,
+        active_zones=active_zones_out,
+        calibration_active=calibration is not None,
         frame_jpeg_b64=b64,
         processing_ms=round(processing_ms, 1),
     )

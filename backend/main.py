@@ -9,12 +9,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from backend.alert_storage import AlertStore
+from backend.calibration import CalibrationStore
 from backend.danger_rules import DangerDetector, TemporalFilter
 from backend.detector import Detector, PPE_CATEGORIES
 from backend.frame_store import FrameStore
+from backend.marker_detector import MarkerDetector
 from backend.models import StatsOut
 from backend.ppe_rules import PPEChecker
-from backend.routes import alerts, ingest, ws, zones
+from backend.routes import alerts, calibration, debug, ingest, pair, ws, zones
 from backend.ws_manager import ConnectionManager
 from backend.zone_rules import ZoneBreachDetector, ZoneTemporalFilter
 from backend.zones_store import ZoneStore
@@ -22,8 +24,14 @@ from config import CONFIG
 
 ALERTS_LOG_PATH = os.path.join(CONFIG.flagged_frames_dir, "..", "alerts.jsonl")
 ZONES_PATH = os.path.join(CONFIG.flagged_frames_dir, "..", "zones.json")
+CALIBRATION_PATH = os.path.join(CONFIG.flagged_frames_dir, "..", "calibration.json")
 
 PANEL_PASSWORD = os.getenv("PANEL_PASSWORD", "")
+DEMO_TOKEN = os.getenv("DEMO_TOKEN", "")
+DEMO_COOKIE = "perimetr_demo"
+# 12-hour cookie so a pitch can run without re-auth even after tab reloads.
+DEMO_COOKIE_MAX_AGE = 12 * 60 * 60
+
 PUBLIC_PATHS = {"/api/health"}
 
 
@@ -60,12 +68,20 @@ async def lifespan(app: FastAPI):
         required=CONFIG.danger.consecutive_frames_required,
         cooldown_sec=CONFIG.danger.cooldown_seconds,
     )
+    app.state.marker_detector = MarkerDetector()
+    app.state.calibration_store = CalibrationStore(CALIBRATION_PATH)
+    # In-memory cache of last-seen polygon per marker-defined zone.
+    # Format: {(camera_id, zone_id): (polygon_normalized, last_seen_ts)}
+    app.state.marker_zone_cache = {}
+    # Debug: inject a synthetic person detection into the next N frames.
+    # None when idle. See backend/routes/debug.py.
+    app.state.debug_inject_person = None
     app.state.frame_counter = 0
     app.state.start_time = time.time()
     yield
 
 
-app = FastAPI(title="Salamono Safety", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="Perimetr", version="1.0.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -76,9 +92,39 @@ app.add_middleware(
 
 
 @app.middleware("http")
+async def frame_headers(request: Request, call_next):
+    """Allow iframe embedding from any origin (Adam wkleja panel do pitch
+    HTML). CSP frame-ancestors * jest nowoczesną wersją X-Frame-Options
+    ALLOWALL i honorują ją Chrome / Firefox / Safari."""
+    response = await call_next(request)
+    response.headers.setdefault("Content-Security-Policy", "frame-ancestors *")
+    return response
+
+
+@app.middleware("http")
 async def basic_auth(request: Request, call_next):
     if not PANEL_PASSWORD or request.url.path in PUBLIC_PATHS:
         return await call_next(request)
+
+    # 1) Demo token via query param — sets a cookie so subsequent asset
+    #    requests (style.css, tokens/msbp.css, app.js…) pass through.
+    if DEMO_TOKEN and request.query_params.get("demo") == DEMO_TOKEN:
+        response = await call_next(request)
+        response.set_cookie(
+            key=DEMO_COOKIE,
+            value=DEMO_TOKEN,
+            max_age=DEMO_COOKIE_MAX_AGE,
+            httponly=True,
+            secure=True,
+            samesite="none",     # required for cross-origin iframe embeds
+        )
+        return response
+
+    # 2) Demo cookie set earlier in the same session — silent pass.
+    if DEMO_TOKEN and request.cookies.get(DEMO_COOKIE) == DEMO_TOKEN:
+        return await call_next(request)
+
+    # 3) Classic HTTP basic auth.
     header = request.headers.get("Authorization", "")
     if header.startswith("Basic "):
         try:
@@ -88,15 +134,19 @@ async def basic_auth(request: Request, call_next):
                 return await call_next(request)
         except Exception:
             pass
+
     return Response(
         status_code=401,
         content="Unauthorized",
-        headers={"WWW-Authenticate": 'Basic realm="Salamono"'},
+        headers={"WWW-Authenticate": 'Basic realm="Perimetr"'},
     )
 
 app.include_router(ingest.router, prefix="/api")
 app.include_router(alerts.router, prefix="/api")
 app.include_router(zones.router, prefix="/api")
+app.include_router(calibration.router, prefix="/api")
+app.include_router(debug.router, prefix="/api")
+app.include_router(pair.router, prefix="/api")
 app.include_router(ws.router)
 
 

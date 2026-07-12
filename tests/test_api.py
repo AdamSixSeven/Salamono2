@@ -12,8 +12,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from backend.main import app
 from backend.alert_storage import AlertStore
+from backend.calibration import CalibrationStore
 from backend.detector import Detection
 from backend.danger_rules import DangerDetector, TemporalFilter
+from backend.marker_detector import MarkerDetector
 from backend.ws_manager import ConnectionManager
 from backend.frame_store import FrameStore
 from backend.zone_rules import ZoneBreachDetector, ZoneTemporalFilter
@@ -49,6 +51,10 @@ def init_app_state(tmp_path):
         required=CONFIG.danger.consecutive_frames_required,
         cooldown_sec=CONFIG.danger.cooldown_seconds,
     )
+    app.state.marker_detector = MarkerDetector()
+    app.state.calibration_store = CalibrationStore(str(tmp_path / "calibration.json"))
+    app.state.marker_zone_cache = {}
+    app.state.debug_inject_person = None
     app.state.ppe_detector = None
     app.state.ppe_checker = None
     app.state.frame_counter = 0

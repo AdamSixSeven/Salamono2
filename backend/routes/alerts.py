@@ -10,6 +10,7 @@ async def get_alerts(
     request: Request,
     mode: str | None = None,
     severity: str | None = None,
+    kind: str | None = None,
     since: float | None = None,
     until: float | None = None,
     limit: int = 100,
@@ -19,11 +20,21 @@ async def get_alerts(
     return store.query(
         mode=mode,
         severity=severity,
+        kind=kind,
         since=since,
         until=until,
         limit=max(1, min(limit, 500)),
         offset=max(0, offset),
     )
+
+
+@router.get("/alerts/summary")
+async def get_alerts_summary(
+    request: Request,
+    since: float | None = None,
+    until: float | None = None,
+):
+    return request.app.state.alert_store.summary(since=since, until=until)
 
 
 @router.get("/alerts/{record_id}", response_model=AlarmRecord)

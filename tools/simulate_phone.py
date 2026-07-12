@@ -18,7 +18,7 @@ def main():
     parser.add_argument("--video", required=True, help="Video file path")
     parser.add_argument("--server", default="http://localhost:8000",
                         help="Backend URL")
-    parser.add_argument("--fps", type=float, default=2.0,
+    parser.add_argument("--fps", type=float, default=10.0,
                         help="Frames per second to send")
     parser.add_argument("--loop", action="store_true",
                         help="Loop video continuously")

@@ -3,20 +3,46 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Salamono — Kamera</title>
+    <title>Perimetr — Kamera on-site</title>
+    <link rel="stylesheet" href="/tokens/msbp.css">
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
-            font-family: system-ui, sans-serif;
-            background: #111;
-            color: #eee;
+            font-family: var(--font-sans, system-ui, sans-serif);
+            background: #0A0A0A;
+            color: #FAFAF8;
             display: flex;
             flex-direction: column;
             align-items: center;
             min-height: 100vh;
             padding: 16px;
         }
-        h1 { font-size: 18px; margin-bottom: 12px; letter-spacing: 1px; }
+        .brand {
+            display: inline-flex;
+            align-items: center;
+            border: 3px solid #DD211C;
+            border-radius: 12px;
+            padding: 1px 14px 5px;
+            margin-bottom: 12px;
+        }
+        .brand-word {
+            font-family: var(--font-display, "Barlow Condensed", sans-serif);
+            font-size: 27px;
+            font-weight: 300;
+            line-height: 1;
+            letter-spacing: 0.045em;
+            color: #DD211C;
+            text-transform: lowercase;
+        }
+        h1 {
+            font-family: var(--font-display, "Barlow Condensed", sans-serif);
+            font-size: 14px;
+            font-weight: 400;
+            letter-spacing: 0.24em;
+            text-transform: uppercase;
+            color: #A8A8A8;
+            margin-bottom: 12px;
+        }
         #preview {
             width: 100%;
             max-width: 640px;
@@ -38,8 +64,8 @@
             border-radius: 6px;
             cursor: pointer;
         }
-        #startBtn { background: #4caf50; color: white; }
-        #stopBtn { background: #f44336; color: white; }
+        #startBtn { background: #DD211C; color: #FAFAF8; letter-spacing: 0.14em; text-transform: uppercase; border-radius: 2px; }
+        #stopBtn { background: #2B2B2B; color: #FAFAF8; letter-spacing: 0.14em; text-transform: uppercase; border-radius: 2px; }
         #stopBtn:disabled, #startBtn:disabled {
             opacity: 0.4;
             cursor: not-allowed;
@@ -76,29 +102,48 @@
             border-radius: 6px;
             text-align: center;
         }
-        .status-ok { background: #0a3d0a; color: #4caf50; }
-        .status-err { background: #3d0a0a; color: #f44336; }
-        .status-idle { background: #222; color: #666; }
-        #stats { font-size: 12px; color: #666; margin-top: 8px; }
+        .status-ok { background: rgba(31, 122, 77, 0.15); color: #64d38c; }
+        .status-err { background: rgba(221, 33, 28, 0.15); color: #ff8480; }
+        .status-idle { background: #1a1a1a; color: #6B6B6B; }
+        #stats { font-size: 12px; color: #6B6B6B; margin-top: 8px; font-family: var(--font-mono, monospace); }
+        .voice-toggle {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 13px;
+            color: #eee;
+            padding: 6px 10px;
+            border: 1px solid #333;
+            border-radius: 4px;
+            background: #222;
+            cursor: pointer;
+        }
+        .voice-toggle input { accent-color: #4caf50; }
     </style>
 </head>
 <body>
-    <h1>SALAMONO KAMERA</h1>
+    <span class="brand"><span class="brand-word">perimetr</span></span>
+    <h1>Kamera on-site</h1>
 
     <div class="config">
         <label>Serwer:</label>
         <input type="text" id="serverUrl" placeholder="http://localhost:8000">
         <label>FPS:</label>
         <select id="fpsSelect">
-            <option value="1">1</option>
-            <option value="2" selected>2</option>
-            <option value="3">3</option>
+            <option value="2">2</option>
+            <option value="5">5</option>
+            <option value="10" selected>10</option>
+            <option value="15">15</option>
         </select>
         <label>Tryb:</label>
         <select id="modeSelect">
             <option value="site">Plac (pojazdy)</option>
             <option value="checkpoint">Bramka (PPE)</option>
         </select>
+        <label class="voice-toggle">
+            <input type="checkbox" id="voiceToggle" checked>
+            <span>Ostrzeżenia głosowe</span>
+        </label>
     </div>
 
     <video id="preview" autoplay playsinline muted></video>
@@ -119,8 +164,114 @@
         var serverInput = document.getElementById("serverUrl");
         var fpsSelect = document.getElementById("fpsSelect");
         var modeSelect = document.getElementById("modeSelect");
+        var voiceToggle = document.getElementById("voiceToggle");
         var statusBar = document.getElementById("statusBar");
         var statsEl = document.getElementById("stats");
+
+        // ---- Voice warnings (Web Speech API) ------------------------------
+        // Michał S. (2026-07-08): najważniejszy filar produktu — komunikat
+        // głosowy on-site gdy pracownik zbliża się do strefy niebezpiecznej.
+        var voiceSupported = "speechSynthesis" in window;
+        var voiceCooldownMs = 5000;
+        var lastSpokenAt = {}; // message-key → epoch ms
+        var plVoice = null;
+
+        var storedVoice = localStorage.getItem("salamonoVoice");
+        if (storedVoice !== null) voiceToggle.checked = storedVoice === "1";
+        voiceToggle.onchange = function() {
+            localStorage.setItem("salamonoVoice", voiceToggle.checked ? "1" : "0");
+            if (!voiceToggle.checked && voiceSupported) speechSynthesis.cancel();
+        };
+
+        function pickPolishVoice() {
+            if (!voiceSupported) return;
+            var voices = speechSynthesis.getVoices();
+            plVoice = voices.find(function(v) { return v.lang === "pl-PL"; })
+                   || voices.find(function(v) { return v.lang && v.lang.startsWith("pl"); })
+                   || null;
+        }
+        if (voiceSupported) {
+            pickPolishVoice();
+            speechSynthesis.onvoiceschanged = pickPolishVoice;
+        }
+
+        // Cooldown zależny od priorytetu — krzyk PPE powtarzamy szybciej
+        // (2s) bo chcemy żeby pracownik faktycznie zareagował, nie tylko
+        // usłyszał raz.
+        var COOLDOWN_MS = { shout: 2000, danger: 5000, warning: 5000 };
+
+        function speak(text, key, priority) {
+            if (!voiceSupported || !voiceToggle.checked) return;
+            var now = Date.now();
+            var last = lastSpokenAt[key] || 0;
+            var cd = COOLDOWN_MS[priority] || 5000;
+            if (now - last < cd) return;
+            lastSpokenAt[key] = now;
+            if (priority === "danger" || priority === "shout") {
+                speechSynthesis.cancel();
+            }
+            var u = new SpeechSynthesisUtterance(text);
+            u.lang = "pl-PL";
+            if (plVoice) u.voice = plVoice;
+            if (priority === "shout") {
+                u.rate = 1.25;
+                u.pitch = 1.35;
+            } else if (priority === "danger") {
+                u.rate = 1.15;
+                u.pitch = 1.15;
+            } else {
+                u.rate = 1.0;
+                u.pitch = 1.0;
+            }
+            u.volume = 1.0;
+            speechSynthesis.speak(u);
+        }
+
+        function announceAlerts(data) {
+            if (!voiceToggle.checked) return;
+
+            // Zone breaches — najważniejszy alert wg Michała
+            // (uwaga żuraw / uwaga szyb / uwaga wykop).
+            (data.confirmed_zone_breaches || []).forEach(function(b) {
+                var isDanger = b.severity === "DANGER";
+                var text = isDanger
+                    ? "Stop! Strefa niebezpieczna: " + b.zone_name
+                    : "Uwaga: " + b.zone_name;
+                speak(text, "zone_" + b.zone_id + "_" + b.severity,
+                      isDanger ? "danger" : "warning");
+            });
+
+            // Site hazards — osoba obok pojazdu / w strefie pojazdu.
+            (data.confirmed_alerts || []).forEach(function(a) {
+                var isOverlap = a.rule_name === "person_vehicle_overlap";
+                var isDanger = a.severity === "DANGER";
+                var text = isOverlap
+                    ? "Stop! Osoba w strefie pojazdu"
+                    : "Uwaga: osoba zbyt blisko pojazdu";
+                speak(text, "hazard_" + a.rule_name,
+                      isDanger ? "danger" : "warning");
+            });
+
+            // PPE — krzyk bezpośrednio na pracownika. Adam W. + Michał S.
+            // (2026-07-09): brak kaska/kamizelki = pracownik ma zareagować
+            // NATYCHMIAST, nie usłyszeć subtelne "uwaga". Wyższy pitch/rate,
+            // krótszy cooldown (2s), formy rozkazujące.
+            (data.ppe_checks || []).forEach(function(c) {
+                if (c.severity !== "DANGER" || !c.missing || !c.missing.length) return;
+                var missing = c.missing.slice().sort();
+                var text;
+                if (missing.indexOf("hardhat") >= 0 && missing.indexOf("vest") >= 0) {
+                    text = "HEJ! Kask i kamizelka natychmiast!";
+                } else if (missing.indexOf("hardhat") >= 0) {
+                    text = "HEJ! Załóż kask!";
+                } else if (missing.indexOf("vest") >= 0) {
+                    text = "HEJ! Ubierz kamizelkę!";
+                } else {
+                    text = "HEJ! Załóż sprzęt ochronny!";
+                }
+                speak(text, "ppe_" + missing.join("_"), "shout");
+            });
+        }
 
         var params = new URLSearchParams(location.search);
         if (params.get("server")) {
@@ -136,19 +287,30 @@
             localStorage.setItem("salamonoMode", modeSelect.value);
         };
 
-        var intervalId = null;
+        var loopTimer = null;
         var captureCanvas = document.createElement("canvas");
-        captureCanvas.width = 640;
-        captureCanvas.height = 480;
         var captureCtx = captureCanvas.getContext("2d");
         var framesSent = 0;
+        var framesSkipped = 0;
         var errorsCount = 0;
+        var inFlight = false;      // true dopóki poprzednia klatka nie wróciła
+        var running = false;
+        var lastProcMs = 0;
+        // Target dłuższy bok. YOLO robi resize do 640 wewnętrznie, ale
+        // wysyłanie 960px z telefonu na Railway to duży JPEG (~150KB) —
+        // zejście do 640 tnie payload ~2x bez utraty jakości detekcji.
+        var TARGET_LONG_EDGE = 640;
 
         startBtn.onclick = function() {
             navigator.mediaDevices.getUserMedia({
-                video: { facingMode: "environment", width: 640, height: 480 }
+                video: {
+                    facingMode: "environment",
+                    width:  { ideal: 1280 },
+                    height: { ideal: 720 }
+                }
             }).then(function(stream) {
                 video.srcObject = stream;
+                video.addEventListener("loadedmetadata", sizeCaptureCanvas, { once: true });
                 startCapture();
                 startBtn.disabled = true;
                 stopBtn.disabled = false;
@@ -157,6 +319,15 @@
                 statusBar.className = "status-err";
             });
         };
+
+        function sizeCaptureCanvas() {
+            var vw = video.videoWidth || 640;
+            var vh = video.videoHeight || 480;
+            var long = Math.max(vw, vh);
+            var scale = long > TARGET_LONG_EDGE ? TARGET_LONG_EDGE / long : 1;
+            captureCanvas.width  = Math.round(vw * scale);
+            captureCanvas.height = Math.round(vh * scale);
+        }
 
         stopBtn.onclick = function() {
             stopCapture();
@@ -170,59 +341,92 @@
             statusBar.className = "status-idle";
         };
 
+        function scheduleNext(minInterval) {
+            if (!running) return;
+            loopTimer = setTimeout(sendOneFrame, minInterval);
+        }
+
+        function sendOneFrame() {
+            if (!running) return;
+            // Backpressure: jeśli poprzednia klatka jeszcze leci, poczekaj.
+            // Tempo wysyłania samo dostraja się do throughput backendu.
+            if (inFlight) {
+                framesSkipped++;
+                scheduleNext(20);
+                return;
+            }
+            if (!captureCanvas.width || !captureCanvas.height) sizeCaptureCanvas();
+            captureCtx.drawImage(video, 0, 0, captureCanvas.width, captureCanvas.height);
+            captureCanvas.toBlob(function(blob) {
+                if (!blob || !running) { scheduleNext(50); return; }
+                inFlight = true;
+                var fps = parseInt(fpsSelect.value) || 10;
+                var targetInterval = 1000 / fps;
+                var t0 = performance.now();
+
+                var form = new FormData();
+                form.append("image", blob, "frame.jpg");
+                // Must match CAMERA_ID in frontend/zones.js — otherwise the
+                // backend looks up zones for a different camera and returns
+                // an empty polygon set even when markers are visible.
+                form.append("camera_id", "cam_default");
+                form.append("timestamp", String(Date.now() / 1000));
+                form.append("mode", modeSelect.value);
+                var serverUrl = serverInput.value.replace(/\/$/, "");
+
+                fetch(serverUrl + "/api/frame", {
+                    method: "POST",
+                    body: form,
+                    credentials: "same-origin"
+                }).then(function(resp) {
+                    if (resp.ok) {
+                        framesSent++;
+                        statusBar.textContent = "Wysylanie — klatka " + framesSent;
+                        statusBar.className = "status-ok";
+                        return resp.json();
+                    }
+                    throw new Error("HTTP " + resp.status);
+                }).then(function(data) {
+                    announceAlerts(data);
+                    lastProcMs = data.processing_ms || 0;
+                    var alerts = (data.confirmed_alerts ? data.confirmed_alerts.length : 0)
+                               + (data.ppe_checks ? data.ppe_checks.filter(function(c){return c.severity==="DANGER";}).length : 0);
+                    statsEl.textContent =
+                        "Tryb: " + (data.mode || "?") +
+                        " | Wyslane: " + framesSent +
+                        " | Detekcja: " + lastProcMs.toFixed(0) + "ms" +
+                        " | Alarmy: " + alerts +
+                        " | Pominiete: " + framesSkipped +
+                        " | Bledy: " + errorsCount;
+                }).catch(function() {
+                    errorsCount++;
+                    statusBar.textContent = "Blad polaczenia (" + errorsCount + ")";
+                    statusBar.className = "status-err";
+                }).finally(function() {
+                    inFlight = false;
+                    // Round-trip zajął `rtt` ms. Jeśli backend jest wolniejszy
+                    // niż nasz target FPS, wysyłamy natychmiast (kolejny gate
+                    // to i tak inFlight). Jeśli szybszy — spimy do targetu.
+                    var rtt = performance.now() - t0;
+                    var wait = Math.max(0, targetInterval - rtt);
+                    scheduleNext(wait);
+                });
+            }, "image/jpeg", 0.7);
+        }
+
         function startCapture() {
-            var fps = parseInt(fpsSelect.value);
-            var interval = 1000 / fps;
             framesSent = 0;
+            framesSkipped = 0;
             errorsCount = 0;
-
-            intervalId = setInterval(function() {
-                captureCtx.drawImage(video, 0, 0, 640, 480);
-                captureCanvas.toBlob(function(blob) {
-                    if (!blob) return;
-                    var form = new FormData();
-                    form.append("image", blob, "frame.jpg");
-                    form.append("camera_id", "phone_1");
-                    form.append("timestamp", String(Date.now() / 1000));
-                    form.append("mode", modeSelect.value);
-
-                    var serverUrl = serverInput.value.replace(/\/$/, "");
-
-                    fetch(serverUrl + "/api/frame", {
-                        method: "POST",
-                        body: form,
-                        credentials: "same-origin"
-                    }).then(function(resp) {
-                        if (resp.ok) {
-                            framesSent++;
-                            statusBar.textContent = "Wysylanie — klatka " + framesSent;
-                            statusBar.className = "status-ok";
-                            return resp.json();
-                        }
-                        throw new Error("HTTP " + resp.status);
-                    }).then(function(data) {
-                        var alerts = (data.confirmed_alerts ? data.confirmed_alerts.length : 0)
-                                   + (data.ppe_checks ? data.ppe_checks.filter(function(c){return c.severity==="DANGER";}).length : 0);
-                        statsEl.textContent =
-                            "Tryb: " + (data.mode || "?") +
-                            " | Wyslane: " + framesSent +
-                            " | Detekcja: " + (data.processing_ms || 0).toFixed(0) + "ms" +
-                            " | Alarmy: " + alerts +
-                            " | Bledy: " + errorsCount;
-                    }).catch(function() {
-                        errorsCount++;
-                        statusBar.textContent = "Blad polaczenia (" + errorsCount + ")";
-                        statusBar.className = "status-err";
-                    });
-                }, "image/jpeg", 0.7);
-            }, interval);
+            inFlight = false;
+            running = true;
+            sendOneFrame();
         }
 
         function stopCapture() {
-            if (intervalId) {
-                clearInterval(intervalId);
-                intervalId = null;
-            }
+            running = false;
+            if (loopTimer) { clearTimeout(loopTimer); loopTimer = null; }
+            inFlight = false;
         }
     })();
     </script>
