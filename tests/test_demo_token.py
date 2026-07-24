@@ -1,4 +1,4 @@
-"""Demo token: iframe-friendly auth bypass for pitch presentations."""
+"""Demo-token authentication for cross-origin embedded panels."""
 import base64
 import importlib
 import os
@@ -20,7 +20,7 @@ from backend.zones_store import ZoneStore
 from config import CONFIG
 
 
-TOKEN = "pitch-demo-secret"
+TOKEN = "embedded-demo-secret"
 PASSWORD = "shhh"
 
 

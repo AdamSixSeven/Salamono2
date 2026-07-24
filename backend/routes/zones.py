@@ -12,6 +12,8 @@ class ZoneIn(BaseModel):
     severity: str = "DANGER"
     polygon: list[list[float]] = Field(default_factory=list)
     marker_ids: list[int] = Field(default_factory=list)
+    warning_distance_m: float = Field(default=1.5, ge=0.0, le=100.0)
+    warning_distance_px: float = Field(default=60.0, ge=0.0, le=5000.0)
     active: bool = True
 
 
@@ -75,6 +77,8 @@ async def set_zones(request: Request, camera_id: str, payload: ZonesPayload):
             severity=z_in.severity,
             polygon=z_in.polygon,
             marker_ids=list(z_in.marker_ids),
+            warning_distance_m=z_in.warning_distance_m,
+            warning_distance_px=z_in.warning_distance_px,
             active=z_in.active,
         )
         if z_in.id:

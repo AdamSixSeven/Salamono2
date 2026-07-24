@@ -113,3 +113,93 @@ async def test_alerts_summary_since_until():
         assert body["total"] == 1
         assert body["by_severity"]["DANGER"] == 1
         assert "WARNING" not in body["by_severity"]
+
+@pytest.mark.asyncio
+async def test_alerts_filter_by_worker_and_summary():
+    store = app.state.alert_store
+    rec_a = _make_record("w1", 1700.0, "site_hazard", "DANGER")
+    rec_a.details = {"worker_id": "W-001", "distance_m": 1.2}
+    rec_b = _make_record("w2", 1701.0, "fall_detected", "DANGER")
+    rec_b.details = {"worker_id": "W-002"}
+    rec_c = _make_record("w3", 1702.0, "ppe_missing", "DANGER", mode="checkpoint")
+    rec_c.details = {"worker_id": "W-001"}
+    store.extend([rec_a, rec_b, rec_c])
+
+    async with _client() as c:
+        resp = await c.get("/api/alerts?worker_id=W-001")
+        assert resp.status_code == 200
+        assert {row["id"] for row in resp.json()} == {"w1", "w3"}
+
+        summary = await c.get("/api/workers/summary")
+        assert summary.status_code == 200
+        by_id = {row["worker_id"]: row for row in summary.json()["workers"]}
+        assert by_id["W-001"]["events"] == 2
+        assert by_id["W-001"]["danger_events"] == 2
+
+
+@pytest.mark.asyncio
+async def test_report_csv_contains_worker_and_details():
+    rec = _make_record("csv1", 1800.0, "site_hazard", "DANGER")
+    rec.details = {
+        "worker_id": "W-CSV",
+        "distance_m": 1.25,
+        "calibrated": True,
+    }
+    app.state.alert_store.append(rec)
+
+    async with _client() as c:
+        resp = await c.get("/api/reports/export.csv?worker_id=W-CSV")
+    assert resp.status_code == 200
+    assert resp.content.startswith(b"\xef\xbb\xbf")
+    text = resp.content.decode("utf-8-sig")
+    assert "worker_id" in text
+    assert "W-CSV" in text
+    assert '""distance_m"":1.25' in text
+    assert "attachment;" in resp.headers["content-disposition"]
+
+
+@pytest.mark.asyncio
+async def test_worker_qr_endpoint_returns_svg():
+    async with _client() as c:
+        resp = await c.get("/api/worker-qr?worker_id=W-001")
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("image/svg+xml")
+    assert b"<svg" in resp.content
+
+
+@pytest.mark.asyncio
+async def test_alert_review_workflow_and_filter():
+    app.state.alert_store.append(_make_record("review1", 2000.0, "zone_breach", "DANGER"))
+    async with _client() as c:
+        resp = await c.patch("/api/alerts/review1/review", json={
+            "status": "confirmed",
+            "reviewed_by": "Kierownik BHP",
+            "note": "Potwierdzone na nagraniu.",
+        })
+        assert resp.status_code == 200
+        updated = resp.json()
+        assert updated["review_status"] == "confirmed"
+        assert updated["reviewed_by"] == "Kierownik BHP"
+        assert updated["reviewed_at"] is not None
+
+        filtered = await c.get("/api/alerts?review_status=confirmed")
+        assert [row["id"] for row in filtered.json()] == ["review1"]
+        summary = (await c.get("/api/alerts/summary")).json()
+        assert summary["by_review_status"]["confirmed"] == 1
+
+
+@pytest.mark.asyncio
+async def test_training_export_uses_human_review_labels():
+    confirmed = _make_record("train-ok", 2100.0, "posture_anomaly", "WARNING")
+    false_alarm = _make_record("train-no", 2101.0, "posture_anomaly", "WARNING")
+    app.state.alert_store.extend([confirmed, false_alarm])
+    app.state.alert_store.update_review("train-ok", "confirmed", note="chwiejny chód")
+    app.state.alert_store.update_review("train-no", "false_positive", note="niósł ciężar")
+
+    async with _client() as c:
+        response = await c.get("/api/reports/training.jsonl?review_status=confirmed")
+    assert response.status_code == 200
+    text = response.text
+    assert "train-ok" in text
+    assert "train-no" not in text
+    assert '"label":"confirmed"' in text

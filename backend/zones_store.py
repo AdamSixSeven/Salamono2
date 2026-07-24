@@ -17,6 +17,11 @@ class Zone(BaseModel):
     # the list here, so [10, 20, 30, 40] gives TL → TR → BR → BL).
     # `polygon` field is used as fallback cache written to disk.
     marker_ids: list[int] = []
+    # Early-warning margin outside the polygon.  Metric distance is used when
+    # the camera has a ground-plane calibration; otherwise the pixel fallback
+    # is used.  Entering the polygon still produces the configured severity.
+    warning_distance_m: float = 1.5
+    warning_distance_px: float = 60.0
     active: bool = True
     created_at: float = Field(default_factory=time.time)
 

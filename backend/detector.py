@@ -1,8 +1,6 @@
 from dataclasses import dataclass
 
 import numpy as np
-from ultralytics import YOLO
-
 from config import CONFIG, YOLOConfig
 
 SITE_CATEGORIES: dict[str, list[int]] = {
@@ -41,6 +39,10 @@ class Detector:
         config: YOLOConfig | None = None,
     ):
         cfg = config or CONFIG.yolo
+        # Lazy import keeps lightweight rule/unit tests independent from the
+        # heavyweight inference runtime. Production still fails clearly when
+        # Detector is actually instantiated without ultralytics installed.
+        from ultralytics import YOLO
         self.model = YOLO(model_name or cfg.model_name)
         self.categories = categories or SITE_CATEGORIES
         self._class_to_category: dict[int, str] = {}
@@ -54,6 +56,8 @@ class Detector:
         self.img_size = img_size or cfg.img_size
 
     def detect(self, frame: np.ndarray) -> list[Detection]:
+        device_name = str(self.device).strip().lower()
+        use_half = device_name not in {"cpu", "mps"} and not device_name.startswith("mps:")
         results = self.model.predict(
             frame,
             conf=self.conf,
@@ -61,6 +65,10 @@ class Detector:
             device=self.device,
             imgsz=self.img_size,
             classes=self._class_filter,
+            # FP16 substantially reduces CUDA/TensorRT inference cost.  It is
+            # deliberately disabled on CPU and Apple MPS where half precision
+            # is unsupported or can be slower/less stable.
+            half=use_half,
             verbose=False,
         )
         detections = []

@@ -46,6 +46,8 @@
         #preview {
             width: 100%;
             max-width: 640px;
+            aspect-ratio: 4 / 3;
+            object-fit: cover;
             border-radius: 8px;
             background: #222;
         }
@@ -95,6 +97,10 @@
             background: #222;
             color: #eee;
         }
+        #cameraSelect {
+            width: 260px;
+            max-width: 100%;
+        }
         #statusBar {
             font-size: 13px;
             margin-top: 12px;
@@ -106,6 +112,15 @@
         .status-err { background: rgba(221, 33, 28, 0.15); color: #ff8480; }
         .status-idle { background: #1a1a1a; color: #6B6B6B; }
         #stats { font-size: 12px; color: #6B6B6B; margin-top: 8px; font-family: var(--font-mono, monospace); }
+        .camera-hint {
+            width: 100%;
+            max-width: 640px;
+            margin-top: 8px;
+            color: #888;
+            font-size: 12px;
+            line-height: 1.45;
+            text-align: center;
+        }
         .voice-toggle {
             display: flex;
             align-items: center;
@@ -128,12 +143,17 @@
     <div class="config">
         <label>Serwer:</label>
         <input type="text" id="serverUrl" placeholder="http://localhost:8000">
+        <label for="cameraSelect">Kamera:</label>
+        <select id="cameraSelect">
+            <option value="">Automatycznie (główna tylna)</option>
+        </select>
         <label>FPS:</label>
         <select id="fpsSelect">
-            <option value="2">2</option>
-            <option value="5">5</option>
-            <option value="10" selected>10</option>
+            <option value="5" selected>5</option>
+            <option value="8">8</option>
             <option value="15">15</option>
+            <option value="22">22</option>
+            <option value="30">30</option>
         </select>
         <label>Tryb:</label>
         <select id="modeSelect">
@@ -147,6 +167,10 @@
     </div>
 
     <video id="preview" autoplay playsinline muted></video>
+    <p class="camera-hint">
+        Ustaw nieruchomy telefon na wysokości pasa lub klatki. Pokaż całą sylwetkę
+        (30–50% wysokości kadru) i unikaj lampy skierowanej w obiektyw.
+    </p>
 
     <div class="controls">
         <button id="startBtn">Start</button>
@@ -162,6 +186,7 @@
         var startBtn = document.getElementById("startBtn");
         var stopBtn = document.getElementById("stopBtn");
         var serverInput = document.getElementById("serverUrl");
+        var cameraSelect = document.getElementById("cameraSelect");
         var fpsSelect = document.getElementById("fpsSelect");
         var modeSelect = document.getElementById("modeSelect");
         var voiceToggle = document.getElementById("voiceToggle");
@@ -169,8 +194,7 @@
         var statsEl = document.getElementById("stats");
 
         // ---- Voice warnings (Web Speech API) ------------------------------
-        // Michał S. (2026-07-08): najważniejszy filar produktu — komunikat
-        // głosowy on-site gdy pracownik zbliża się do strefy niebezpiecznej.
+        // Local voice warnings notify a nearby worker about confirmed events.
         var voiceSupported = "speechSynthesis" in window;
         var voiceCooldownMs = 5000;
         var lastSpokenAt = {}; // message-key → epoch ms
@@ -230,14 +254,17 @@
         function announceAlerts(data) {
             if (!voiceToggle.checked) return;
 
-            // Zone breaches — najważniejszy alert wg Michała
-            // (uwaga żuraw / uwaga szyb / uwaga wykop).
+            // Static-zone approach and breach warnings.
             (data.confirmed_zone_breaches || []).forEach(function(b) {
-                var isDanger = b.severity === "DANGER";
+                var isApproach = b.rule_name === "zone_approach";
+                var isDanger = b.severity === "DANGER" && !isApproach;
+                var distance = (b.distance_m !== null && b.distance_m !== undefined)
+                    ? ", odległość " + Math.abs(Number(b.distance_m)).toFixed(1) + " metra"
+                    : "";
                 var text = isDanger
                     ? "Stop! Strefa niebezpieczna: " + b.zone_name
-                    : "Uwaga: " + b.zone_name;
-                speak(text, "zone_" + b.zone_id + "_" + b.severity,
+                    : "Uwaga: zbliżasz się do strefy " + b.zone_name + distance;
+                speak(text, "zone_" + b.zone_id + "_" + b.rule_name + "_" + b.severity,
                       isDanger ? "danger" : "warning");
             });
 
@@ -245,17 +272,47 @@
             (data.confirmed_alerts || []).forEach(function(a) {
                 var isOverlap = a.rule_name === "person_vehicle_overlap";
                 var isDanger = a.severity === "DANGER";
+                var distance = (a.distance_m !== null && a.distance_m !== undefined)
+                    ? ", odległość " + Number(a.distance_m).toFixed(1) + " metra"
+                    : "";
                 var text = isOverlap
-                    ? "Stop! Osoba w strefie pojazdu"
-                    : "Uwaga: osoba zbyt blisko pojazdu";
+                    ? "Stop! Osoba w obrysie maszyny"
+                    : (isDanger
+                        ? "Stop! Krytyczna odległość od maszyny" + distance
+                        : "Uwaga: osoba zbyt blisko maszyny" + distance);
                 speak(text, "hazard_" + a.rule_name,
                       isDanger ? "danger" : "warning");
             });
 
-            // PPE — krzyk bezpośrednio na pracownika. Adam W. + Michał S.
-            // (2026-07-09): brak kaska/kamizelki = pracownik ma zareagować
-            // NATYCHMIAST, nie usłyszeć subtelne "uwaga". Wyższy pitch/rate,
-            // krótszy cooldown (2s), formy rozkazujące.
+            // Coordination/posture anomaly.  The camera reports observable
+            // movement only; the message requests a human safety check.
+            (data.confirmed_posture_alerts || []).forEach(function(p) {
+                var danger = p.severity === "DANGER";
+                var signals = p.signals || [];
+                var fall = signals.indexOf("possible_fall") >= 0;
+                var coordination = signals.some(function(signal) {
+                    return ["repeated_body_sway", "unstable_trajectory", "irregular_step_pattern",
+                            "upper_body_instability", "sudden_balance_loss"].indexOf(signal) >= 0;
+                });
+                var smoking = signals.indexOf("hand_to_mouth_pattern") >= 0 && !coordination;
+                var text = fall
+                    ? "Stop! Możliwy upadek lub osunięcie pracownika. Sprawdź natychmiast."
+                    : (smoking
+                        ? "Uwaga. Powtarzalny gest ręka usta. Zweryfikuj możliwe palenie."
+                        : (danger
+                            ? "Stop! Możliwa utrata równowagi. Sprawdź pracownika."
+                            : "Uwaga. Sprawdź koordynację ruchową pracownika."));
+                var keyPrefix = fall ? "fall_" : (smoking ? "smoking_" : "posture_");
+                speak(text, keyPrefix + p.track_id + "_" + p.severity,
+                      danger ? "danger" : "warning");
+            });
+
+            (data.unidentified_workers || []).forEach(function(u) {
+                speak("Uwaga: osoba bez rozpoznanego identyfikatora", "worker_id_missing", "warning");
+            });
+
+            // PPE warnings use a shorter cooldown and a more prominent voice
+            // profile because immediate worker action is required.
             (data.ppe_checks || []).forEach(function(c) {
                 if (c.severity !== "DANGER" || !c.missing || !c.missing.length) return;
                 var missing = c.missing.slice().sort();
@@ -296,45 +353,292 @@
         var inFlight = false;      // true dopóki poprzednia klatka nie wróciła
         var running = false;
         var lastProcMs = 0;
-        // Target dłuższy bok. YOLO robi resize do 640 wewnętrznie, ale
-        // wysyłanie 960px z telefonu na Railway to duży JPEG (~150KB) —
-        // zejście do 640 tnie payload ~2x bez utraty jakości detekcji.
-        var TARGET_LONG_EDGE = 640;
+        var activeStream = null;
+        var cameraBusy = false;
+        var cameraListAvailable = false;
+        var analysisSocket = null;
+        var analysisSocketGeneration = 0;
+        var analysisSocketConnected = false;
+        var analysisReconnectTimer = null;
+        var TARGET_WIDTH = 960;
+        var TARGET_HEIGHT = 720;
+        var CAMERA_STORAGE_KEY = "perimetr:capture_device_id";
+
+        function getStoredCameraId() {
+            try { return localStorage.getItem(CAMERA_STORAGE_KEY) || ""; }
+            catch (_) { return ""; }
+        }
+
+        function storeCameraId(deviceId) {
+            try {
+                if (deviceId) localStorage.setItem(CAMERA_STORAGE_KEY, deviceId);
+                else localStorage.removeItem(CAMERA_STORAGE_KEY);
+            } catch (_) {}
+        }
+
+        function cameraConstraints(deviceId) {
+            var constraints = {
+                width: { ideal: 1280 },
+                height: { ideal: 960 },
+                aspectRatio: { ideal: 4 / 3 }
+            };
+            if (deviceId) {
+                constraints.deviceId = { exact: deviceId };
+            } else {
+                constraints.facingMode = { ideal: "environment" };
+            }
+            return { video: constraints, audio: false };
+        }
+
+        function stopStream(stream) {
+            if (!stream) return;
+            stream.getTracks().forEach(function(track) { track.stop(); });
+        }
+
+        function stopActiveStream() {
+            stopStream(activeStream || video.srcObject);
+            activeStream = null;
+            video.srcObject = null;
+        }
+
+        function activeDeviceId(stream) {
+            if (!stream) return "";
+            var tracks = stream.getVideoTracks();
+            if (!tracks.length || typeof tracks[0].getSettings !== "function") return "";
+            return tracks[0].getSettings().deviceId || "";
+        }
+
+        function cameraLabel(device, index) {
+            return device.label || ("Kamera " + (index + 1));
+        }
+
+        function isAuxiliaryLens(label) {
+            return /ultra[\s-]*wide|ultraszer|0[.,]5x|tele(photo)?|macro|depth/i.test(label || "");
+        }
+
+        function isFrontCamera(label) {
+            return /front|selfie|user|przedni/i.test(label || "");
+        }
+
+        function mainCameraScore(device) {
+            var label = device.label || "";
+            if (isFrontCamera(label)) return -100;
+            if (isAuxiliaryLens(label)) return -50;
+            var score = 0;
+            if (/main|primary|głów|glown/i.test(label)) score += 60;
+            if (/back|rear|environment|tyln/i.test(label)) score += 30;
+            return score;
+        }
+
+        function preferredMainCamera(devices, currentId) {
+            var current = devices.find(function(device) {
+                return device.deviceId === currentId;
+            });
+            var ranked = devices.slice().sort(function(a, b) {
+                return mainCameraScore(b) - mainCameraScore(a);
+            });
+            var preferred = ranked[0];
+            if (!preferred || preferred.deviceId === currentId || mainCameraScore(preferred) <= 0) {
+                return null;
+            }
+
+            // Przełączamy automatycznie tylko wtedy, gdy aktywny obiektyw
+            // wygląda na pomocniczy albo inny obiektyw jest jawnie opisany
+            // jako główny. Przy nieczytelnych nazwach decyzję zostawiamy
+            // przeglądarce i użytkownikowi.
+            var currentLabel = current ? current.label : "";
+            var preferredIsExplicitMain = /main|primary|głów|glown/i.test(preferred.label || "");
+            if (isAuxiliaryLens(currentLabel) || isFrontCamera(currentLabel) || preferredIsExplicitMain) {
+                return preferred;
+            }
+            return null;
+        }
+
+        function populateCameraSelect(devices, selectedId, currentId) {
+            cameraSelect.innerHTML = "";
+            var current = devices.find(function(device) {
+                return device.deviceId === currentId;
+            });
+            var autoOption = document.createElement("option");
+            autoOption.value = "";
+            autoOption.textContent = "Automatycznie (główna tylna)"
+                + (!selectedId && current && current.label ? " · " + current.label : "");
+            cameraSelect.appendChild(autoOption);
+
+            devices.forEach(function(device, index) {
+                var option = document.createElement("option");
+                option.value = device.deviceId;
+                option.textContent = cameraLabel(device, index);
+                cameraSelect.appendChild(option);
+            });
+
+            if (selectedId && !devices.some(function(device) {
+                return device.deviceId === selectedId;
+            })) {
+                var rememberedOption = document.createElement("option");
+                rememberedOption.value = selectedId;
+                rememberedOption.textContent = "Zapamiętana kamera";
+                cameraSelect.appendChild(rememberedOption);
+            }
+            cameraSelect.value = selectedId || "";
+        }
+
+        function refreshCameraList(selectedId, currentId) {
+            if (!navigator.mediaDevices
+                    || typeof navigator.mediaDevices.enumerateDevices !== "function") {
+                cameraSelect.disabled = true;
+                return Promise.resolve([]);
+            }
+            return navigator.mediaDevices.enumerateDevices().then(function(devices) {
+                var cameras = devices.filter(function(device) {
+                    return device.kind === "videoinput";
+                });
+                cameraListAvailable = true;
+                populateCameraSelect(cameras, selectedId, currentId);
+                cameraSelect.disabled = cameraBusy;
+                return cameras;
+            }).catch(function() {
+                cameraListAvailable = false;
+                cameraSelect.disabled = true;
+                return [];
+            });
+        }
+
+        function requestCamera(deviceId) {
+            return navigator.mediaDevices.getUserMedia(cameraConstraints(deviceId));
+        }
+
+        function waitForVideo(stream) {
+            activeStream = stream;
+            video.srcObject = stream;
+            return new Promise(function(resolve, reject) {
+                function cleanup() {
+                    video.removeEventListener("loadedmetadata", ready);
+                    video.removeEventListener("error", failed);
+                }
+                function ready() {
+                    cleanup();
+                    sizeCaptureCanvas();
+                    var playResult = video.play();
+                    if (playResult && typeof playResult.catch === "function") {
+                        playResult.catch(function() {});
+                    }
+                    resolve(stream);
+                }
+                function failed() {
+                    cleanup();
+                    reject(new Error("Nie udało się odczytać obrazu z kamery"));
+                }
+                if (video.readyState >= 1 && video.videoWidth && video.videoHeight) {
+                    ready();
+                    return;
+                }
+                video.addEventListener("loadedmetadata", ready);
+                video.addEventListener("error", failed);
+            });
+        }
+
+        function openCamera(selectedId, preferMainLens) {
+            stopActiveStream();
+            return requestCamera(selectedId).catch(function(error) {
+                if (!selectedId) throw error;
+                // Zapamiętany identyfikator może przestać być ważny po
+                // aktualizacji przeglądarki albo zmianie telefonu.
+                storeCameraId("");
+                selectedId = "";
+                cameraSelect.value = "";
+                return requestCamera("");
+            }).then(function(stream) {
+                var currentId = activeDeviceId(stream);
+                return refreshCameraList(selectedId, currentId).then(function(devices) {
+                    var preferred = preferMainLens && !selectedId
+                        ? preferredMainCamera(devices, currentId)
+                        : null;
+                    if (!preferred) return stream;
+
+                    stopStream(stream);
+                    return requestCamera(preferred.deviceId).catch(function() {
+                        return requestCamera("");
+                    }).then(function(replacement) {
+                        return refreshCameraList("", activeDeviceId(replacement)).then(function() {
+                            return replacement;
+                        });
+                    });
+                });
+            }).then(waitForVideo);
+        }
+
+        function setCameraError(err) {
+            stopCapture();
+            stopActiveStream();
+            startBtn.disabled = false;
+            stopBtn.disabled = true;
+            statusBar.textContent = "Błąd kamery: " + (err && err.message ? err.message : "brak dostępu");
+            statusBar.className = "status-err";
+        }
+
+        function beginCamera(selectedId, preferMainLens) {
+            if (!navigator.mediaDevices
+                    || typeof navigator.mediaDevices.getUserMedia !== "function") {
+                setCameraError(new Error("przeglądarka nie obsługuje dostępu do kamery"));
+                return;
+            }
+            cameraBusy = true;
+            startBtn.disabled = true;
+            cameraSelect.disabled = true;
+            statusBar.textContent = "Uruchamianie kamery…";
+            statusBar.className = "status-idle";
+            openCamera(selectedId, preferMainLens).then(function() {
+                startCapture();
+                stopBtn.disabled = false;
+                statusBar.textContent = "Kamera gotowa";
+                statusBar.className = "status-ok";
+            }).catch(setCameraError).finally(function() {
+                cameraBusy = false;
+                cameraSelect.disabled = !cameraListAvailable;
+            });
+        }
 
         startBtn.onclick = function() {
-            navigator.mediaDevices.getUserMedia({
-                video: {
-                    facingMode: "environment",
-                    width:  { ideal: 1280 },
-                    height: { ideal: 720 }
-                }
-            }).then(function(stream) {
-                video.srcObject = stream;
-                video.addEventListener("loadedmetadata", sizeCaptureCanvas, { once: true });
-                startCapture();
-                startBtn.disabled = true;
-                stopBtn.disabled = false;
-            }).catch(function(err) {
-                statusBar.textContent = "Blad kamery: " + err.message;
-                statusBar.className = "status-err";
-            });
+            beginCamera(cameraSelect.value, !cameraSelect.value);
         };
 
         function sizeCaptureCanvas() {
-            var vw = video.videoWidth || 640;
-            var vh = video.videoHeight || 480;
-            var long = Math.max(vw, vh);
-            var scale = long > TARGET_LONG_EDGE ? TARGET_LONG_EDGE / long : 1;
-            captureCanvas.width  = Math.round(vw * scale);
-            captureCanvas.height = Math.round(vh * scale);
+            captureCanvas.width = TARGET_WIDTH;
+            captureCanvas.height = TARGET_HEIGHT;
+        }
+
+        function drawVideoCover(source, context, targetWidth, targetHeight) {
+            var sourceWidth = source.videoWidth;
+            var sourceHeight = source.videoHeight;
+            if (!sourceWidth || !sourceHeight) return false;
+
+            var sourceRatio = sourceWidth / sourceHeight;
+            var targetRatio = targetWidth / targetHeight;
+            var sx = 0;
+            var sy = 0;
+            var sw = sourceWidth;
+            var sh = sourceHeight;
+
+            if (sourceRatio > targetRatio) {
+                sw = sourceHeight * targetRatio;
+                sx = (sourceWidth - sw) / 2;
+            } else {
+                sh = sourceWidth / targetRatio;
+                sy = (sourceHeight - sh) / 2;
+            }
+
+            context.drawImage(
+                source,
+                sx, sy, sw, sh,
+                0, 0, targetWidth, targetHeight
+            );
+            return true;
         }
 
         stopBtn.onclick = function() {
             stopCapture();
-            if (video.srcObject) {
-                video.srcObject.getTracks().forEach(function(t) { t.stop(); });
-                video.srcObject = null;
-            }
+            stopActiveStream();
             startBtn.disabled = false;
             stopBtn.disabled = true;
             statusBar.textContent = "Zatrzymano";
@@ -346,6 +650,91 @@
             loopTimer = setTimeout(sendOneFrame, minInterval);
         }
 
+        function streamCameraId() {
+            return new URLSearchParams(location.search).get("camera_id") || "cam_default";
+        }
+
+        function consumeAnalysis(data) {
+            if (!data || (data.camera_id || "cam_default") !== streamCameraId()) return;
+            announceAlerts(data);
+            lastProcMs = data.processing_ms || 0;
+            var alerts = (data.confirmed_alerts ? data.confirmed_alerts.length : 0)
+                       + (data.confirmed_zone_breaches ? data.confirmed_zone_breaches.length : 0)
+                       + (data.confirmed_posture_alerts ? data.confirmed_posture_alerts.length : 0)
+                       + (data.ppe_checks ? data.ppe_checks.filter(function(c){return c.severity==="DANGER";}).length : 0);
+            var workers = data.worker_identifications ? data.worker_identifications.length : 0;
+            statsEl.textContent =
+                "Tryb: " + (data.mode || "?") +
+                " | Wyslane: " + framesSent +
+                " | Detekcja: " + lastProcMs.toFixed(0) + "ms" +
+                " | Alarmy: " + alerts +
+                " | ID QR: " + workers +
+                " | Pominiete: " + framesSkipped +
+                " | Bledy: " + errorsCount;
+        }
+
+        function stopAnalysisSocket() {
+            analysisSocketGeneration++;
+            analysisSocketConnected = false;
+            if (analysisReconnectTimer) {
+                clearTimeout(analysisReconnectTimer);
+                analysisReconnectTimer = null;
+            }
+            var socket = analysisSocket;
+            analysisSocket = null;
+            if (socket) {
+                socket.onopen = null;
+                socket.onmessage = null;
+                socket.onerror = null;
+                socket.onclose = null;
+                try { socket.close(); } catch (_) {}
+            }
+        }
+
+        function connectAnalysisSocket() {
+            stopAnalysisSocket();
+            var generation = ++analysisSocketGeneration;
+            var target;
+            try {
+                target = new URL(serverInput.value.replace(/\/$/, "") + "/ws/live");
+            } catch (_) {
+                return;
+            }
+            target.protocol = target.protocol === "https:" ? "wss:" : "ws:";
+            target.searchParams.set("camera_id", streamCameraId());
+            target.searchParams.set("include_frame", "false");
+            var socket;
+            try {
+                socket = new WebSocket(target.toString());
+            } catch (_) {
+                return;
+            }
+            analysisSocket = socket;
+            socket.onopen = function() {
+                if (generation !== analysisSocketGeneration) return;
+                analysisSocketConnected = true;
+            };
+            socket.onmessage = function(event) {
+                if (generation !== analysisSocketGeneration ||
+                    typeof event.data !== "string") return;
+                var data;
+                try { data = JSON.parse(event.data); } catch (_) { return; }
+                consumeAnalysis(data);
+            };
+            socket.onerror = function() {
+                if (generation !== analysisSocketGeneration) return;
+                analysisSocketConnected = false;
+            };
+            socket.onclose = function() {
+                if (generation !== analysisSocketGeneration) return;
+                analysisSocket = null;
+                analysisSocketConnected = false;
+                if (running) {
+                    analysisReconnectTimer = setTimeout(connectAnalysisSocket, 1500);
+                }
+            };
+        }
+
         function sendOneFrame() {
             if (!running) return;
             // Backpressure: jeśli poprzednia klatka jeszcze leci, poczekaj.
@@ -355,23 +744,44 @@
                 scheduleNext(20);
                 return;
             }
+            // Mierz pełny cykl klatki, łącznie z rysowaniem i kodowaniem JPEG.
+            // Przy 22–30 FPS pominięcie czasu toBlob zauważalnie zaniżało
+            // rzeczywiste tempo nawet wtedy, gdy backend odpowiadał szybko.
+            var cycleStartedAt = performance.now();
             if (!captureCanvas.width || !captureCanvas.height) sizeCaptureCanvas();
-            captureCtx.drawImage(video, 0, 0, captureCanvas.width, captureCanvas.height);
+            if (!drawVideoCover(
+                    video,
+                    captureCtx,
+                    captureCanvas.width,
+                    captureCanvas.height)) {
+                scheduleNext(50);
+                return;
+            }
             captureCanvas.toBlob(function(blob) {
                 if (!blob || !running) { scheduleNext(50); return; }
                 inFlight = true;
-                var fps = parseInt(fpsSelect.value) || 10;
+                var parsedFps = parseInt(fpsSelect.value, 10);
+                var fps = parsedFps > 0 ? parsedFps : 5;
                 var targetInterval = 1000 / fps;
-                var t0 = performance.now();
 
                 var form = new FormData();
                 form.append("image", blob, "frame.jpg");
                 // Must match CAMERA_ID in frontend/zones.js — otherwise the
                 // backend looks up zones for a different camera and returns
                 // an empty polygon set even when markers are visible.
-                form.append("camera_id", "cam_default");
+                var cameraId = streamCameraId();
+                form.append("camera_id", cameraId);
                 form.append("timestamp", String(Date.now() / 1000));
                 form.append("mode", modeSelect.value);
+                // The panel receives the complete frame over WebSocket.  The
+                // phone only needs analysis metadata in the HTTP response.
+                form.append("include_frame", "false");
+                // Once the metadata WebSocket is connected, the POST only
+                // replaces the latest per-camera slot and returns immediately.
+                form.append(
+                    "async_processing",
+                    analysisSocketConnected ? "true" : "false"
+                );
                 var serverUrl = serverInput.value.replace(/\/$/, "");
 
                 fetch(serverUrl + "/api/frame", {
@@ -387,31 +797,32 @@
                     }
                     throw new Error("HTTP " + resp.status);
                 }).then(function(data) {
-                    announceAlerts(data);
-                    lastProcMs = data.processing_ms || 0;
-                    var alerts = (data.confirmed_alerts ? data.confirmed_alerts.length : 0)
-                               + (data.ppe_checks ? data.ppe_checks.filter(function(c){return c.severity==="DANGER";}).length : 0);
-                    statsEl.textContent =
-                        "Tryb: " + (data.mode || "?") +
-                        " | Wyslane: " + framesSent +
-                        " | Detekcja: " + lastProcMs.toFixed(0) + "ms" +
-                        " | Alarmy: " + alerts +
-                        " | Pominiete: " + framesSkipped +
-                        " | Bledy: " + errorsCount;
+                    if (data && data.accepted) {
+                        statsEl.textContent =
+                            "Tryb: " + modeSelect.value +
+                            " | Wyslane: " + framesSent +
+                            " | Kolejka: " + (data.queue_depth || 0) +
+                            " | Odrzucone stare: " + (data.dropped_frames || 0) +
+                            " | Ostatnia detekcja: " + lastProcMs.toFixed(0) + "ms";
+                    } else {
+                        // Compatibility fallback while the metadata socket is
+                        // still connecting.
+                        consumeAnalysis(data);
+                    }
                 }).catch(function() {
                     errorsCount++;
                     statusBar.textContent = "Blad polaczenia (" + errorsCount + ")";
                     statusBar.className = "status-err";
                 }).finally(function() {
                     inFlight = false;
-                    // Round-trip zajął `rtt` ms. Jeśli backend jest wolniejszy
-                    // niż nasz target FPS, wysyłamy natychmiast (kolejny gate
-                    // to i tak inFlight). Jeśli szybszy — spimy do targetu.
-                    var rtt = performance.now() - t0;
-                    var wait = Math.max(0, targetInterval - rtt);
+                    // Jeśli pełny cykl (JPEG + round-trip + obsługa odpowiedzi)
+                    // jest wolniejszy niż target FPS, następna klatka rusza
+                    // od razu. `inFlight` nadal gwarantuje pojedyncze żądanie.
+                    var cycleElapsed = performance.now() - cycleStartedAt;
+                    var wait = Math.max(0, targetInterval - cycleElapsed);
                     scheduleNext(wait);
                 });
-            }, "image/jpeg", 0.7);
+            }, "image/jpeg", 0.85);
         }
 
         function startCapture() {
@@ -420,6 +831,7 @@
             errorsCount = 0;
             inFlight = false;
             running = true;
+            connectAnalysisSocket();
             sendOneFrame();
         }
 
@@ -427,6 +839,31 @@
             running = false;
             if (loopTimer) { clearTimeout(loopTimer); loopTimer = null; }
             inFlight = false;
+            stopAnalysisSocket();
+        }
+
+        var storedCameraId = getStoredCameraId();
+        if (storedCameraId) {
+            var storedOption = document.createElement("option");
+            storedOption.value = storedCameraId;
+            storedOption.textContent = "Zapamiętana kamera";
+            cameraSelect.appendChild(storedOption);
+            cameraSelect.value = storedCameraId;
+        }
+        cameraSelect.onchange = function() {
+            var selectedId = cameraSelect.value;
+            storeCameraId(selectedId);
+            if (!activeStream || !running || cameraBusy) return;
+            stopCapture();
+            beginCamera(selectedId, !selectedId);
+        };
+
+        refreshCameraList(storedCameraId, "");
+        if (navigator.mediaDevices
+                && typeof navigator.mediaDevices.addEventListener === "function") {
+            navigator.mediaDevices.addEventListener("devicechange", function() {
+                refreshCameraList(cameraSelect.value, activeDeviceId(activeStream));
+            });
         }
     })();
     </script>

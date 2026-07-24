@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Perimetr — Historia zdarzeń (audit trail)</title>
     <link rel="stylesheet" href="style.css">
-    <link rel="stylesheet" href="review.css">
+    <link rel="stylesheet" href="review.css?v=20260724-worker-registry-2">
     <script src="https://unpkg.com/lucide@latest" defer></script>
 </head>
 <body class="review-body">
@@ -37,12 +37,20 @@
         <div class="tile-label">Warning</div>
         <div class="tile-value" id="sumWarning">—</div>
     </div>
+    <div class="summary-tile">
+        <div class="tile-label">Do weryfikacji</div>
+        <div class="tile-value" id="sumNew">—</div>
+    </div>
     <div class="summary-tile split">
         <div class="tile-label">Rozkład</div>
         <div class="tile-split">
             <span><b id="sumPpe">—</b> PPE</span>
             <span><b id="sumZone">—</b> Strefa</span>
             <span><b id="sumSite">—</b> Pojazdy</span>
+            <span><b id="sumPosture">—</b> Postura</span>
+            <span><b id="sumFall">—</b> Upadek</span>
+            <span><b id="sumSmoking">—</b> Gest palenia</span>
+            <span><b id="sumUnknown">—</b> Brak ID</span>
         </div>
     </div>
 </section>
@@ -61,6 +69,11 @@
             <option value="ppe_missing">Brak PPE</option>
             <option value="zone_breach">Strefa niebezpieczna</option>
             <option value="site_hazard">Osoba przy pojeździe</option>
+            <option value="posture_anomaly">Nietypowa koordynacja</option>
+            <option value="fall_detected">Możliwy upadek</option>
+            <option value="smoking_gesture">Możliwy gest palenia</option>
+            <option value="unidentified_worker">Brak identyfikatora QR</option>
+            <option value="zone_approach">Zbliżanie do strefy</option>
         </select>
     </div>
     <div class="filter-group">
@@ -80,6 +93,21 @@
         </select>
     </div>
     <div class="filter-group">
+        <label>Pracownik / ID</label>
+        <input type="text" id="filterWorker" placeholder="np. W-001" maxlength="64">
+    </div>
+    <div class="filter-group">
+        <label>Weryfikacja</label>
+        <select id="filterReviewStatus">
+            <option value="">Wszystkie</option>
+            <option value="new">Nowe</option>
+            <option value="acknowledged">Przyjęte</option>
+            <option value="confirmed">Potwierdzone</option>
+            <option value="false_positive">Fałszywy alarm</option>
+            <option value="escalated">Eskalowane</option>
+        </select>
+    </div>
+    <div class="filter-group">
         <label>Od</label>
         <input type="datetime-local" id="filterSince">
     </div>
@@ -90,6 +118,7 @@
     <button id="applyFilters" class="btn-primary">Filtruj</button>
     <button id="clearFilters" class="btn-secondary">Wyczyść</button>
     <button id="exportCsv" class="btn-secondary" title="Pobierz aktualną listę jako CSV">Eksport CSV</button>
+    <button id="exportTraining" class="btn-secondary" title="Pobierz potwierdzone zdarzenia jako JSONL do przyszłego uczenia">Dane AI JSONL</button>
     <div class="filter-stats">
         <span id="resultCount">—</span>
     </div>
@@ -107,6 +136,7 @@
     <button id="lightboxClose" class="lightbox-close" aria-label="Zamknij">×</button>
     <div class="lightbox-inner">
         <img id="lightboxImg" alt="">
+        <video id="lightboxVideo" class="hidden" controls playsinline></video>
         <div class="lightbox-info">
             <h2 id="lightboxTitle">—</h2>
             <div class="lightbox-meta">
@@ -115,6 +145,19 @@
                 <div class="meta-row"><span class="meta-key">Kamera</span><span class="meta-val" id="lightboxCamera">—</span></div>
                 <div class="meta-row"><span class="meta-key">Reguła</span><span class="meta-val" id="lightboxRule">—</span></div>
                 <div class="meta-row"><span class="meta-key">Poziom</span><span class="meta-val" id="lightboxSeverity">—</span></div>
+                <div class="meta-row"><span class="meta-key">Pracownik</span><span class="meta-val" id="lightboxWorker">—</span></div>
+                <div class="meta-row"><span class="meta-key">Weryfikacja</span><span class="meta-val" id="lightboxReviewStatus">—</span></div>
+            </div>
+            <div class="review-actions">
+                <input id="reviewedBy" type="text" maxlength="80" placeholder="Operator (opcjonalnie)">
+                <textarea id="reviewNote" maxlength="1000" placeholder="Notatka z weryfikacji"></textarea>
+                <div class="review-action-buttons">
+                    <button type="button" data-review="acknowledged" class="btn-secondary">Przyjmij</button>
+                    <button type="button" data-review="confirmed" class="btn-primary">Potwierdź</button>
+                    <button type="button" data-review="false_positive" class="btn-secondary">Fałszywy alarm</button>
+                    <button type="button" data-review="escalated" class="btn-secondary">Eskaluj</button>
+                </div>
+                <span id="reviewSaveStatus" class="review-save-status"></span>
             </div>
             <details class="lightbox-details">
                 <summary>Szczegóły techniczne</summary>
@@ -124,7 +167,7 @@
     </div>
 </div>
 
-<script src="review.js"></script>
+<script src="review.js?v=20260724-worker-registry-2"></script>
 <script>
 document.addEventListener("DOMContentLoaded", () => {
     if (window.lucide) window.lucide.createIcons();

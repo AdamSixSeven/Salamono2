@@ -1,9 +1,7 @@
-"""Debug endpoints — inject a fake person detection into the next N frames.
+"""Debug endpoints for injecting a temporary synthetic person detection.
 
-Adam wanted to test the alarm flow without physically standing in the
-zone. This lets you POST a bounding box (normalized 0-1) and the backend
-pretends YOLO detected a person there for the next N frames. Zone
-breach, temporal filter, alerts, voice and history all fire naturally.
+The injected normalized bounding box passes through the regular zone, alert,
+voice and history pipeline, allowing deterministic end-to-end tests.
 """
 from __future__ import annotations
 

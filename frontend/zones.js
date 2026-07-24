@@ -6,7 +6,8 @@
 (function () {
     "use strict";
 
-    const CAMERA_ID = "cam_default";
+    let cameraId = (window.Perimetr && window.Perimetr.getCameraId)
+        ? window.Perimetr.getCameraId() : "cam_default";
 
     const stack = document.getElementById("canvasStack");
     const liveCanvas = document.getElementById("liveCanvas");
@@ -19,6 +20,7 @@
     const drawPanel = document.getElementById("zoneDrawPanel");
     const nameInput = document.getElementById("zoneName");
     const severitySelect = document.getElementById("zoneSeverity");
+    const warningDistanceInput = document.getElementById("zoneWarningDistance");
     const saveBtn = document.getElementById("zoneSaveBtn");
     const cancelBtn = document.getElementById("zoneCancelBtn");
 
@@ -27,13 +29,41 @@
     const markerName = document.getElementById("markerZoneName");
     const markerIds = document.getElementById("markerZoneIds");
     const markerSeverity = document.getElementById("markerZoneSeverity");
+    const markerWarningDistance = document.getElementById("markerZoneWarningDistance");
     const markerSaveBtn = document.getElementById("markerZoneSaveBtn");
     const markerCancelBtn = document.getElementById("markerZoneCancelBtn");
 
     let zones = [];              // konfiguracja stref z /api/zones (marker_ids, name…)
     let livePolygons = {};       // zone_id → polygon rozwiązany w ostatniej klatce (WS)
+    let liveActiveZones = [];    // autorytatywny zestaw aktywny w ostatniej klatce
+    let hasLiveZoneState = false;
     let liveMarkers = [];        // ostatnio wykryte markery ArUco (z WS)
-    let layers = { boxes: true, zones: true, markers: true, distances: true };
+    let dynamicSafetyZones = []; // ruchome strefy WARNING/DANGER wokół maszyn
+    let liveDetections = [];
+    let liveDangers = [];
+    let personDistances = [];
+    let postureAssessments = [];
+    let workerIdentifications = [];
+    const postureInterpolator = window.PerimetrPostureInterpolation
+        ? new window.PerimetrPostureInterpolation.TrackInterpolator({
+            durationMs: 180,
+        })
+        : {
+            update: () => false,
+            sample: () => null,
+            isAnimating: () => false,
+            clear: () => {},
+        };
+    let postureAnimationFrame = null;
+    let layers = (window.Perimetr && window.Perimetr.getLayers)
+        ? window.Perimetr.getLayers()
+        : {
+            boxes: true,
+            posture: true,
+            zones: true,
+            markers: true,
+            distances: true,
+        };
     let drawing = false;
     let draftPoly = [];          // [[x_norm, y_norm], ...]
 
@@ -52,6 +82,13 @@
         chipWarnFg:   "#0A0A0A",
         vertex:       "#DD211C",
         vertexOnWarn: "#FFB020",
+        person:        "#38D996",
+        vehicle:       "#5AA7FF",
+        hardhat:       "#F7E14A",
+        vest:          "#22D3EE",
+        neutral:       "#FAFAF8",
+        posture:       "#22D3EE",
+        worker:        "#C084FC",
     };
     function colorsFor(sev) {
         return sev === "WARNING"
@@ -59,15 +96,37 @@
             : { stroke: COLOR.dangerStroke, fill: COLOR.dangerFill, chipBg: COLOR.chipBg, chipFg: COLOR.chipFg };
     }
 
+    function postureNow() {
+        return window.performance && typeof window.performance.now === "function"
+            ? window.performance.now() : Date.now();
+    }
+
+    function cancelPostureAnimation() {
+        if (postureAnimationFrame === null) return;
+        window.cancelAnimationFrame(postureAnimationFrame);
+        postureAnimationFrame = null;
+    }
+
+    function schedulePostureAnimation() {
+        if (!layers.posture || postureAnimationFrame !== null ||
+            !postureInterpolator.isAnimating(postureNow())) return;
+        postureAnimationFrame = window.requestAnimationFrame(timestamp => {
+            postureAnimationFrame = null;
+            drawOverlay(timestamp);
+            schedulePostureAnimation();
+        });
+    }
+
     // ---------- API zon ---------------------
 
     async function fetchZones() {
         try {
-            const r = await fetch(`/api/zones/${CAMERA_ID}`);
+            const r = await fetch(`/api/zones/${encodeURIComponent(cameraId)}`);
             if (!r.ok) return;
             const data = await r.json();
             zones = data.zones || [];
             renderZoneList();
+            drawOverlay();
         } catch (e) {
             console.error("Failed to load zones:", e);
         }
@@ -78,9 +137,11 @@
             id: z.id, name: z.name, severity: z.severity,
             polygon: z.polygon || [],
             marker_ids: z.marker_ids || [],
+            warning_distance_m: Number.isFinite(Number(z.warning_distance_m)) ? Number(z.warning_distance_m) : 1.5,
+            warning_distance_px: Number.isFinite(Number(z.warning_distance_px)) ? Number(z.warning_distance_px) : 60,
             active: z.active !== false,
         })) };
-        const r = await fetch(`/api/zones/${CAMERA_ID}`, {
+        const r = await fetch(`/api/zones/${encodeURIComponent(cameraId)}`, {
             method: "PUT",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(payload),
@@ -92,6 +153,7 @@
         const data = await r.json();
         zones = data.zones || [];
         renderZoneList();
+        drawOverlay();
     }
 
     async function deleteZone(zoneId) {
@@ -150,8 +212,8 @@
             const meta = document.createElement("span");
             meta.className = "px-zone-row-meta";
             meta.textContent = z.marker_ids && z.marker_ids.length
-                ? "markery " + z.marker_ids.join(" · ") + " · KAM-01"
-                : "polygon · " + (z.polygon || []).length + " pkt · KAM-01";
+                ? "markery " + z.marker_ids.join(" · ") + " · warning " + Number(z.warning_distance_m || 0).toFixed(1) + " m"
+                : "polygon · " + (z.polygon || []).length + " pkt · warning " + Number(z.warning_distance_m || 0).toFixed(1) + " m";
 
             body.appendChild(title);
             body.appendChild(meta);
@@ -179,6 +241,14 @@
     function polygonFor(z) {
         if (livePolygons[z.id]) return livePolygons[z.id];
         return z.polygon || [];
+    }
+
+    function zonesForOverlay() {
+        // `active_zones` is resolved by the backend for the exact current
+        // frame.  Prefer it after the first WS message so remote edits,
+        // disabled zones and marker-zone expiry cannot leave a stale polygon
+        // from the separately fetched configuration on a raw preview.
+        return hasLiveZoneState ? liveActiveZones : zones;
     }
 
     function drawPolygon(poly, colors, opts) {
@@ -230,11 +300,11 @@
 
     function drawMarkers() {
         if (!layers.markers) return;
-        const w = zoneCanvas.width, h = zoneCanvas.height;
         // liveMarkers przychodzą z WS w pixel space bieżącej klatki.
         // canvas ma taki sam pixel size jak klatka (renderFrame w app.js ustawia).
         liveMarkers.forEach(m => {
             const c = m.corners;
+            if (!Array.isArray(c) || c.length < 3) return;
             zoneCtx.save();
             zoneCtx.lineWidth = 2;
             zoneCtx.strokeStyle = COLOR.markerBg;
@@ -261,6 +331,258 @@
             zoneCtx.fillText(label, chipX + paddingX, chipY + chipH / 2 + 1);
             zoneCtx.restore();
         });
+
+        // QR identyfikatora pracownika jest również markerem obrazu.  Jego
+        // obrys znika razem z warstwą „Markery”, natomiast sam profil nadal
+        // działa w logice detekcji i na karcie pracownika.
+        workerIdentifications.forEach(identity => {
+            const poly = identity.tag_polygon || [];
+            if (identity.cached || poly.length < 3) return;
+            zoneCtx.save();
+            zoneCtx.lineWidth = 2;
+            zoneCtx.strokeStyle = COLOR.worker;
+            zoneCtx.beginPath();
+            poly.forEach((pt, index) => {
+                if (index === 0) zoneCtx.moveTo(pt[0], pt[1]);
+                else zoneCtx.lineTo(pt[0], pt[1]);
+            });
+            zoneCtx.closePath();
+            zoneCtx.stroke();
+            zoneCtx.restore();
+        });
+    }
+
+    function detectionColor(detection) {
+        if (detection.category === "person") return COLOR.person;
+        if (detection.category === "hardhat") return COLOR.hardhat;
+        if (detection.category === "vest") return COLOR.vest;
+        if (detection.category === "vehicle") return COLOR.vehicle;
+        return COLOR.neutral;
+    }
+
+    function validBox(box) {
+        return Array.isArray(box) && box.length === 4 &&
+            box.every(value => Number.isFinite(Number(value)));
+    }
+
+    function drawChip(text, x, y, background, foreground, opts) {
+        if (!text) return;
+        opts = opts || {};
+        const fontSize = opts.fontSize || 12;
+        const paddingX = opts.paddingX || 6;
+        const height = opts.height || 20;
+        zoneCtx.save();
+        zoneCtx.font = `600 ${fontSize}px 'JetBrains Mono', ui-monospace, monospace`;
+        const width = zoneCtx.measureText(text).width + paddingX * 2;
+        const chipX = Math.max(0, Math.min(x, zoneCanvas.width - width));
+        const chipY = Math.max(0, Math.min(y, zoneCanvas.height - height));
+        zoneCtx.fillStyle = background;
+        zoneCtx.fillRect(chipX, chipY, width, height);
+        zoneCtx.fillStyle = foreground;
+        zoneCtx.textBaseline = "middle";
+        zoneCtx.fillText(text, chipX + paddingX, chipY + height / 2 + 0.5);
+        zoneCtx.restore();
+    }
+
+    function drawBoxes() {
+        if (!layers.boxes) return;
+        liveDetections.forEach(detection => {
+            const box = detection.box;
+            if (!validBox(box)) return;
+            const x1 = Number(box[0]), y1 = Number(box[1]);
+            const x2 = Number(box[2]), y2 = Number(box[3]);
+            const color = detectionColor(detection);
+            zoneCtx.save();
+            zoneCtx.strokeStyle = color;
+            zoneCtx.lineWidth = detection.category === "person" ? 2.5 : 2;
+            zoneCtx.strokeRect(x1, y1, Math.max(0, x2 - x1), Math.max(0, y2 - y1));
+            zoneCtx.restore();
+
+            const confidence = Number(detection.confidence);
+            const confidenceLabel = Number.isFinite(confidence)
+                ? " " + Math.round(confidence * 100) + "%"
+                : "";
+            const label = (detection.class_name || detection.category || "obiekt") +
+                confidenceLabel;
+            drawChip(label, x1, y1 - 22, color, "#0A0A0A");
+        });
+
+        // Powiązanie QR z osobą jest metadanymi bboxa, więc respektuje ten sam
+        // lokalny przełącznik.  Wyłączenie BBOX nie wyłącza identyfikacji.
+        workerIdentifications.forEach(identity => {
+            const box = identity.person_box;
+            if (!validBox(box) || !identity.worker_id) return;
+            const name = identity.full_name ||
+                [identity.first_name, identity.last_name].filter(Boolean).join(" ");
+            const suffix = name ? " · " + name : "";
+            drawChip(
+                "ID " + identity.worker_id + suffix + (identity.cached ? " ~" : ""),
+                Number(box[0]),
+                Number(box[1]) + 3,
+                "rgba(82, 30, 128, 0.92)",
+                "#FFFFFF",
+                { fontSize: 11, height: 18 },
+            );
+        });
+    }
+
+    function formatDistanceValue(item) {
+        if (item.distance_m !== null && item.distance_m !== undefined) {
+            return Math.abs(Number(item.distance_m)).toFixed(2) + " m";
+        }
+        if (item.distance_px !== null && item.distance_px !== undefined) {
+            return "pomiar pikselowy · " +
+                Math.round(Math.abs(Number(item.distance_px))) + " px";
+        }
+        return "—";
+    }
+
+    function drawDistances() {
+        if (!layers.distances) return;
+
+        // Odległość osoby od wykrytej maszyny/pojazdu.
+        liveDangers.forEach(danger => {
+            const personBox = danger.person && danger.person.box;
+            const hazardBox = danger.hazard && danger.hazard.box;
+            if (!validBox(personBox) || !validBox(hazardBox)) return;
+            const px = (Number(personBox[0]) + Number(personBox[2])) / 2;
+            const py = (Number(personBox[1]) + Number(personBox[3])) / 2;
+            const hx = (Number(hazardBox[0]) + Number(hazardBox[2])) / 2;
+            const hy = (Number(hazardBox[1]) + Number(hazardBox[3])) / 2;
+            const dangerColor = danger.severity === "DANGER"
+                ? COLOR.dangerStroke : COLOR.warnStroke;
+            zoneCtx.save();
+            zoneCtx.strokeStyle = dangerColor;
+            zoneCtx.lineWidth = 2;
+            zoneCtx.setLineDash([7, 5]);
+            zoneCtx.beginPath();
+            zoneCtx.moveTo(px, py);
+            zoneCtx.lineTo(hx, hy);
+            zoneCtx.stroke();
+            zoneCtx.restore();
+            drawChip(
+                formatDistanceValue(danger) +
+                    (danger.distance_m !== null && danger.distance_m !== undefined
+                        ? " od maszyny" : ""),
+                (px + hx) / 2,
+                (py + hy) / 2 - 10,
+                dangerColor,
+                danger.severity === "DANGER" ? "#FFFFFF" : "#0A0A0A",
+                { fontSize: 11, height: 18 },
+            );
+        });
+
+        // Najbliższa granica skonfigurowanej strefy dla każdej osoby.
+        personDistances.forEach(distance => {
+            const box = distance.person_box;
+            if (!validBox(box)) return;
+            const footX = (Number(box[0]) + Number(box[2])) / 2;
+            const footY = Number(box[3]);
+            const color = distance.inside ? COLOR.dangerStroke : COLOR.warnStroke;
+            const metric = distance.distance_m !== null &&
+                distance.distance_m !== undefined;
+            const relation = metric
+                ? (distance.inside ? " wewnątrz strefy" : " do strefy")
+                : "";
+            const label = (distance.zone_name || "STREFA") + " · " +
+                formatDistanceValue(distance) + relation;
+            zoneCtx.save();
+            zoneCtx.strokeStyle = color;
+            zoneCtx.fillStyle = color;
+            zoneCtx.lineWidth = 2;
+            zoneCtx.beginPath();
+            zoneCtx.arc(footX, footY, 4, 0, Math.PI * 2);
+            zoneCtx.fill();
+            zoneCtx.beginPath();
+            zoneCtx.moveTo(footX, footY + 4);
+            zoneCtx.lineTo(footX, Math.min(zoneCanvas.height - 1, footY + 18));
+            zoneCtx.stroke();
+            zoneCtx.restore();
+            drawChip(
+                label,
+                Number(box[0]),
+                Math.min(zoneCanvas.height - 19, footY + 8),
+                color,
+                distance.inside ? "#FFFFFF" : "#0A0A0A",
+                { fontSize: 11, height: 18 },
+            );
+        });
+    }
+
+    const POSTURE_CONNECTIONS = [
+        [0, 1], [1, 2], [2, 3], [3, 7],
+        [0, 4], [4, 5], [5, 6], [6, 8], [9, 10],
+        [11, 12], [11, 13], [13, 15],
+        [15, 17], [15, 19], [15, 21], [17, 19],
+        [12, 14], [14, 16],
+        [16, 18], [16, 20], [16, 22], [18, 20],
+        [11, 23], [12, 24], [23, 24],
+        [23, 25], [25, 27], [24, 26], [26, 28],
+        [27, 29], [29, 31], [28, 30], [30, 32],
+        [27, 31], [28, 32],
+    ];
+
+    function drawPosture(animationTimestamp) {
+        if (!layers.posture) return;
+        const now = Number.isFinite(Number(animationTimestamp))
+            ? Number(animationTimestamp) : postureNow();
+        postureAssessments.forEach(assessment => {
+            const landmarks = postureInterpolator.sample(
+                assessment.track_id,
+                now,
+            ) || assessment.pose_landmarks || [];
+            if (!landmarks.length) return;
+            const color = assessment.severity === "DANGER"
+                ? COLOR.dangerStroke
+                : assessment.severity === "WARNING"
+                    ? COLOR.warnStroke : COLOR.posture;
+            const points = new Map();
+            landmarks.slice(0, 33).forEach((landmark, index) => {
+                if (!Array.isArray(landmark) || landmark.length < 4) return;
+                const x = Number(landmark[0]);
+                const y = Number(landmark[1]);
+                const visibility = Number(landmark[3]);
+                if (!Number.isFinite(x) || !Number.isFinite(y) ||
+                    !Number.isFinite(visibility) || visibility < 0.5 ||
+                    x < 0 || x > 1 || y < 0 || y > 1) return;
+                points.set(index, [x * zoneCanvas.width, y * zoneCanvas.height]);
+            });
+
+            zoneCtx.save();
+            zoneCtx.strokeStyle = color;
+            zoneCtx.fillStyle = color;
+            zoneCtx.lineWidth = 2;
+            POSTURE_CONNECTIONS.forEach(connection => {
+                const start = points.get(connection[0]);
+                const end = points.get(connection[1]);
+                if (!start || !end) return;
+                zoneCtx.beginPath();
+                zoneCtx.moveTo(start[0], start[1]);
+                zoneCtx.lineTo(end[0], end[1]);
+                zoneCtx.stroke();
+            });
+            points.forEach(point => {
+                zoneCtx.beginPath();
+                zoneCtx.arc(point[0], point[1], 3, 0, Math.PI * 2);
+                zoneCtx.fill();
+            });
+            zoneCtx.restore();
+
+            const box = assessment.person && assessment.person.box;
+            if (validBox(box)) {
+                const score = Number.isFinite(Number(assessment.risk_score))
+                    ? " · " + Math.round(Number(assessment.risk_score) * 100) + "%"
+                    : "";
+                drawChip(
+                    "POSTURE #" + assessment.track_id + score,
+                    Number(box[0]),
+                    Number(box[1]) - 44,
+                    color,
+                    "#0A0A0A",
+                    { fontSize: 10, height: 18 },
+                );
+            }
+        });
     }
 
     function syncCanvasSize() {
@@ -271,23 +593,48 @@
         }
     }
 
-    function drawOverlay() {
+    function drawOverlay(animationTimestamp) {
         syncCanvasSize();
-        const w = zoneCanvas.width, h = zoneCanvas.height;
-        zoneCtx.clearRect(0, 0, w, h);
+        zoneCtx.clearRect(0, 0, zoneCanvas.width, zoneCanvas.height);
 
         if (layers.zones) {
-            zones.forEach(z => {
+            zonesForOverlay().forEach(z => {
                 if (z.active === false) return;
                 const poly = polygonFor(z);
                 if (poly.length < 3) return;
-                const label = z.marker_ids && z.marker_ids.length
-                    ? z.name + " — " + (z.severity || "DANGER")
-                    : z.name + " — " + (z.severity || "DANGER");
+                const label = z.name + " — " + (z.severity || "DANGER") +
+                    " — warning " + Number(z.warning_distance_m || 0).toFixed(1) + " m";
                 drawPolygon(poly, colorsFor(z.severity), { label: label });
             });
+
+            // Dynamic zones are attached to the current machine detection.
+            // The backend supplies a projected metric polygon after ground-plane
+            // calibration, or a cheap image-space fallback before calibration.
+            dynamicSafetyZones
+                .slice()
+                .sort((a, b) => (a.severity === "DANGER") - (b.severity === "DANGER"))
+                .forEach(z => {
+                    const poly = z.polygon || [];
+                    if (poly.length < 3) return;
+                    let limit = "dynamiczna";
+                    if (z.threshold_m !== null && z.threshold_m !== undefined) {
+                        limit = Number(z.threshold_m).toFixed(1) + " m";
+                    } else if (z.threshold_px !== null && z.threshold_px !== undefined) {
+                        limit = Math.round(z.threshold_px) + " px";
+                    }
+                    const mode = z.calibrated ? "metryczna" : "demo 2D";
+                    drawPolygon(poly, colorsFor(z.severity), {
+                        label: "MASZYNA · " + z.severity + " · " + limit + " · " + mode,
+                        lineWidth: z.severity === "DANGER" ? 3 : 2,
+                    });
+                });
         }
 
+        drawDistances();
+        drawBoxes();
+        // POS controls the MediaPipe skeleton independently from detector
+        // BBOX. It only affects drawing; posture analysis and alerts continue.
+        drawPosture(animationTimestamp);
         drawMarkers();
 
         if (drawing && draftPoly.length > 0) {
@@ -308,6 +655,7 @@
         markerZoneBtn.disabled = true;
         stack.classList.add("drawing");
         nameInput.value = "";
+        warningDistanceInput.value = "1.5";
         nameInput.focus();
         updateSaveEnabled();
         drawOverlay();
@@ -327,8 +675,12 @@
         if (draftPoly.length < 3) return;
         const name = (nameInput.value || "Strefa").trim().slice(0, 40);
         const severity = severitySelect.value;
+        const warningDistanceM = Math.max(0, Number(warningDistanceInput.value || 0));
         const next = zones.concat([{
-            name, severity, polygon: draftPoly, marker_ids: [], active: true,
+            name, severity, polygon: draftPoly, marker_ids: [],
+            warning_distance_m: warningDistanceM,
+            warning_distance_px: 60,
+            active: true,
         }]);
         try {
             await saveZones(next);
@@ -402,6 +754,7 @@
         markerZoneBtn.disabled = true;
         markerName.value = "";
         markerIds.value = "";
+        markerWarningDistance.value = "1.5";
         markerName.focus();
     }
     function closeMarkerPanel() {
@@ -422,6 +775,8 @@
             severity: markerSeverity.value,
             polygon: [],
             marker_ids: ids,
+            warning_distance_m: Math.max(0, Number(markerWarningDistance.value || 0)),
+            warning_distance_px: 60,
             active: true,
         }]);
         try {
@@ -441,23 +796,65 @@
     observer.observe(liveCanvas, { attributes: true, attributeFilter: ["width", "height"] });
     window.addEventListener("resize", () => drawOverlay());
 
-    function tick() {
-        if (drawing || zones.length > 0 || liveMarkers.length > 0) drawOverlay();
-        requestAnimationFrame(tick);
-    }
-    requestAnimationFrame(tick);
-
-    document.addEventListener("perimetr-frame", (evt) => {
-        const d = evt.detail || {};
+    function consumeFrame(d) {
         const active = d.active_zones || [];
         const next = {};
         active.forEach(a => { if (a.id && a.polygon) next[a.id] = a.polygon; });
         livePolygons = next;
+        liveActiveZones = active;
+        hasLiveZoneState = Array.isArray(d.active_zones);
         liveMarkers = d.markers || [];
+        dynamicSafetyZones = d.dynamic_safety_zones || [];
+        liveDetections = d.detections || [];
+        liveDangers = d.active_dangers || [];
+        personDistances = d.person_distances || [];
+        postureAssessments = d.posture_assessments || [];
+        const animationActive = postureInterpolator.update(
+            postureAssessments,
+            postureNow(),
+            d.timestamp,
+        );
+        if (animationActive) schedulePostureAnimation();
+        else cancelPostureAnimation();
+        workerIdentifications = d.worker_identifications || [];
+    }
+
+    document.addEventListener("perimetr-frame", (evt) => {
+        consumeFrame(evt.detail || {});
+        drawOverlay();
+    });
+
+    // app.js fires this after the raw image has decoded and both canvases have
+    // the exact current-frame dimensions.  It prevents one-frame drift when
+    // switching between 16:9 USB and 4:3 phone cameras.
+    document.addEventListener("perimetr-frame-rendered", (evt) => {
+        consumeFrame(evt.detail || {});
+        drawOverlay();
+    });
+
+    document.addEventListener("perimetr-camera-changed", (evt) => {
+        cameraId = evt.detail || "cam_default";
+        zones = [];
+        livePolygons = {};
+        liveActiveZones = [];
+        hasLiveZoneState = false;
+        liveMarkers = [];
+        dynamicSafetyZones = [];
+        liveDetections = [];
+        liveDangers = [];
+        personDistances = [];
+        postureAssessments = [];
+        postureInterpolator.clear();
+        cancelPostureAnimation();
+        workerIdentifications = [];
+        drawOverlay();
+        fetchZones();
     });
 
     document.addEventListener("perimetr-layers", (evt) => {
         layers = evt.detail || layers;
+        if (layers.posture) schedulePostureAnimation();
+        else cancelPostureAnimation();
         drawOverlay();
     });
 

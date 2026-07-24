@@ -7,31 +7,55 @@
     var filterMode = document.getElementById("filterMode");
     var filterSeverity = document.getElementById("filterSeverity");
     var filterKind = document.getElementById("filterKind");
+    var filterWorker = document.getElementById("filterWorker");
+    var filterReviewStatus = document.getElementById("filterReviewStatus");
     var filterSince = document.getElementById("filterSince");
     var filterUntil = document.getElementById("filterUntil");
     var applyBtn = document.getElementById("applyFilters");
     var clearBtn = document.getElementById("clearFilters");
     var exportBtn = document.getElementById("exportCsv");
+    var exportTrainingBtn = document.getElementById("exportTraining");
     var quickDateBtns = document.querySelectorAll(".quick-dates .chip");
     var sumTotal = document.getElementById("sumTotal");
     var sumDanger = document.getElementById("sumDanger");
     var sumWarning = document.getElementById("sumWarning");
+    var sumNew = document.getElementById("sumNew");
     var sumPpe = document.getElementById("sumPpe");
     var sumZone = document.getElementById("sumZone");
     var sumSite = document.getElementById("sumSite");
+    var sumPosture = document.getElementById("sumPosture");
+    var sumFall = document.getElementById("sumFall");
+    var sumSmoking = document.getElementById("sumSmoking");
+    var sumUnknown = document.getElementById("sumUnknown");
     var lightbox = document.getElementById("lightbox");
     var lightboxClose = document.getElementById("lightboxClose");
     var lightboxImg = document.getElementById("lightboxImg");
+    var lightboxVideo = document.getElementById("lightboxVideo");
     var lightboxTitle = document.getElementById("lightboxTitle");
     var lightboxTime = document.getElementById("lightboxTime");
     var lightboxMode = document.getElementById("lightboxMode");
     var lightboxCamera = document.getElementById("lightboxCamera");
     var lightboxRule = document.getElementById("lightboxRule");
     var lightboxSeverity = document.getElementById("lightboxSeverity");
+    var lightboxWorker = document.getElementById("lightboxWorker");
+    var lightboxReviewStatus = document.getElementById("lightboxReviewStatus");
     var lightboxDetails = document.getElementById("lightboxDetails");
+    var reviewedBy = document.getElementById("reviewedBy");
+    var reviewNote = document.getElementById("reviewNote");
+    var reviewSaveStatus = document.getElementById("reviewSaveStatus");
+    var reviewButtons = document.querySelectorAll("[data-review]");
 
     var MODE_LABEL = { site: "Plac", checkpoint: "Bramka" };
     var records = [];
+    var activeRecord = null;
+
+    var REVIEW_LABEL = {
+        new: "Nowe",
+        acknowledged: "Przyjęte",
+        confirmed: "Potwierdzone",
+        false_positive: "Fałszywy alarm",
+        escalated: "Eskalowane",
+    };
 
     function formatTime(ts) {
         var d = new Date(ts * 1000);
@@ -41,6 +65,19 @@
                String(d.getHours()).padStart(2, "0") + ":" +
                String(d.getMinutes()).padStart(2, "0") + ":" +
                String(d.getSeconds()).padStart(2, "0");
+    }
+
+    function formatWorker(details) {
+        if (!details) return "";
+        var workerId = details.worker_id;
+        var fullName = details.worker_full_name ||
+            [details.worker_first_name, details.worker_last_name].filter(Boolean).join(" ");
+        return [
+            fullName || (workerId ? "ID " + workerId : ""),
+            fullName && workerId ? "ID " + workerId : "",
+            details.worker_position,
+            details.worker_department,
+        ].filter(Boolean).join(" · ");
     }
 
     function localDatetimeToTs(v) {
@@ -63,6 +100,8 @@
         if (filterMode.value) qs.set("mode", filterMode.value);
         if (filterSeverity.value) qs.set("severity", filterSeverity.value);
         if (filterKind.value) qs.set("kind", filterKind.value);
+        if (filterWorker.value.trim()) qs.set("worker_id", filterWorker.value.trim());
+        if (filterReviewStatus.value) qs.set("review_status", filterReviewStatus.value);
         var r = activeSinceUntil();
         if (r.since !== null) qs.set("since", String(r.since));
         if (r.until !== null) qs.set("until", String(r.until));
@@ -71,6 +110,11 @@
 
     function buildSummaryQuery() {
         var qs = new URLSearchParams();
+        if (filterMode.value) qs.set("mode", filterMode.value);
+        if (filterSeverity.value) qs.set("severity", filterSeverity.value);
+        if (filterKind.value) qs.set("kind", filterKind.value);
+        if (filterWorker.value.trim()) qs.set("worker_id", filterWorker.value.trim());
+        if (filterReviewStatus.value) qs.set("review_status", filterReviewStatus.value);
         var r = activeSinceUntil();
         if (r.since !== null) qs.set("since", String(r.since));
         if (r.until !== null) qs.set("until", String(r.until));
@@ -99,9 +143,14 @@
         sumTotal.textContent = s.total;
         sumDanger.textContent = s.by_severity.DANGER || 0;
         sumWarning.textContent = s.by_severity.WARNING || 0;
+        sumNew.textContent = (s.by_review_status && s.by_review_status.new) || 0;
         sumPpe.textContent = s.by_kind.ppe_missing || 0;
-        sumZone.textContent = s.by_kind.zone_breach || 0;
+        sumZone.textContent = (s.by_kind.zone_breach || 0) + (s.by_kind.zone_approach || 0);
         sumSite.textContent = s.by_kind.site_hazard || 0;
+        sumPosture.textContent = s.by_kind.posture_anomaly || 0;
+        sumFall.textContent = s.by_kind.fall_detected || 0;
+        sumSmoking.textContent = s.by_kind.smoking_gesture || 0;
+        sumUnknown.textContent = s.by_kind.unidentified_worker || 0;
     }
 
     function render(list) {
@@ -142,6 +191,11 @@
         mode.textContent = (MODE_LABEL[rec.mode] || rec.mode).toUpperCase();
         thumb.appendChild(mode);
 
+        var review = document.createElement("span");
+        review.className = "review-tag review-" + (rec.review_status || "new");
+        review.textContent = REVIEW_LABEL[rec.review_status || "new"] || rec.review_status;
+        thumb.appendChild(review);
+
         var body = document.createElement("div");
         body.className = "card-body";
         var desc = document.createElement("div");
@@ -149,7 +203,8 @@
         desc.textContent = rec.description;
         var time = document.createElement("div");
         time.className = "time";
-        time.textContent = formatTime(rec.timestamp);
+        var workerLabel = formatWorker(rec.details);
+        time.textContent = formatTime(rec.timestamp) + (workerLabel ? " · " + workerLabel : "");
         body.appendChild(desc);
         body.appendChild(time);
 
@@ -160,7 +215,16 @@
     }
 
     function openLightbox(rec) {
+        activeRecord = rec;
         lightboxImg.src = rec.thumbnail_url || "";
+        if (rec.clip_url) {
+            lightboxVideo.src = rec.clip_url;
+            lightboxVideo.classList.remove("hidden");
+        } else {
+            lightboxVideo.pause();
+            lightboxVideo.removeAttribute("src");
+            lightboxVideo.classList.add("hidden");
+        }
         lightboxTitle.textContent = rec.description;
         lightboxTime.textContent = formatTime(rec.timestamp);
         lightboxMode.textContent = MODE_LABEL[rec.mode] || rec.mode;
@@ -168,6 +232,11 @@
         lightboxRule.textContent = rec.rule_name;
         lightboxSeverity.textContent = rec.severity;
         lightboxSeverity.className = "meta-val";
+        lightboxWorker.textContent = formatWorker(rec.details) || "niezidentyfikowany";
+        lightboxReviewStatus.textContent = REVIEW_LABEL[rec.review_status || "new"] || rec.review_status;
+        reviewedBy.value = rec.reviewed_by || "";
+        reviewNote.value = rec.review_note || "";
+        reviewSaveStatus.textContent = "";
         lightboxDetails.textContent = JSON.stringify(rec.details, null, 2);
         lightbox.classList.remove("hidden");
     }
@@ -175,6 +244,9 @@
     function closeLightbox() {
         lightbox.classList.add("hidden");
         lightboxImg.src = "";
+        lightboxVideo.pause();
+        lightboxVideo.removeAttribute("src");
+        activeRecord = null;
     }
 
     function refresh() {
@@ -219,45 +291,70 @@
         filterMode.value = "";
         filterSeverity.value = "";
         filterKind.value = "";
+        filterWorker.value = "";
+        filterReviewStatus.value = "";
         filterSince.value = "";
         filterUntil.value = "";
         setQuickRange("all");
     };
 
-    function csvEscape(v) {
-        if (v === null || v === undefined) return "";
-        var s = String(v);
-        if (s.indexOf(",") >= 0 || s.indexOf("\"") >= 0 || s.indexOf("\n") >= 0) {
-            return "\"" + s.replace(/"/g, "\"\"") + "\"";
-        }
-        return s;
+    function buildExportQuery() {
+        var qs = new URLSearchParams();
+        if (filterMode.value) qs.set("mode", filterMode.value);
+        if (filterSeverity.value) qs.set("severity", filterSeverity.value);
+        if (filterKind.value) qs.set("kind", filterKind.value);
+        if (filterWorker.value.trim()) qs.set("worker_id", filterWorker.value.trim());
+        if (filterReviewStatus.value) qs.set("review_status", filterReviewStatus.value);
+        var r = activeSinceUntil();
+        if (r.since !== null) qs.set("since", String(r.since));
+        if (r.until !== null) qs.set("until", String(r.until));
+        return qs.toString();
     }
 
     exportBtn.onclick = function () {
-        if (!records.length) return;
-        var header = ["timestamp_iso", "timestamp_epoch", "mode", "kind",
-                      "severity", "rule_name", "description", "camera_id",
-                      "thumbnail_url"];
-        var lines = [header.join(",")];
-        records.forEach(function (rec) {
-            var iso = new Date(rec.timestamp * 1000).toISOString();
-            lines.push([
-                iso, rec.timestamp, rec.mode, rec.kind, rec.severity,
-                rec.rule_name, rec.description, rec.camera_id,
-                rec.thumbnail_url || "",
-            ].map(csvEscape).join(","));
-        });
-        var blob = new Blob([lines.join("\n") + "\n"],
-                            { type: "text/csv;charset=utf-8" });
-        var url = URL.createObjectURL(blob);
-        var a = document.createElement("a");
-        a.href = url;
-        a.download = "perimetr-audit-" + new Date().toISOString().slice(0, 10) + ".csv";
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        setTimeout(function () { URL.revokeObjectURL(url); }, 200);
+        window.location.href = "/api/reports/export.csv?" + buildExportQuery();
     };
+    exportTrainingBtn.onclick = function () {
+        var status = filterReviewStatus.value || "confirmed";
+        if (["confirmed", "false_positive"].indexOf(status) < 0) status = "confirmed";
+        var qs = new URLSearchParams();
+        qs.set("review_status", status);
+        var r = activeSinceUntil();
+        if (r.since !== null) qs.set("since", String(r.since));
+        if (r.until !== null) qs.set("until", String(r.until));
+        window.location.href = "/api/reports/training.jsonl?" + qs.toString();
+    };
+
+    function saveReview(status) {
+        if (!activeRecord) return;
+        reviewSaveStatus.textContent = "Zapisywanie…";
+        fetch("/api/alerts/" + encodeURIComponent(activeRecord.id) + "/review", {
+            method: "PATCH",
+            credentials: "same-origin",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                status: status,
+                reviewed_by: reviewedBy.value.trim() || null,
+                note: reviewNote.value.trim() || null,
+            }),
+        }).then(function (r) {
+            if (!r.ok) throw new Error("HTTP " + r.status);
+            return r.json();
+        }).then(function (updated) {
+            activeRecord = updated;
+            lightboxReviewStatus.textContent = REVIEW_LABEL[updated.review_status] || updated.review_status;
+            reviewSaveStatus.textContent = "Zapisano";
+            refresh();
+        }).catch(function (e) {
+            reviewSaveStatus.textContent = "Błąd: " + e.message;
+        });
+    }
+
+    reviewButtons.forEach(function (button) {
+        button.addEventListener("click", function () {
+            saveReview(button.dataset.review);
+        });
+    });
     lightboxClose.onclick = closeLightbox;
     lightbox.onclick = function (e) {
         if (e.target === lightbox) closeLightbox();

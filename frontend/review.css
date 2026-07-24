@@ -397,3 +397,45 @@
     #lightboxImg { max-height: 50vh; }
     .lightbox-info { width: auto; }
 }
+
+.review-tag {
+    position: absolute;
+    left: 10px;
+    bottom: 10px;
+    padding: 4px 7px;
+    font: 600 9px/1.1 "JetBrains Mono", ui-monospace, monospace;
+    letter-spacing: .04em;
+    text-transform: uppercase;
+    background: rgba(250,250,248,.92);
+    color: #0a0a0a;
+}
+.review-confirmed { background: #dff4e6; }
+.review-false_positive { background: #ececec; }
+.review-escalated { background: #ffd8d6; }
+.review-acknowledged { background: #fff0c7; }
+#lightboxVideo {
+    width: min(62vw, 960px);
+    max-height: 72vh;
+    background: #0a0a0a;
+}
+.review-actions {
+    display: grid;
+    gap: 8px;
+    margin-top: 14px;
+    padding-top: 14px;
+    border-top: 1px solid var(--line, #ddd);
+}
+.review-actions input,
+.review-actions textarea {
+    width: 100%;
+    box-sizing: border-box;
+    padding: 9px 10px;
+    border: 1px solid #cfcfc9;
+    background: var(--surface, #fff);
+    color: var(--ink, #111);
+    font: inherit;
+}
+.review-actions textarea { min-height: 76px; resize: vertical; }
+.review-action-buttons { display: flex; flex-wrap: wrap; gap: 6px; }
+.review-save-status { min-height: 1em; font-size: 12px; color: var(--ink-3, #666); }
+.hidden { display: none !important; }

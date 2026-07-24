@@ -211,3 +211,36 @@ async def test_frame_ingest_no_breach_when_person_outside_zone():
         data = r.json()
         assert data["active_zone_breaches"] == []
         assert data["confirmed_zone_breaches"] == []
+
+
+@pytest.mark.asyncio
+async def test_frame_ingest_reports_zone_approach_distance():
+    # Zone starts at x=320, feet x=300 -> 20 px before the boundary.
+    person = Detection(class_id=0, class_name="person", category="person",
+                       box=(280, 280, 320, 460), confidence=0.9)
+    app.state.detector = _mock_detector([person])
+
+    async with _client() as c:
+        await c.put("/api/zones/cam_approach", json={"zones": [{
+            "name": "Szyb",
+            "severity": "DANGER",
+            "polygon": RIGHT_HALF,
+            "warning_distance_px": 30,
+            "warning_distance_m": 1.5,
+        }]})
+        r = await c.post(
+            "/api/frame",
+            files={"image": ("f.jpg", _jpeg(), "image/jpeg")},
+            data={"camera_id": "cam_approach", "mode": "site", "timestamp": "2000.0"},
+        )
+        assert r.status_code == 200
+        data = r.json()
+        assert len(data["confirmed_zone_breaches"]) == 1
+        event = data["confirmed_zone_breaches"][0]
+        assert event["rule_name"] == "zone_approach"
+        assert event["severity"] == "WARNING"
+        assert event["inside"] is False
+        assert event["distance_px"] == pytest.approx(20.0, abs=0.1)
+        rows = (await c.get("/api/alerts?kind=zone_approach")).json()
+        assert len(rows) == 1
+        assert rows[0]["details"]["inside"] is False

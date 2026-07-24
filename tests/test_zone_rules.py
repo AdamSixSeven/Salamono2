@@ -1,5 +1,6 @@
 import os
 import sys
+import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -185,3 +186,55 @@ class TestZoneTemporalFilter:
         # both confirmed independently
         assert len(confirmed) == 2
         assert {c.zone.id for c in confirmed} == {"a", "b"}
+
+
+def test_signed_distance_to_polygon_inside_and_outside():
+    from backend.zone_rules import signed_distance_to_polygon
+    poly = [(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)]
+    assert signed_distance_to_polygon((15.0, 5.0), poly) == pytest.approx(5.0)
+    assert signed_distance_to_polygon((5.0, 5.0), poly) == pytest.approx(-5.0)
+
+
+def test_static_zone_emits_warning_before_entry():
+    # Zone begins at x=320. Person feet at x=300: 20 px before boundary.
+    person = _person(box=(280, 200, 320, 450))
+    zone = Zone(
+        name="Szyb",
+        severity="DANGER",
+        polygon=RIGHT_HALF,
+        warning_distance_px=25.0,
+    )
+    events = ZoneBreachDetector().evaluate([person], [zone], 640, 480, 1.0)
+    assert len(events) == 1
+    event = events[0]
+    assert event.rule_name == "zone_approach"
+    assert event.severity == "WARNING"
+    assert event.inside is False
+    assert event.distance_px == pytest.approx(20.0, abs=1e-6)
+
+
+def test_static_zone_metric_distance_uses_calibration():
+    from backend.calibration import Calibration
+    # 100 px = 1 metre in both axes.
+    cal = Calibration(
+        camera_id="cam",
+        marker_ids=[1, 2, 3, 4],
+        width_m=6.4,
+        height_m=4.8,
+        homography=[[6.4, 0.0, 0.0], [0.0, 4.8, 0.0], [0.0, 0.0, 1.0]],
+        source_frame_width=640,
+        source_frame_height=480,
+    )
+    person = _person(box=(260, 200, 300, 450))  # foot x=280, 40 px = .4 m before zone
+    zone = Zone(
+        name="Wykop",
+        severity="DANGER",
+        polygon=RIGHT_HALF,
+        warning_distance_m=0.5,
+        warning_distance_px=1.0,
+    )
+    events = ZoneBreachDetector().evaluate([person], [zone], 640, 480, 1.0, cal)
+    assert len(events) == 1
+    assert events[0].rule_name == "zone_approach"
+    assert events[0].calibrated is True
+    assert events[0].distance_m == pytest.approx(0.4, abs=1e-6)
