@@ -1,14 +1,317 @@
+import asyncio
 import base64
+import logging
 import time
 import uuid
+from contextlib import nullcontext
+from dataclasses import dataclass, replace
+from types import SimpleNamespace
 
 import cv2
 import numpy as np
-from fastapi import APIRouter, File, Form, Request, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import JSONResponse
 
-from backend.danger_rules import DangerEvent
+from backend.calibration import Calibration
+from backend.camera_registry import CameraRegistry
+from backend.danger_rules import DangerEvent, DynamicSafetyZone
 from backend.detector import Detection
-from backend.models import AlertOut, AlertSeverity, DetectionOut, FrameResultOut
+from backend.frame_processor import FrameJob
+from backend.marker_detector import MarkerDetection
+from backend.posture_detector import (
+    POSE_LANDMARK_COUNT,
+    POSTURE_CONNECTIONS,
+    POSTURE_DRAW_MIN_VISIBILITY,
+    PostureAssessment,
+)
+from backend.models import (
+    ActiveZoneOut,
+    AlarmRecord,
+    AlertOut,
+    AlertSeverity,
+    DetectionOut,
+    DynamicSafetyZoneOut,
+    FrameAcceptedOut,
+    FrameResultOut,
+    MarkerDetectionOut,
+    PersonDistanceOut,
+    PPECheckOut,
+    PostureAssessmentOut,
+    WorkerIdentificationOut,
+    UnidentifiedWorkerOut,
+    ZoneBreachOut,
+)
+from backend.ppe_rules import PPEEvent
+from backend.worker_identification import WorkerIdentity, UnidentifiedWorkerEvent
+from backend.worker_store import WorkerRecord
+from backend.zone_rules import ZoneBreachEvent, signed_distance_to_polygon
+
+SITE_RULE_DESCRIPTIONS = {
+    "person_vehicle_overlap": "Osoba w obrysie pojazdu lub maszyny",
+    "person_vehicle_danger_zone": "Osoba w krytycznej strefie maszyny",
+    "person_near_vehicle": "Osoba w ostrzegawczej strefie maszyny",
+}
+
+MAX_FRAME_UPLOAD_BYTES = 12 * 1024 * 1024
+MAX_DECODED_FRAME_BYTES = 12 * 1024 * 1024
+logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class _FramePayload:
+    """Immutable metadata retained beside a detached background frame."""
+
+    mode: str
+    received_at: float
+    preview_jpeg_bytes: bytes
+    preview_jpeg_b64: str
+
+
+def _worker_id_for_person(
+    person: Detection | DetectionOut,
+    identities: list[WorkerIdentity],
+) -> str | None:
+    box = tuple(person.box)
+    for identity in identities:
+        if tuple(identity.person.box) == box:
+            return identity.worker_id
+    return None
+
+
+def _worker_profiles(
+    worker_store,
+    identities: list[WorkerIdentity],
+) -> dict[str, WorkerRecord]:
+    if worker_store is None or not identities:
+        return {}
+    return worker_store.get_many(identity.worker_id for identity in identities)
+
+
+def _attach_worker_profile(
+    record: AlarmRecord,
+    profile: WorkerRecord | None,
+) -> AlarmRecord:
+    """Snapshot profile fields so historical alerts remain auditable.
+
+    ``worker_id`` stays the canonical filter key.  Names are deliberately
+    copied only when the scanned identifier is registered; unknown QR tags
+    keep working exactly as before.
+    """
+    if profile is not None:
+        record.details.update({
+            "worker_first_name": profile.first_name,
+            "worker_last_name": profile.last_name,
+            "worker_full_name": profile.full_name,
+            "worker_position": profile.position,
+            "worker_department": profile.department,
+        })
+    return record
+
+
+def _site_record(
+    alert: AlertOut,
+    camera_id: str,
+    worker_id: str | None = None,
+    clip_url: str | None = None,
+) -> AlarmRecord:
+    details = {
+        "distance_px": alert.distance_px,
+        "distance_m": alert.distance_m,
+        "calibrated": alert.calibrated,
+        "overlap_iou": alert.overlap_iou,
+        "person_confidence": alert.person.confidence,
+        "hazard_confidence": alert.hazard.confidence,
+        "person_box": alert.person.box,
+        "hazard_box": alert.hazard.box,
+        "hazard_class": alert.hazard.class_name,
+    }
+    if worker_id:
+        details["worker_id"] = worker_id
+    return AlarmRecord(
+        id=alert.id,
+        timestamp=alert.timestamp,
+        mode="site",
+        kind="site_hazard",
+        severity=alert.severity,
+        rule_name=alert.rule_name,
+        description=SITE_RULE_DESCRIPTIONS.get(alert.rule_name, alert.rule_name),
+        camera_id=camera_id,
+        thumbnail_url=alert.frame_thumbnail_url,
+        clip_url=clip_url,
+        details=details,
+    )
+
+
+def _zone_record(
+    breach: ZoneBreachOut,
+    camera_id: str,
+    worker_id: str | None = None,
+    clip_url: str | None = None,
+) -> AlarmRecord:
+    details = {
+        "zone_id": breach.zone_id,
+        "zone_name": breach.zone_name,
+        "inside": breach.inside,
+        "distance_px": breach.distance_px,
+        "distance_m": breach.distance_m,
+        "calibrated": breach.calibrated,
+        "person_confidence": breach.person.confidence,
+        "person_box": breach.person.box,
+    }
+    if worker_id:
+        details["worker_id"] = worker_id
+    return AlarmRecord(
+        id=breach.id,
+        timestamp=breach.timestamp,
+        mode="site",
+        kind="zone_breach" if breach.rule_name == "zone_breach" else "zone_approach",
+        severity=breach.severity,
+        rule_name=breach.rule_name,
+        description=(
+            f"Wejscie w strefe: {breach.zone_name}"
+            if breach.rule_name == "zone_breach"
+            else f"Zblizanie do strefy: {breach.zone_name}"
+        ),
+        camera_id=camera_id,
+        thumbnail_url=breach.frame_thumbnail_url,
+        clip_url=clip_url,
+        details=details,
+    )
+
+
+def _ppe_record(
+    check: PPECheckOut,
+    camera_id: str,
+    worker_id: str | None = None,
+    clip_url: str | None = None,
+) -> AlarmRecord:
+    missing_pretty = {"hardhat": "kask", "vest": "kamizelka"}
+    missing_labels = [missing_pretty.get(m, m) for m in check.missing]
+    desc = "Brak PPE: " + " + ".join(missing_labels) if missing_labels else "PPE OK"
+    details = {
+        "missing": check.missing,
+        "has_hardhat": check.has_hardhat,
+        "has_vest": check.has_vest,
+        "person_confidence": check.person.confidence,
+        "person_box": check.person.box,
+    }
+    if worker_id:
+        details["worker_id"] = worker_id
+    return AlarmRecord(
+        id=check.id,
+        timestamp=check.timestamp,
+        mode="checkpoint",
+        kind="ppe_missing",
+        severity=check.severity,
+        rule_name="missing_" + "_".join(check.missing) if check.missing else "ppe_ok",
+        description=desc,
+        camera_id=camera_id,
+        thumbnail_url=check.frame_thumbnail_url,
+        clip_url=clip_url,
+        details=details,
+    )
+
+
+POSTURE_SIGNAL_DESCRIPTIONS = {
+    "repeated_body_sway": "powtarzalne kołysanie tułowia",
+    "unstable_trajectory": "niestabilny tor ruchu",
+    "irregular_step_pattern": "nieregularny wzorzec kroku",
+    "upper_body_instability": "niestabilność górnej części ciała",
+    "sudden_balance_loss": "nagła utrata równowagi",
+    "possible_fall": "możliwy upadek",
+    "hand_to_mouth_pattern": "powtarzalny gest ręka–usta",
+}
+
+
+def _posture_record(
+    assessment: PostureAssessmentOut,
+    camera_id: str,
+    worker_id: str | None = None,
+    clip_url: str | None = None,
+) -> AlarmRecord:
+    signal_labels = [
+        POSTURE_SIGNAL_DESCRIPTIONS.get(signal, signal)
+        for signal in assessment.signals
+    ]
+    is_fall = "possible_fall" in assessment.signals
+    coordination_signals = {
+        "repeated_body_sway",
+        "unstable_trajectory",
+        "irregular_step_pattern",
+        "upper_body_instability",
+        "sudden_balance_loss",
+    }
+    is_hand_to_mouth = (
+        "hand_to_mouth_pattern" in assessment.signals
+        and not coordination_signals.intersection(assessment.signals)
+    )
+    if is_fall:
+        kind = "fall_detected"
+        rule_name = "possible_fall"
+        desc = "Możliwy upadek lub osunięcie się pracownika"
+    elif is_hand_to_mouth:
+        kind = "smoking_gesture"
+        rule_name = "hand_to_mouth_pattern"
+        desc = "Powtarzalny gest ręka–usta — możliwe palenie, wymagana weryfikacja"
+    else:
+        kind = "posture_anomaly"
+        rule_name = "coordination_anomaly"
+        desc = "Nietypowy wzorzec koordynacji ruchowej"
+        if signal_labels:
+            desc += ": " + ", ".join(signal_labels[:2])
+    details = {
+        "track_id": assessment.track_id,
+        "risk_score": assessment.risk_score,
+        "status": assessment.status,
+        "signals": assessment.signals,
+        "metrics": assessment.metrics,
+        "pose_confidence": assessment.pose_confidence,
+        "history_seconds": assessment.history_seconds,
+        "person_confidence": assessment.person.confidence,
+        "person_box": assessment.person.box,
+        "interpretation": "requires_human_verification",
+    }
+    if worker_id:
+        details["worker_id"] = worker_id
+    return AlarmRecord(
+        id=assessment.id,
+        timestamp=assessment.timestamp,
+        mode="site",
+        kind=kind,
+        severity=assessment.severity,
+        rule_name=rule_name,
+        description=desc,
+        camera_id=camera_id,
+        thumbnail_url=assessment.frame_thumbnail_url,
+        clip_url=clip_url,
+        details=details,
+    )
+
+
+def _unidentified_record(
+    event_out: UnidentifiedWorkerOut,
+    camera_id: str,
+    mode: str,
+    clip_url: str | None = None,
+) -> AlarmRecord:
+    return AlarmRecord(
+        id=event_out.id,
+        timestamp=event_out.timestamp,
+        mode=mode,
+        kind="unidentified_worker",
+        severity=event_out.severity,
+        rule_name="worker_id_missing",
+        description="Osoba bez rozpoznanego identyfikatora QR",
+        camera_id=camera_id,
+        thumbnail_url=event_out.frame_thumbnail_url,
+        clip_url=clip_url,
+        details={
+            "person_box": event_out.person.box,
+            "person_confidence": event_out.person.confidence,
+            "interpretation": "visible_or_cached_worker_tag_not_found",
+        },
+    )
+
 
 router = APIRouter()
 
@@ -16,6 +319,292 @@ COLOR_PERSON = (0, 255, 0)
 COLOR_VEHICLE = (255, 136, 0)
 COLOR_DANGER = (0, 0, 255)
 COLOR_WARNING = (0, 165, 255)
+COLOR_HARDHAT = (255, 255, 0)
+COLOR_VEST = (0, 255, 255)
+COLOR_OK = (0, 200, 0)
+COLOR_ZONE_WARN = (0, 200, 255)
+COLOR_ZONE_DANGER = (60, 60, 255)
+COLOR_MARKER = (255, 0, 255)
+COLOR_MARKER_ACTIVE = (0, 255, 255)
+COLOR_POSTURE = (255, 200, 0)
+COLOR_POSTURE_OBSERVE = (255, 255, 0)
+
+
+def _live_preview_jpeg_bytes(
+    raw: bytes,
+    frame: np.ndarray,
+) -> bytes:
+    """Return JPEG bytes for the unannotated live background.
+
+    Phone/browser capture already uploads JPEG, so retaining those bytes
+    avoids a second lossy compression pass.  Other OpenCV-readable formats
+    are normalized because the response contract and panel data URL both
+    explicitly declare ``image/jpeg``.
+    """
+    if raw.startswith(b"\xff\xd8"):
+        jpeg = raw
+    else:
+        encoded, jpeg_buffer = cv2.imencode(
+            ".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 90],
+        )
+        if not encoded:
+            return b""
+        jpeg = jpeg_buffer.tobytes()
+    return jpeg
+
+
+def _live_preview_jpeg(
+    raw: bytes,
+    frame: np.ndarray,
+) -> tuple[bytes, str]:
+    jpeg = _live_preview_jpeg_bytes(raw, frame)
+    return jpeg, base64.b64encode(jpeg).decode() if jpeg else ""
+
+
+def _live_preview_jpeg_b64(raw: bytes, frame: np.ndarray) -> str:
+    """Backward-compatible helper used by focused route tests."""
+
+    return _live_preview_jpeg(raw, frame)[1]
+
+
+# How long a marker-defined zone remembers its last polygon after all
+# corner markers stop being visible. Keeps the zone alive across brief
+# occlusions instead of flickering off for a frame or two.
+MARKER_ZONE_CACHE_TTL = 2.0
+
+
+def _resolve_marker_zones(zones, markers, camera_id: str,
+                          cache: dict, now: float,
+                          frame_w: int, frame_h: int):
+    """Return zones with their polygon field filled in from marker positions.
+
+    - Regular (polygon) zones pass through unchanged.
+    - Marker-defined zones: if all corner markers visible → recompute polygon
+      from their centres and refresh cache. If some missing → fall back to
+      last-seen polygon if fresh (< MARKER_ZONE_CACHE_TTL), otherwise drop
+      the zone from this frame.
+    """
+    by_id = {m.marker_id: m for m in markers}
+    resolved = []
+    for z in zones:
+        if not z.marker_ids:
+            resolved.append(z)
+            continue
+        centres = []
+        all_visible = True
+        for mid in z.marker_ids:
+            m = by_id.get(int(mid))
+            if m is None:
+                all_visible = False
+                break
+            cx, cy = m.center
+            centres.append([cx / frame_w, cy / frame_h])
+        cache_key = (camera_id, z.id)
+        if all_visible:
+            cache[cache_key] = (centres, now)
+            polygon = centres
+        else:
+            cached = cache.get(cache_key)
+            if cached and (now - cached[1]) < MARKER_ZONE_CACHE_TTL:
+                polygon = cached[0]
+            else:
+                continue
+        z_copy = z.model_copy()
+        z_copy.polygon = polygon
+        resolved.append(z_copy)
+    return resolved
+
+
+def _marker_to_out(m: MarkerDetection) -> MarkerDetectionOut:
+    return MarkerDetectionOut(
+        marker_id=m.marker_id,
+        corners=[[float(x), float(y)] for x, y in m.corners],
+        center=[float(m.center[0]), float(m.center[1])],
+    )
+
+
+def _scheduled_markers(
+    request: Request,
+    frame: np.ndarray,
+    camera_id: str,
+    zones,
+) -> list[MarkerDetection]:
+    """Run ArUco only when the current camera can use its result.
+
+    Tests and small embedding applications which construct ``app.state``
+    manually remain compatible: without a scheduler we retain the historical
+    direct-detector behaviour.
+    """
+    scheduler = getattr(request.app.state, "marker_scheduler", None)
+    if scheduler is None:
+        return request.app.state.marker_detector.detect(frame)
+    marker_zones_active = any(
+        zone.active and len(zone.marker_ids) >= 3
+        for zone in zones
+    )
+    return scheduler.process(
+        camera_id,
+        frame,
+        marker_zones_active=marker_zones_active,
+    )
+
+
+def _worker_to_out(
+    identity: WorkerIdentity,
+    profile: WorkerRecord | None = None,
+) -> WorkerIdentificationOut:
+    return WorkerIdentificationOut(
+        worker_id=identity.worker_id,
+        source=identity.source,
+        person_box=list(identity.person.box),
+        tag_polygon=[[round(x, 1), round(y, 1)] for x, y in identity.tag_polygon],
+        cached=identity.cached,
+        registered=profile is not None,
+        first_name=profile.first_name if profile is not None else None,
+        last_name=profile.last_name if profile is not None else None,
+        full_name=profile.full_name if profile is not None else None,
+        position=profile.position if profile is not None else None,
+        department=profile.department if profile is not None else None,
+    )
+
+
+def _unidentified_to_out(
+    event: UnidentifiedWorkerEvent,
+    event_id: str,
+    thumb_url: str | None = None,
+) -> UnidentifiedWorkerOut:
+    return UnidentifiedWorkerOut(
+        id=event_id,
+        severity=AlertSeverity(event.severity),
+        person=_det_to_out(event.person),
+        timestamp=event.frame_timestamp,
+        frame_thumbnail_url=thumb_url,
+    )
+
+
+def _dynamic_zone_to_out(
+    zone: DynamicSafetyZone,
+    frame_w: int,
+    frame_h: int,
+) -> DynamicSafetyZoneOut:
+    polygon = [
+        [
+            round(float(x) / max(frame_w, 1), 6),
+            round(float(y) / max(frame_h, 1), 6),
+        ]
+        for x, y in zone.polygon_px
+    ]
+    return DynamicSafetyZoneOut(
+        zone_id=zone.zone_id,
+        severity=AlertSeverity(zone.severity),
+        hazard=_det_to_out(zone.hazard),
+        polygon=polygon,
+        threshold_m=(round(zone.threshold_m, 2) if zone.threshold_m is not None else None),
+        threshold_px=(round(zone.threshold_px, 1) if zone.threshold_px is not None else None),
+        calibrated=zone.calibrated,
+    )
+
+
+def _person_distances(
+    persons: list[Detection],
+    zones: list,
+    frame_w: int,
+    frame_h: int,
+    calibration: Calibration | None,
+) -> list[PersonDistanceOut]:
+    """Return the nearest configured-zone boundary for every person."""
+    active_zones = [z for z in zones if z.active and len(z.polygon) >= 3]
+    if not active_zones:
+        return []
+    out: list[PersonDistanceOut] = []
+    for p in persons:
+        x1, y1, x2, y2 = p.box
+        foot_x = (x1 + x2) / 2.0
+        foot_y = float(y2)
+        candidates = []
+        for zone in active_zones:
+            polygon_px = [
+                (float(x) * frame_w, float(y) * frame_h)
+                for x, y in zone.polygon
+            ]
+            distance_px = signed_distance_to_polygon((foot_x, foot_y), polygon_px)
+            distance_m = None
+            if calibration is not None:
+                foot_m = calibration.project(
+                    foot_x, foot_y, frame_w, frame_h,
+                )
+                polygon_m = [
+                    calibration.project(x, y, frame_w, frame_h)
+                    for x, y in polygon_px
+                ]
+                distance_m = signed_distance_to_polygon(foot_m, polygon_m)
+            ranking = abs(distance_m) if distance_m is not None else abs(distance_px)
+            candidates.append((ranking, zone, distance_px, distance_m))
+        if not candidates:
+            continue
+        _ranking, zone, distance_px, distance_m = min(candidates, key=lambda item: item[0])
+        signed = distance_m if distance_m is not None else distance_px
+        out.append(PersonDistanceOut(
+            person_box=[int(x1), int(y1), int(x2), int(y2)],
+            zone_id=zone.id,
+            zone_name=zone.name,
+            distance_px=round(distance_px, 1),
+            distance_m=(round(distance_m, 2) if distance_m is not None else None),
+            inside=signed <= 0.0,
+            calibrated=distance_m is not None,
+        ))
+    return out
+
+
+def _annotate_markers(frame: np.ndarray,
+                      markers: list[MarkerDetection],
+                      calibration_ids: set[int]) -> np.ndarray:
+    if not markers:
+        return frame
+    out = frame
+    for m in markers:
+        pts = np.array([[int(round(x)), int(round(y))] for x, y in m.corners],
+                       dtype=np.int32)
+        color = COLOR_MARKER_ACTIVE if m.marker_id in calibration_ids else COLOR_MARKER
+        cv2.polylines(out, [pts], isClosed=True, color=color, thickness=2,
+                      lineType=cv2.LINE_AA)
+        cx, cy = m.center
+        cv2.putText(out, f"ID {m.marker_id}",
+                    (int(cx) - 20, int(cy) + 4),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2, cv2.LINE_AA)
+    return out
+
+
+def _annotate_person_distances(frame: np.ndarray,
+                               distances: list[PersonDistanceOut]) -> np.ndarray:
+    if not distances:
+        return frame
+    out = frame
+    for d in distances:
+        x1, y1, x2, y2 = d.person_box
+        if d.distance_m is not None:
+            amount = abs(d.distance_m)
+            unit = "m"
+        else:
+            amount = abs(d.distance_px or 0.0)
+            unit = "px"
+        if d.inside:
+            label = f"{d.zone_name}: WEWNATRZ ({amount:.1f} {unit})"
+            color = COLOR_DANGER
+        else:
+            label = f"{d.zone_name}: {amount:.1f} {unit}"
+            color = COLOR_OK if amount > 1.5 and unit == "m" else COLOR_WARNING
+        (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 1)
+        # Draw slightly below the person bbox top so it doesn't collide with
+        # the class label rendered above the bbox by _annotate_site.
+        text_x = x1
+        text_y = min(y2 + th + 8, frame.shape[0] - 4)
+        cv2.rectangle(out, (text_x, text_y - th - 4),
+                      (text_x + tw + 6, text_y + 2), color, -1)
+        cv2.putText(out, label, (text_x + 3, text_y - 2),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1,
+                    cv2.LINE_AA)
+    return out
 
 
 def _det_to_out(d: Detection) -> DetectionOut:
@@ -37,15 +626,309 @@ def _event_to_alert(e: DangerEvent, alert_id: str,
         person=_det_to_out(e.person),
         hazard=_det_to_out(e.hazard),
         distance_px=round(e.distance_px, 1),
+        distance_m=(round(e.distance_m, 2) if e.distance_m is not None else None),
+        calibrated=e.calibrated,
         overlap_iou=round(e.overlap_iou, 3),
         timestamp=e.frame_timestamp,
         frame_thumbnail_url=thumb_url,
     )
 
 
-def _annotate(frame: np.ndarray, detections: list[Detection],
-              raw_dangers: list[DangerEvent],
-              confirmed: list[DangerEvent]) -> np.ndarray:
+def _zone_to_out(e: ZoneBreachEvent, breach_id: str,
+                  thumb_url: str | None = None) -> ZoneBreachOut:
+    return ZoneBreachOut(
+        id=breach_id,
+        zone_id=e.zone.id,
+        zone_name=e.zone.name,
+        severity=AlertSeverity(e.severity),
+        rule_name=e.rule_name,
+        inside=e.inside,
+        distance_px=(round(e.distance_px, 1) if e.distance_px is not None else None),
+        distance_m=(round(e.distance_m, 2) if e.distance_m is not None else None),
+        calibrated=e.calibrated,
+        person=_det_to_out(e.person),
+        timestamp=e.frame_timestamp,
+        frame_thumbnail_url=thumb_url,
+    )
+
+
+def _ppe_to_out(e: PPEEvent, check_id: str,
+                thumb_url: str | None = None) -> PPECheckOut:
+    return PPECheckOut(
+        id=check_id,
+        severity=AlertSeverity(e.severity),
+        missing=e.missing,
+        has_hardhat=e.hardhat is not None,
+        has_vest=e.vest is not None,
+        person=_det_to_out(e.person),
+        timestamp=e.frame_timestamp,
+        frame_thumbnail_url=thumb_url,
+    )
+
+
+def _posture_to_out(
+    assessment: PostureAssessment,
+    assessment_id: str,
+    thumb_url: str | None = None,
+) -> PostureAssessmentOut:
+    pose_landmarks: list[list[float]] = []
+    pose = assessment.landmarks
+    if pose is not None and pose.ndim == 2 and pose.shape[1] >= 4:
+        landmark_count = min(POSE_LANDMARK_COUNT, pose.shape[0])
+        for idx in range(landmark_count):
+            x, y, z, visibility = pose[idx, :4]
+            if not np.isfinite((x, y, z, visibility)).all():
+                # Preserve landmark indices (connections refer to them) while
+                # ensuring the JSON payload never contains NaN/Infinity.
+                x, y, z, visibility = 0.0, 0.0, 0.0, 0.0
+            pose_landmarks.append([
+                round(float(x), 6),
+                round(float(y), 6),
+                round(float(z), 6),
+                round(float(visibility), 3),
+            ])
+
+    return PostureAssessmentOut(
+        id=assessment_id,
+        track_id=assessment.track_id,
+        severity=AlertSeverity(assessment.severity),
+        status=assessment.status,
+        risk_score=round(assessment.risk_score, 3),
+        signals=list(assessment.signals),
+        metrics=dict(assessment.metrics),
+        pose_confidence=round(assessment.pose_confidence, 3),
+        history_seconds=round(assessment.history_seconds, 2),
+        person=_det_to_out(assessment.person),
+        pose_landmarks=pose_landmarks,
+        timestamp=assessment.frame_timestamp,
+        confirmed=assessment.confirmed,
+        frame_thumbnail_url=thumb_url,
+    )
+
+
+def _annotate_posture(
+    frame: np.ndarray,
+    assessments: list[PostureAssessment],
+) -> np.ndarray:
+    if not assessments:
+        return frame
+    out = frame
+    h, w = out.shape[:2]
+    for assessment in assessments:
+        if assessment.severity == "DANGER":
+            color = COLOR_DANGER
+        elif assessment.severity == "WARNING":
+            color = COLOR_WARNING
+        else:
+            color = COLOR_POSTURE_OBSERVE
+
+        pose = assessment.landmarks
+        if pose is not None and pose.ndim == 2 and pose.shape[1] >= 4:
+            points: dict[int, tuple[int, int]] = {}
+            landmark_count = min(POSE_LANDMARK_COUNT, pose.shape[0])
+            for idx in range(landmark_count):
+                x, y, _, visibility = pose[idx, :4]
+                if (
+                    visibility < POSTURE_DRAW_MIN_VISIBILITY
+                    or not np.isfinite((x, y, visibility)).all()
+                    or not (0.0 <= x <= 1.0 and 0.0 <= y <= 1.0)
+                ):
+                    continue
+                points[idx] = (
+                    min(w - 1, max(0, int(round(float(x) * (w - 1))))),
+                    min(h - 1, max(0, int(round(float(y) * (h - 1))))),
+                )
+
+            for a, b in POSTURE_CONNECTIONS:
+                if a not in points or b not in points:
+                    continue
+                cv2.line(out, points[a], points[b], color, 2, cv2.LINE_AA)
+            for point in points.values():
+                cv2.circle(out, point, 3, color, -1, cv2.LINE_AA)
+
+        if assessment.status == "collecting_history":
+            label = f"POSTURE #{assessment.track_id}: kalibracja"
+        else:
+            label = (
+                f"POSTURE #{assessment.track_id}: "
+                f"{assessment.risk_score:.0%} {assessment.status}"
+            )
+        x1, y1, x2, _ = assessment.person.box
+        text_y = max(18, y1 - 24)
+        (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.48, 1)
+        cv2.rectangle(out, (x1, text_y - th - 5),
+                      (min(w - 1, x1 + tw + 6), text_y + 2), color, -1)
+        cv2.putText(out, label, (x1 + 3, text_y - 2),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.48, (0, 0, 0), 1, cv2.LINE_AA)
+        if assessment.confirmed:
+            cv2.rectangle(out, (x1, y1), (x2, assessment.person.box[3]), color, 3)
+    return out
+
+
+def _annotate_zones(frame: np.ndarray, zones: list,
+                    active_breaches: list[ZoneBreachEvent]) -> np.ndarray:
+    if not zones:
+        return frame
+    h, w = frame.shape[:2]
+    breached_ids = {b.zone.id for b in active_breaches if b.inside}
+    approach_ids = {b.zone.id for b in active_breaches if not b.inside}
+    out = frame
+    overlay = frame.copy()
+    for z in zones:
+        if not z.active or len(z.polygon) < 3:
+            continue
+        pts = np.array(
+            [[int(round(x * w)), int(round(y * h))] for x, y in z.polygon],
+            dtype=np.int32,
+        )
+        is_danger = z.severity == "DANGER"
+        base_color = COLOR_ZONE_DANGER if is_danger else COLOR_ZONE_WARN
+        breached = z.id in breached_ids
+        approaching = z.id in approach_ids
+        cv2.fillPoly(overlay, [pts], base_color)
+        alpha = 0.35 if breached else (0.23 if approaching else 0.15)
+        cv2.addWeighted(overlay, alpha, out, 1 - alpha, 0, out)
+        border = COLOR_DANGER if breached else (COLOR_WARNING if approaching else base_color)
+        thickness = 3 if breached else 2
+        cv2.polylines(out, [pts], isClosed=True, color=border,
+                      thickness=thickness, lineType=cv2.LINE_AA)
+        label_x, label_y = int(pts[0][0]), max(20, int(pts[0][1]) - 8)
+        label = z.name
+        (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 1)
+        cv2.rectangle(out, (label_x, label_y - th - 4),
+                      (label_x + tw + 6, label_y + 2), border, -1)
+        cv2.putText(out, label, (label_x + 3, label_y - 2),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1,
+                    cv2.LINE_AA)
+    return out
+
+
+def _annotate_zone_distances(
+    frame: np.ndarray,
+    events: list[ZoneBreachEvent],
+) -> np.ndarray:
+    """Draw the nearest static-zone distance next to each affected person."""
+    if not events:
+        return frame
+    out = frame
+    by_person: dict[tuple[int, int, int, int], ZoneBreachEvent] = {}
+    for event in events:
+        key = tuple(event.person.box)
+        current = by_person.get(key)
+        current_distance = (
+            abs(current.distance_m) if current and current.distance_m is not None
+            else abs(current.distance_px) if current and current.distance_px is not None
+            else float("inf")
+        )
+        event_distance = (
+            abs(event.distance_m) if event.distance_m is not None
+            else abs(event.distance_px) if event.distance_px is not None
+            else float("inf")
+        )
+        if current is None or event.inside or event_distance < current_distance:
+            by_person[key] = event
+
+    for event in by_person.values():
+        x1, _y1, _x2, y2 = event.person.box
+        if event.distance_m is not None:
+            amount = abs(event.distance_m)
+            unit = "m"
+        else:
+            amount = abs(event.distance_px or 0.0)
+            unit = "px"
+        if event.inside:
+            label = f"{event.zone.name}: WEWNATRZ ({amount:.1f} {unit})"
+            color = COLOR_DANGER
+        else:
+            label = f"{event.zone.name}: {amount:.1f} {unit}"
+            color = COLOR_WARNING
+        (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.48, 1)
+        text_y = min(y2 + th + 28, out.shape[0] - 4)
+        cv2.rectangle(out, (x1, text_y - th - 4),
+                      (min(out.shape[1] - 1, x1 + tw + 6), text_y + 2), color, -1)
+        cv2.putText(out, label, (x1 + 3, text_y - 2),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.48, (255, 255, 255), 1,
+                    cv2.LINE_AA)
+    return out
+
+
+def _annotate_dynamic_safety_zones(
+    frame: np.ndarray,
+    zones: list[DynamicSafetyZone],
+) -> np.ndarray:
+    if not zones:
+        return frame
+    out = frame
+    # Draw WARNING first, then the smaller DANGER zone on top.
+    for zone in sorted(zones, key=lambda item: item.severity == "DANGER"):
+        if len(zone.polygon_px) < 3:
+            continue
+        pts = np.asarray(
+            [[int(round(x)), int(round(y))] for x, y in zone.polygon_px],
+            dtype=np.int32,
+        )
+        color = COLOR_DANGER if zone.severity == "DANGER" else COLOR_WARNING
+        overlay = out.copy()
+        cv2.fillPoly(overlay, [pts], color)
+        alpha = 0.10 if zone.severity == "DANGER" else 0.055
+        cv2.addWeighted(overlay, alpha, out, 1.0 - alpha, 0, out)
+        cv2.polylines(out, [pts], True, color, 2, cv2.LINE_AA)
+        x, y = zone.hazard.box[0], max(18, zone.hazard.box[1] - (32 if zone.severity == "DANGER" else 50))
+        if zone.threshold_m is not None:
+            label = f"{zone.severity} {zone.threshold_m:.1f} m"
+        else:
+            label = f"{zone.severity} strefa dynamiczna"
+        cv2.putText(out, label, (x, y), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.48, color, 2, cv2.LINE_AA)
+    return out
+
+
+def _annotate_worker_ids(
+    frame: np.ndarray,
+    identities: list[WorkerIdentity],
+) -> np.ndarray:
+    if not identities:
+        return frame
+    out = frame
+    for identity in identities:
+        x1, y1, _, _ = identity.person.box
+        label = f"ID {identity.worker_id}" + (" ~" if identity.cached else "")
+        (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.52, 1)
+        text_y = max(th + 5, y1 - 44)
+        cv2.rectangle(out, (x1, text_y - th - 5), (x1 + tw + 6, text_y + 2),
+                      (180, 80, 255), -1)
+        cv2.putText(out, label, (x1 + 3, text_y - 2),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.52, (255, 255, 255), 1,
+                    cv2.LINE_AA)
+        if identity.tag_polygon and not identity.cached:
+            pts = np.asarray(
+                [[int(round(x)), int(round(y))] for x, y in identity.tag_polygon],
+                dtype=np.int32,
+            )
+            cv2.polylines(out, [pts], True, (180, 80, 255), 2, cv2.LINE_AA)
+    return out
+
+
+def _annotate_unidentified(
+    frame: np.ndarray,
+    events: list[UnidentifiedWorkerEvent],
+) -> np.ndarray:
+    if not events:
+        return frame
+    out = frame
+    for event in events:
+        x1, y1, x2, y2 = event.person.box
+        cv2.rectangle(out, (x1, y1), (x2, y2), COLOR_WARNING, 3)
+        label = "ID BRAK"
+        cv2.rectangle(out, (x1, max(0, y1 - 22)), (x1 + 70, y1), COLOR_WARNING, -1)
+        cv2.putText(out, label, (x1 + 4, max(14, y1 - 5)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1, cv2.LINE_AA)
+    return out
+
+
+def _annotate_site(frame: np.ndarray, detections: list[Detection],
+                   raw_dangers: list[DangerEvent],
+                   confirmed: list[DangerEvent]) -> np.ndarray:
     out = frame.copy()
 
     for d in detections:
@@ -74,12 +957,6 @@ def _annotate(frame: np.ndarray, detections: list[Detection],
                       COLOR_DANGER, -1)
         cv2.addWeighted(overlay, 0.3, out, 0.7, 0, out)
 
-        pc = ((e.person.box[0] + e.person.box[2]) // 2,
-              (e.person.box[1] + e.person.box[3]) // 2)
-        hc = ((e.hazard.box[0] + e.hazard.box[2]) // 2,
-              (e.hazard.box[1] + e.hazard.box[3]) // 2)
-        cv2.line(out, pc, hc, COLOR_DANGER, 3, cv2.LINE_AA)
-
     if confirmed:
         cv2.rectangle(out, (0, 0), (out.shape[1], 40), COLOR_DANGER, -1)
         cv2.putText(out, f"ALARM — {len(confirmed)} danger(s)",
@@ -89,63 +966,771 @@ def _annotate(frame: np.ndarray, detections: list[Detection],
     return out
 
 
-@router.post("/frame", response_model=FrameResultOut)
+def _annotate_ppe(frame: np.ndarray, detections: list[Detection],
+                  events: list[PPEEvent]) -> np.ndarray:
+    out = frame.copy()
+
+    for d in detections:
+        x1, y1, x2, y2 = d.box
+        if d.category == "person":
+            color = COLOR_PERSON
+        elif d.category == "hardhat":
+            color = COLOR_HARDHAT
+        elif d.category == "vest":
+            color = COLOR_VEST
+        else:
+            continue
+        cv2.rectangle(out, (x1, y1), (x2, y2), color, 2)
+
+    banner_color = None
+    banner_text = None
+    for e in events:
+        if not e.confirmed:
+            continue
+        color = COLOR_DANGER if e.missing else COLOR_OK
+        overlay = out.copy()
+        cv2.rectangle(overlay,
+                      (e.person.box[0], e.person.box[1]),
+                      (e.person.box[2], e.person.box[3]),
+                      color, -1)
+        cv2.addWeighted(overlay, 0.25, out, 0.75, 0, out)
+        if e.missing:
+            banner_color = COLOR_DANGER
+            banner_text = "MISSING: " + " + ".join(m.upper() for m in e.missing)
+        else:
+            banner_color = COLOR_OK
+            banner_text = "PPE OK"
+
+    if banner_color and banner_text:
+        cv2.rectangle(out, (0, 0), (out.shape[1], 40), banner_color, -1)
+        cv2.putText(out, banner_text, (10, 28),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+
+    return out
+
+
+def _handle_site(
+    request: Request,
+    frame: np.ndarray,
+    now: float,
+    t0: float,
+    camera_id: str,
+    preview_jpeg_b64: str,
+) -> FrameResultOut:
+    detector = request.app.state.detector
+    danger_detector = request.app.state.danger_detector
+    temporal_filter = request.app.state.temporal_filter
+    frame_store = request.app.state.frame_store
+    alert_store = request.app.state.alert_store
+    evidence_recorder = getattr(request.app.state, "evidence_recorder", None)
+    zone_store = request.app.state.zone_store
+    zone_detector = request.app.state.zone_detector
+    zone_temporal_filter = request.app.state.zone_temporal_filter
+    calibration_store = request.app.state.calibration_store
+    posture_manager = getattr(request.app.state, "posture_manager", None)
+    worker_identifier = getattr(request.app.state, "worker_identifier", None)
+    unidentified_monitor = getattr(request.app.state, "unidentified_worker_monitor", None)
+    worker_store = getattr(request.app.state, "worker_store", None)
+
+    detections = detector.detect(frame)
+
+    # Debug: inject a synthetic person into the detection list for N frames.
+    inj = request.app.state.debug_inject_person
+    if inj and inj.get("remaining", 0) > 0:
+        fh_i, fw_i = frame.shape[:2]
+        x1n, y1n, x2n, y2n = inj["box_norm"]
+        detections.append(Detection(
+            class_id=0,
+            class_name="person",
+            category="person",
+            box=(int(x1n * fw_i), int(y1n * fh_i),
+                 int(x2n * fw_i), int(y2n * fh_i)),
+            confidence=float(inj["confidence"]),
+        ))
+        inj["remaining"] -= 1
+        if inj["remaining"] <= 0:
+            request.app.state.debug_inject_person = None
+
+    fh, fw = frame.shape[:2]
+    zones = zone_store.for_camera(camera_id)
+    markers = _scheduled_markers(request, frame, camera_id, zones)
+    stored_calibration = calibration_store.get(camera_id)
+    calibration = (
+        stored_calibration
+        if stored_calibration is not None
+        and stored_calibration.is_compatible(fw, fh)
+        else None
+    )
+    persons = [d for d in detections if d.category == "person"]
+
+    worker_identities: list[WorkerIdentity] = []
+    if worker_identifier is not None and worker_identifier.available:
+        worker_identities = worker_identifier.process(
+            camera_id, frame, persons, now,
+        )
+    worker_profiles = _worker_profiles(worker_store, worker_identities)
+    unidentified_events = (
+        unidentified_monitor.update(camera_id, "site", persons, worker_identities, now)
+        if unidentified_monitor is not None else []
+    )
+
+    # Metric ground-plane proximity is used after ArUco calibration.  Before
+    # calibration the same two-stage logic remains available in pixel space.
+    raw_dangers = danger_detector.evaluate(
+        detections, now, calibration, frame_w=fw, frame_h=fh,
+    )
+    confirmed = temporal_filter.update(raw_dangers, now)
+    dynamic_safety_zones = danger_detector.dynamic_zones(
+        detections, fw, fh, calibration,
+    )
+
+    zones = _resolve_marker_zones(
+        zones, markers, camera_id,
+        request.app.state.marker_zone_cache,
+        now, fw, fh,
+    )
+    raw_zone_breaches = zone_detector.evaluate(
+        detections, zones, fw, fh, now, calibration,
+    )
+    confirmed_zone_breaches = zone_temporal_filter.update(raw_zone_breaches, now)
+    person_distances = _person_distances(persons, zones, fw, fh, calibration)
+
+    posture_assessments: list[PostureAssessment] = []
+    if posture_manager is not None and posture_manager.available:
+        posture_worker = getattr(request.app.state, "posture_worker", None)
+        if posture_worker is None:
+            # Compatibility path for small embedded deployments and tests.
+            # Production initializes a dedicated worker in ``main.py``.
+            posture_result = posture_manager.process(camera_id, frame, persons, now)
+            posture_assessments = posture_result.assessments
+        else:
+            # MediaPipe owns a private frame copy and never blocks the main
+            # detector pipeline. Its one-slot queue always replaces stale work.
+            posture_worker.submit_latest(camera_id, frame, persons, now)
+            posture_snapshot = posture_worker.get_latest(camera_id)
+            if posture_snapshot is not None and posture_snapshot.result is not None:
+                posture_assessments = posture_snapshot.result.assessments
+
+                # A completed background result can be reused over multiple
+                # YOLO frames. Persist its confirmed alert only once while
+                # retaining the cached landmarks for a stable live skeleton.
+                seen = getattr(
+                    request.app.state,
+                    "posture_confirmations_seen",
+                    None,
+                )
+                if seen is None:
+                    seen = {}
+                    request.app.state.posture_confirmations_seen = seen
+                result_key = (
+                    posture_snapshot.frame_timestamp,
+                    posture_snapshot.completed_at,
+                )
+                if seen.get(camera_id) == result_key:
+                    posture_assessments = [
+                        replace(assessment, confirmed=False)
+                        if assessment.confirmed else assessment
+                        for assessment in posture_assessments
+                    ]
+                else:
+                    seen[camera_id] = result_key
+
+    annotated = _annotate_zones(frame, zones, raw_zone_breaches)
+    annotated = _annotate_dynamic_safety_zones(annotated, dynamic_safety_zones)
+    annotated = _annotate_site(annotated, detections, raw_dangers, confirmed)
+    calibration_ids = (
+        set(stored_calibration.marker_ids) if stored_calibration else set()
+    )
+    annotated = _annotate_markers(annotated, markers, calibration_ids)
+    annotated = _annotate_person_distances(annotated, person_distances)
+    annotated = _annotate_posture(annotated, posture_assessments)
+    annotated = _annotate_worker_ids(annotated, worker_identities)
+    annotated = _annotate_unidentified(annotated, unidentified_events)
+    if evidence_recorder is not None:
+        evidence_recorder.push(camera_id, annotated, now)
+
+    alert_outs = []
+    for evt in confirmed:
+        alert_id = uuid.uuid4().hex[:8]
+        thumb_url = frame_store.save(annotated, alert_id)
+        clip_url = evidence_recorder.trigger(camera_id, alert_id, now) if evidence_recorder else None
+        alert = _event_to_alert(evt, alert_id, thumb_url)
+        alert_outs.append(alert)
+        worker_id = _worker_id_for_person(evt.person, worker_identities)
+        record = _site_record(alert, camera_id, worker_id, clip_url)
+        alert_store.append(_attach_worker_profile(record, worker_profiles.get(worker_id)))
+
+    zone_breach_outs = []
+    for zevt in confirmed_zone_breaches:
+        breach_id = uuid.uuid4().hex[:8]
+        thumb_url = frame_store.save(annotated, breach_id)
+        clip_url = evidence_recorder.trigger(camera_id, breach_id, now) if evidence_recorder else None
+        breach_out = _zone_to_out(zevt, breach_id, thumb_url)
+        zone_breach_outs.append(breach_out)
+        worker_id = _worker_id_for_person(zevt.person, worker_identities)
+        record = _zone_record(breach_out, camera_id, worker_id, clip_url)
+        alert_store.append(_attach_worker_profile(record, worker_profiles.get(worker_id)))
+
+    posture_outs = [
+        _posture_to_out(assessment, f"active-{assessment.track_id}")
+        for assessment in posture_assessments
+    ]
+    confirmed_posture_outs = []
+    for assessment in posture_assessments:
+        if not assessment.confirmed:
+            continue
+        posture_id = uuid.uuid4().hex[:8]
+        thumb_url = frame_store.save(annotated, posture_id)
+        clip_url = evidence_recorder.trigger(camera_id, posture_id, now) if evidence_recorder else None
+        posture_out = _posture_to_out(assessment, posture_id, thumb_url)
+        confirmed_posture_outs.append(posture_out)
+        worker_id = _worker_id_for_person(assessment.person, worker_identities)
+        record = _posture_record(posture_out, camera_id, worker_id, clip_url)
+        alert_store.append(_attach_worker_profile(record, worker_profiles.get(worker_id)))
+
+    unidentified_outs = []
+    for event in unidentified_events:
+        event_id = uuid.uuid4().hex[:8]
+        thumb_url = frame_store.save(annotated, event_id)
+        clip_url = evidence_recorder.trigger(camera_id, event_id, now) if evidence_recorder else None
+        event_out = _unidentified_to_out(event, event_id, thumb_url)
+        unidentified_outs.append(event_out)
+        alert_store.append(_unidentified_record(event_out, camera_id, "site", clip_url))
+
+    active_outs = [_event_to_alert(event, "active") for event in raw_dangers]
+    active_zone_outs = [_zone_to_out(event, "active") for event in raw_zone_breaches]
+    active_zones_out = [
+        ActiveZoneOut(
+            id=zone.id,
+            name=zone.name,
+            severity=zone.severity,
+            polygon=zone.polygon,
+            marker_ids=list(zone.marker_ids or []),
+            warning_distance_m=zone.warning_distance_m,
+            warning_distance_px=zone.warning_distance_px,
+        )
+        for zone in zones
+        if zone.active and zone.polygon and len(zone.polygon) >= 3
+    ]
+
+    processing_ms = (time.monotonic() - t0) * 1000
+    request.app.state.frame_counter += 1
+
+    return FrameResultOut(
+        frame_id=request.app.state.frame_counter,
+        timestamp=now,
+        camera_id=camera_id,
+        mode="site",
+        detections=[_det_to_out(detection) for detection in detections],
+        active_dangers=active_outs,
+        confirmed_alerts=alert_outs,
+        posture_assessments=posture_outs,
+        confirmed_posture_alerts=confirmed_posture_outs,
+        posture_available=bool(posture_manager and posture_manager.available),
+        active_zone_breaches=active_zone_outs,
+        confirmed_zone_breaches=zone_breach_outs,
+        markers=[_marker_to_out(marker) for marker in markers],
+        worker_identifications=[
+            _worker_to_out(identity, worker_profiles.get(identity.worker_id))
+            for identity in worker_identities
+        ],
+        unidentified_workers=unidentified_outs,
+        worker_identification_available=bool(worker_identifier and worker_identifier.available),
+        dynamic_safety_zones=[
+            _dynamic_zone_to_out(zone, fw, fh) for zone in dynamic_safety_zones
+        ],
+        person_distances=person_distances,
+        active_zones=active_zones_out,
+        calibration_active=calibration is not None,
+        frame_jpeg_b64=preview_jpeg_b64,
+        processing_ms=max(0.1, round(processing_ms, 1)),
+    )
+
+
+def _handle_checkpoint(
+    request: Request,
+    frame: np.ndarray,
+    now: float,
+    t0: float,
+    camera_id: str,
+    preview_jpeg_b64: str,
+) -> FrameResultOut:
+    detector = request.app.state.ppe_detector
+    checker = request.app.state.ppe_checker
+    frame_store = request.app.state.frame_store
+    alert_store = request.app.state.alert_store
+    evidence_recorder = getattr(request.app.state, "evidence_recorder", None)
+    worker_identifier = getattr(request.app.state, "worker_identifier", None)
+    unidentified_monitor = getattr(request.app.state, "unidentified_worker_monitor", None)
+    worker_store = getattr(request.app.state, "worker_store", None)
+
+    detections = detector.detect(frame)
+    persons = [d for d in detections if d.category == "person"]
+    worker_identities: list[WorkerIdentity] = []
+    if worker_identifier is not None and worker_identifier.available:
+        worker_identities = worker_identifier.process(
+            camera_id, frame, persons, now,
+        )
+    worker_profiles = _worker_profiles(worker_store, worker_identities)
+    unidentified_events = (
+        unidentified_monitor.update(camera_id, "checkpoint", persons, worker_identities, now)
+        if unidentified_monitor is not None else []
+    )
+
+    events = checker.evaluate(detections, frame_h=frame.shape[0],
+                              frame_timestamp=now)
+    confirmed = checker.confirm(events, now)
+    annotated = _annotate_ppe(frame, detections, confirmed)
+    annotated = _annotate_worker_ids(annotated, worker_identities)
+    annotated = _annotate_unidentified(annotated, unidentified_events)
+    if evidence_recorder is not None:
+        evidence_recorder.push(camera_id, annotated, now)
+
+    check_outs = []
+    for event in confirmed:
+        check_id = uuid.uuid4().hex[:8]
+        # Successful checkpoint checks are returned to the UI but do not need
+        # persistent evidence. Save thumbnail/clip only for actual violations.
+        thumb_url = frame_store.save(annotated, check_id) if event.missing else None
+        clip_url = (
+            evidence_recorder.trigger(camera_id, check_id, now)
+            if event.missing and evidence_recorder else None
+        )
+        check_out = _ppe_to_out(event, check_id, thumb_url)
+        check_outs.append(check_out)
+        if event.missing:
+            worker_id = _worker_id_for_person(event.person, worker_identities)
+            record = _ppe_record(check_out, camera_id, worker_id, clip_url)
+            alert_store.append(_attach_worker_profile(record, worker_profiles.get(worker_id)))
+
+    unidentified_outs = []
+    for event in unidentified_events:
+        event_id = uuid.uuid4().hex[:8]
+        thumb_url = frame_store.save(annotated, event_id)
+        clip_url = evidence_recorder.trigger(camera_id, event_id, now) if evidence_recorder else None
+        event_out = _unidentified_to_out(event, event_id, thumb_url)
+        unidentified_outs.append(event_out)
+        alert_store.append(_unidentified_record(event_out, camera_id, "checkpoint", clip_url))
+
+    processing_ms = (time.monotonic() - t0) * 1000
+    request.app.state.frame_counter += 1
+
+    return FrameResultOut(
+        frame_id=request.app.state.frame_counter,
+        timestamp=now,
+        camera_id=camera_id,
+        mode="checkpoint",
+        detections=[_det_to_out(detection) for detection in detections],
+        ppe_checks=check_outs,
+        worker_identifications=[
+            _worker_to_out(identity, worker_profiles.get(identity.worker_id))
+            for identity in worker_identities
+        ],
+        unidentified_workers=unidentified_outs,
+        worker_identification_available=bool(worker_identifier and worker_identifier.available),
+        frame_jpeg_b64=preview_jpeg_b64,
+        processing_ms=max(0.1, round(processing_ms, 1)),
+    )
+
+
+def _with_calibration_status(
+    app,
+    result: FrameResultOut,
+    frame: np.ndarray,
+) -> FrameResultOut:
+    stored_calibration = app.state.calibration_store.get(result.camera_id)
+    calibration_warning = (
+        stored_calibration.compatibility_warning(
+            int(frame.shape[1]),
+            int(frame.shape[0]),
+        )
+        if stored_calibration is not None else None
+    )
+    return result.model_copy(update={
+        # A stored record remains visible after a format/orientation change;
+        # only metric projection is disabled for an incompatible frame.
+        "calibration_active": stored_calibration is not None,
+        "calibration_valid": (
+            stored_calibration is not None and calibration_warning is None
+        ),
+        "calibration_warning": calibration_warning,
+    })
+
+
+def process_frame_job(app, job: FrameJob) -> FrameResultOut:
+    """Heavy inference callback used by :class:`LatestFrameProcessor`.
+
+    The generic processor invokes this function through ``asyncio.to_thread``.
+    A process-wide model lock also protects deployments where a legacy
+    synchronous client and background phone ingest briefly overlap.
+    """
+
+    payload = job.payload
+    if not isinstance(payload, _FramePayload):
+        raise TypeError("frame job payload has an unsupported shape")
+
+    request_context = SimpleNamespace(app=app)
+    processing_started = time.monotonic()
+    analysis_lock = getattr(app.state, "analysis_lock", None)
+    lock_context = analysis_lock if analysis_lock is not None else nullcontext()
+    with lock_context:
+        if (
+            payload.mode == "checkpoint"
+            and app.state.ppe_detector is not None
+        ):
+            result = _handle_checkpoint(
+                request_context,
+                job.frame,
+                job.timestamp,
+                processing_started,
+                job.camera_id,
+                payload.preview_jpeg_b64,
+            )
+        else:
+            result = _handle_site(
+                request_context,
+                job.frame,
+                job.timestamp,
+                processing_started,
+                job.camera_id,
+                payload.preview_jpeg_b64,
+            )
+        return _with_calibration_status(app, result, job.frame)
+
+
+def _record_frame_received(
+    app,
+    *,
+    camera_id: str,
+    timestamp: float,
+    received_at: float,
+    mode: str,
+    frame: np.ndarray,
+    processing_pending: bool,
+) -> None:
+    registry = getattr(app.state, "camera_registry", None)
+    if registry is None:
+        registry = CameraRegistry(max_cameras=32)
+        app.state.camera_registry = registry
+    previous = dict(registry.get(camera_id, {}))
+    stored_calibration = app.state.calibration_store.get(camera_id)
+    calibration_warning = (
+        stored_calibration.compatibility_warning(
+            int(frame.shape[1]),
+            int(frame.shape[0]),
+        )
+        if stored_calibration is not None else None
+    )
+    previous.update({
+        "camera_id": camera_id,
+        # Freshness always follows server receipt time, never a phone clock.
+        "last_seen": received_at,
+        "captured_at": timestamp,
+        "mode": mode,
+        "width": int(frame.shape[1]),
+        "height": int(frame.shape[0]),
+        "frames_received": int(previous.get("frames_received", 0)) + 1,
+        "processing_pending": processing_pending,
+        "processing_error": None,
+        "calibration_active": stored_calibration is not None,
+        "calibration_valid": (
+            stored_calibration is not None and calibration_warning is None
+        ),
+        "calibration_warning": calibration_warning,
+    })
+    registry[camera_id] = previous
+
+
+def _record_frame_processed(
+    app,
+    job: FrameJob,
+    result: FrameResultOut,
+) -> bool:
+    payload = job.payload
+    if not isinstance(payload, _FramePayload):
+        return False
+    registry = getattr(app.state, "camera_registry", None)
+    if registry is None:
+        registry = CameraRegistry(max_cameras=32)
+        app.state.camera_registry = registry
+    previous = dict(registry.get(job.camera_id, {}))
+    is_current_receipt = (
+        payload.received_at
+        >= float(previous.get("last_seen", payload.received_at) or 0.0)
+    )
+    is_newest_processed = (
+        payload.received_at
+        >= float(
+            previous.get(
+                "last_processed_received_at",
+                payload.received_at,
+            )
+            or 0.0
+        )
+    )
+    previous.update({
+        "camera_id": job.camera_id,
+        "frames": int(previous.get("frames", 0)) + 1,
+    })
+    if is_newest_processed:
+        previous.update({
+            "last_processed_at": time.time(),
+            "last_processed_received_at": payload.received_at,
+            "processed_captured_at": job.timestamp,
+            "processed_mode": result.mode,
+            "processing_ms": result.processing_ms,
+            "processing_error": None,
+        })
+        if is_current_receipt:
+            previous.update({
+                "processing_pending": False,
+                "calibration_active": result.calibration_active,
+                "calibration_valid": result.calibration_valid,
+                "calibration_warning": result.calibration_warning,
+            })
+    registry[job.camera_id] = previous
+    return is_newest_processed
+
+
+async def record_frame_failure(
+    app,
+    job: FrameJob,
+    exc: BaseException,
+) -> None:
+    """Clear a current pending flag and retain bounded operational evidence."""
+
+    payload = job.payload
+    if not isinstance(payload, _FramePayload):
+        return
+    registry = getattr(app.state, "camera_registry", None)
+    if registry is None:
+        registry = CameraRegistry(max_cameras=32)
+        app.state.camera_registry = registry
+    previous = dict(registry.get(job.camera_id, {}))
+    is_current_receipt = (
+        payload.received_at
+        >= float(previous.get("last_seen", payload.received_at) or 0.0)
+    )
+    is_newest_failure = (
+        payload.received_at
+        >= float(
+            previous.get(
+                "last_failed_received_at",
+                payload.received_at,
+            )
+            or 0.0
+        )
+    )
+    if is_newest_failure:
+        error_text = f"{type(exc).__name__}: {exc}"
+        previous.update({
+            "camera_id": job.camera_id,
+            "last_failed_at": time.time(),
+            "last_failed_received_at": payload.received_at,
+            "processing_error": error_text[:500],
+        })
+        if is_current_receipt:
+            previous["processing_pending"] = False
+        registry[job.camera_id] = previous
+    logger.error(
+        "Frame processing failed for camera %s",
+        job.camera_id,
+        exc_info=(type(exc), exc, exc.__traceback__),
+    )
+
+
+async def publish_frame_result(
+    app,
+    job: FrameJob,
+    result: FrameResultOut,
+) -> None:
+    """Publish processed metadata and the matching JPEG on the event loop."""
+
+    if not _record_frame_processed(app, job, result):
+        # A newer result was already published for this camera (possible
+        # during a short async→sync compatibility transition).
+        return
+    manager = app.state.ws_manager
+    data = result.model_dump()
+    payload = job.payload
+    jpeg_bytes = (
+        payload.preview_jpeg_bytes
+        if isinstance(payload, _FramePayload) else None
+    )
+    if hasattr(manager, "broadcast_frame"):
+        await manager.broadcast_frame(data, jpeg_bytes)
+    else:
+        # Small integrations and older tests may expose only this method.
+        await manager.broadcast_json(data)
+
+
+@router.post(
+    "/frame",
+    response_model=FrameResultOut,
+    responses={
+        202: {
+            "model": FrameAcceptedOut,
+            "description": "Frame stored in the bounded background queue",
+        },
+    },
+)
 async def receive_frame(
     request: Request,
     image: UploadFile = File(...),
     camera_id: str = Form(default="cam_default"),
     timestamp: float = Form(default=None),
+    mode: str = Form(default="site"),
+    include_frame: bool = Form(default=True),
+    async_processing: bool = Form(default=False),
 ):
-    t0 = time.monotonic()
-
-    raw = await image.read()
+    raw = await image.read(MAX_FRAME_UPLOAD_BYTES + 1)
+    if len(raw) > MAX_FRAME_UPLOAD_BYTES:
+        raise HTTPException(
+            413,
+            f"Frame upload exceeds {MAX_FRAME_UPLOAD_BYTES} bytes",
+        )
     arr = np.frombuffer(raw, np.uint8)
-    frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    frame = await asyncio.to_thread(cv2.imdecode, arr, cv2.IMREAD_COLOR)
     if frame is None:
         return FrameResultOut(
-            frame_id=0, timestamp=0, detections=[], active_dangers=[],
-            confirmed_alerts=[], frame_jpeg_b64="", processing_ms=0,
+            frame_id=0, timestamp=0, camera_id=camera_id, mode=mode,
+            detections=[], frame_jpeg_b64="", processing_ms=0,
+        )
+    if frame.nbytes > MAX_DECODED_FRAME_BYTES:
+        raise HTTPException(
+            413,
+            "Decoded frame is too large: "
+            f"{frame.nbytes} bytes exceeds {MAX_DECODED_FRAME_BYTES}",
         )
 
-    detections = request.app.state.detector.detect(frame)
-    now = timestamp or time.time()
+    # Device timestamps describe the captured event, but freshness/online
+    # checks must use the server clock: phone clocks can drift or be spoofed.
+    received_at = time.time()
+    now = timestamp if timestamp is not None else received_at
+    latest_frame_store = getattr(request.app.state, "latest_frame_store", None)
+    if latest_frame_store is not None:
+        stored = await asyncio.to_thread(
+            latest_frame_store.set,
+            camera_id,
+            frame,
+            now,
+            mode,
+            received_at=received_at,
+            image_bytes=raw,
+            content_type=image.content_type or "application/octet-stream",
+        )
+        if not stored:
+            # Never advertise/process a camera frame that calibration could
+            # not retain; otherwise /api/cameras and /from-latest disagree.
+            raise HTTPException(
+                413,
+                "Frame exceeds the latest-frame store limit and was rejected",
+            )
 
-    raw_dangers = request.app.state.danger_detector.evaluate(detections, now)
-    confirmed = request.app.state.temporal_filter.update(raw_dangers, now)
-
-    annotated = _annotate(frame, detections, raw_dangers, confirmed)
-
-    alert_outs = []
-    for evt in confirmed:
-        alert_id = uuid.uuid4().hex[:8]
-        thumb_url = request.app.state.frame_store.save(annotated, alert_id)
-        alert_out = _event_to_alert(evt, alert_id, thumb_url)
-        alert_outs.append(alert_out)
-        request.app.state.alert_history.append(alert_out)
-        if len(request.app.state.alert_history) > 1000:
-            request.app.state.alert_history.pop(0)
-
-    active_outs = []
-    for evt in raw_dangers:
-        active_outs.append(_event_to_alert(evt, "active"))
-
-    _, jpeg_buf = cv2.imencode(".jpg", annotated,
-                               [cv2.IMWRITE_JPEG_QUALITY, 75])
-    b64 = base64.b64encode(jpeg_buf).decode()
-
-    processing_ms = (time.monotonic() - t0) * 1000
-    request.app.state.frame_counter += 1
-
-    result = FrameResultOut(
-        frame_id=request.app.state.frame_counter,
+    # Keep the uploaded JPEG byte-for-byte for the live view.  Re-encoding the
+    # already compressed phone frame used to soften it further, and—more
+    # importantly—the previous response encoded `annotated`, permanently
+    # burning every overlay into pixels before the panel could toggle it.
+    if async_processing:
+        # Binary WebSocket clients receive these bytes directly.  Avoid
+        # allocating a ~33% larger Base64 string on every phone frame.
+        preview_jpeg_bytes = await asyncio.to_thread(
+            _live_preview_jpeg_bytes,
+            raw,
+            frame,
+        )
+        preview_jpeg_b64 = ""
+    else:
+        # Keep the legacy synchronous HTTP/JSON contract intact.
+        preview_jpeg_bytes, preview_jpeg_b64 = await asyncio.to_thread(
+            _live_preview_jpeg,
+            raw,
+            frame,
+        )
+    effective_mode = (
+        "checkpoint"
+        if mode == "checkpoint" and request.app.state.ppe_detector is not None
+        else "site"
+    )
+    job = FrameJob(
+        camera_id=camera_id,
+        frame=frame,
         timestamp=now,
-        detections=[_det_to_out(d) for d in detections],
-        active_dangers=active_outs,
-        confirmed_alerts=alert_outs,
-        frame_jpeg_b64=b64,
-        processing_ms=round(processing_ms, 1),
+        payload=_FramePayload(
+            mode=effective_mode,
+            received_at=received_at,
+            preview_jpeg_bytes=preview_jpeg_bytes,
+            preview_jpeg_b64=preview_jpeg_b64,
+        ),
     )
 
-    await request.app.state.ws_manager.broadcast_json(result.model_dump())
+    if async_processing:
+        processor = getattr(request.app.state, "frame_processor", None)
+        if processor is None:
+            _record_frame_received(
+                request.app,
+                camera_id=camera_id,
+                timestamp=now,
+                received_at=received_at,
+                mode=effective_mode,
+                frame=frame,
+                processing_pending=False,
+            )
+            raise HTTPException(
+                503,
+                "Background frame processor is not initialized",
+            )
 
-    return result
+        submission = await processor.submit(job)
+        _record_frame_received(
+            request.app,
+            camera_id=camera_id,
+            timestamp=now,
+            received_at=received_at,
+            mode=effective_mode,
+            frame=frame,
+            processing_pending=submission.accepted,
+        )
+        if not submission.accepted:
+            raise HTTPException(
+                503,
+                f"Background frame processor rejected the frame: "
+                f"{submission.reason or 'capacity unavailable'}",
+            )
+        stats = processor.stats
+        accepted = FrameAcceptedOut(
+            camera_id=camera_id,
+            timestamp=now,
+            mode=effective_mode,
+            queue_depth=submission.queue_depth,
+            replaced_pending=submission.replaced,
+            dropped_frames=stats.replaced + stats.dropped,
+        )
+        return JSONResponse(
+            status_code=202,
+            content=accepted.model_dump(mode="json"),
+        )
+
+    _record_frame_received(
+        request.app,
+        camera_id=camera_id,
+        timestamp=now,
+        received_at=received_at,
+        mode=effective_mode,
+        frame=frame,
+        processing_pending=True,
+    )
+    try:
+        result = await asyncio.to_thread(process_frame_job, request.app, job)
+    except Exception as exc:
+        await record_frame_failure(request.app, job, exc)
+        raise HTTPException(500, "Frame processing failed") from exc
+    await publish_frame_result(request.app, job, result)
+    if include_frame:
+        return result
+
+    # The phone already owns the uploaded pixels and only needs detections and
+    # alerts from this HTTP response.  The complete frame is still broadcast to
+    # the live panel over WebSocket, so omitting this duplicate base64 payload
+    # substantially reduces response bandwidth at higher capture rates.
+    return result.model_copy(update={"frame_jpeg_b64": ""})

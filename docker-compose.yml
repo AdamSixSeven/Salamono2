@@ -9,7 +9,7 @@ services:
       - "8000:8000"
     env_file: .env
     volumes:
-      - flagged_frames:/app/data/flagged_frames
+      - perimetr_data:/app/data
     restart: unless-stopped
 
   # ──────────────────────────────────────────────
@@ -25,7 +25,7 @@ services:
       - "8000:8000"
     env_file: .env
     volumes:
-      - flagged_frames:/app/data/flagged_frames
+      - perimetr_data:/app/data
     deploy:
       resources:
         reservations:
@@ -57,4 +57,4 @@ services:
       - https
 
 volumes:
-  flagged_frames:
+  perimetr_data:

@@ -1,0 +1,2094 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Perimetr — Kalibracja kamery</title>
+    <link rel="stylesheet" href="style.css?v=20260724-calibration-live-3">
+    <script src="https://unpkg.com/lucide@latest" defer></script>
+    <style>
+        .calib-wrap {
+            width: min(1180px, calc(100% - 32px));
+            margin: 0 auto;
+            padding: 26px 0 48px;
+            display: grid;
+            gap: 18px;
+        }
+        .calib-hero {
+            display: flex;
+            align-items: flex-end;
+            justify-content: space-between;
+            gap: 24px;
+            padding-bottom: 18px;
+            border-bottom: 1px solid var(--rule);
+        }
+        .calib-hero h1 {
+            margin: 0 0 8px;
+            font-family: var(--font-display);
+            font-size: clamp(30px, 4vw, 44px);
+            font-weight: 300;
+            line-height: 1;
+            letter-spacing: -0.015em;
+            color: var(--ink);
+        }
+        .calib-hero p {
+            max-width: 780px;
+            margin: 0;
+            color: var(--ink-3);
+            font-size: 14px;
+            line-height: 1.55;
+        }
+        .calib-step {
+            min-width: 0;
+            padding: 20px;
+            background: var(--surface);
+            border: 1px solid var(--rule);
+            border-radius: 3px;
+        }
+        .calib-step-head {
+            display: flex;
+            align-items: flex-start;
+            justify-content: space-between;
+            gap: 16px;
+            margin-bottom: 15px;
+        }
+        .calib-step h2 {
+            margin: 0;
+            color: var(--msbp-red);
+            font-family: var(--font-display);
+            font-size: 18px;
+            font-weight: 400;
+            letter-spacing: 0.06em;
+            text-transform: uppercase;
+        }
+        .calib-step-lead {
+            max-width: 720px;
+            margin: 5px 0 0;
+            color: var(--ink-3);
+            font-size: 12px;
+            line-height: 1.5;
+        }
+        .calib-grid {
+            display: grid;
+            grid-template-columns: minmax(0, 1.55fr) minmax(280px, 0.75fr);
+            gap: 18px;
+            align-items: start;
+        }
+        .calib-row {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: flex-end;
+            gap: 10px;
+            margin-bottom: 12px;
+        }
+        .calib-field {
+            display: flex;
+            flex: 1 1 160px;
+            min-width: 0;
+            flex-direction: column;
+            gap: 5px;
+        }
+        .calib-field--wide { flex-basis: 300px; }
+        .calib-field label,
+        .calib-eyebrow {
+            color: var(--ink-3);
+            font-size: 10.5px;
+            font-weight: 650;
+            letter-spacing: 0.13em;
+            text-transform: uppercase;
+        }
+        .calib-field input,
+        .calib-field select {
+            width: 100%;
+            min-height: 36px;
+            padding: 8px 10px;
+            color: var(--ink);
+            background: var(--surface);
+            border: 1px solid var(--border-2);
+            border-radius: 2px;
+            font-family: var(--font-mono);
+            font-size: 12px;
+        }
+        .calib-field input:focus,
+        .calib-field select:focus {
+            outline: 2px solid color-mix(in srgb, var(--msbp-red) 20%, transparent);
+            border-color: var(--msbp-red);
+        }
+        .calib-field input[readonly] {
+            color: var(--ink-3);
+            background: var(--bg-3);
+        }
+        .calib-actions {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 8px;
+        }
+        .calib-actions .px-btn { min-height: 36px; }
+        .calib-preview-shell {
+            position: relative;
+            width: 100%;
+            min-height: 300px;
+            overflow: hidden;
+            display: grid;
+            place-items: center;
+            background:
+                linear-gradient(45deg, rgba(255,255,255,.025) 25%, transparent 25%) 0 0 / 22px 22px,
+                linear-gradient(-45deg, rgba(255,255,255,.025) 25%, transparent 25%) 0 0 / 22px 22px,
+                var(--video-bg);
+            border: 1px solid #292929;
+            border-radius: 4px;
+        }
+        #previewCanvas {
+            display: block;
+            width: 100%;
+            height: auto;
+            max-height: 680px;
+            object-fit: contain;
+        }
+        #previewCanvas.is-measuring { cursor: crosshair; }
+        .calib-preview-empty {
+            position: absolute;
+            inset: 0;
+            display: grid;
+            place-items: center;
+            padding: 28px;
+            color: #B8B8B4;
+            font-family: var(--font-mono);
+            font-size: 12px;
+            line-height: 1.6;
+            text-align: center;
+            pointer-events: none;
+        }
+        .calib-preview-empty[hidden] { display: none; }
+        .calib-live-chip {
+            position: absolute;
+            top: 12px;
+            left: 12px;
+            display: inline-flex;
+            align-items: center;
+            gap: 7px;
+            padding: 5px 9px;
+            color: #FAFAF8;
+            background: rgba(10, 10, 10, 0.78);
+            border: 1px solid rgba(255,255,255,.15);
+            border-radius: 2px;
+            font-family: var(--font-mono);
+            font-size: 10px;
+            letter-spacing: .06em;
+            text-transform: uppercase;
+            pointer-events: none;
+        }
+        .calib-live-dot {
+            width: 7px;
+            height: 7px;
+            border-radius: 50%;
+            background: #777;
+        }
+        .calib-live-chip.online .calib-live-dot {
+            background: #36D17D;
+            box-shadow: 0 0 0 3px rgba(54, 209, 125, .16);
+        }
+        .calib-live-chip.stale .calib-live-dot { background: #FFB020; }
+        .calib-meta {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            margin: 0;
+            border-top: 1px solid var(--rule);
+            border-left: 1px solid var(--rule);
+        }
+        .calib-meta > div {
+            min-width: 0;
+            padding: 11px;
+            border-right: 1px solid var(--rule);
+            border-bottom: 1px solid var(--rule);
+        }
+        .calib-meta dt {
+            margin-bottom: 5px;
+            color: var(--ink-4);
+            font-size: 9px;
+            font-weight: 650;
+            letter-spacing: .12em;
+            text-transform: uppercase;
+        }
+        .calib-meta dd {
+            margin: 0;
+            overflow-wrap: anywhere;
+            color: var(--ink-2);
+            font-family: var(--font-mono);
+            font-size: 11.5px;
+        }
+        .status {
+            margin-top: 10px;
+            padding: 10px 12px;
+            border-radius: 2px;
+            font-family: var(--font-mono);
+            font-size: 11.5px;
+            line-height: 1.45;
+        }
+        .status-ok { color: var(--ok-ink); background: var(--ok-tint); }
+        .status-err { color: var(--msbp-red-ink); background: var(--msbp-red-tint); }
+        .status-info { color: var(--ink-2); background: rgba(43,43,43,.055); }
+        .status-idle { color: var(--ink-3); background: var(--bg-3); }
+        .calib-checks {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 7px;
+            margin: 12px 0;
+        }
+        .calib-check {
+            display: flex;
+            align-items: center;
+            gap: 7px;
+            padding: 8px 9px;
+            color: var(--ink-3);
+            background: var(--bg-3);
+            border: 1px solid var(--rule);
+            border-radius: 2px;
+            font-family: var(--font-mono);
+            font-size: 10.5px;
+        }
+        .calib-check::before {
+            width: 7px;
+            height: 7px;
+            flex: 0 0 auto;
+            content: "";
+            border-radius: 50%;
+            background: #A8A8A4;
+        }
+        .calib-check.ok { color: var(--ok-ink); background: var(--ok-tint); }
+        .calib-check.ok::before { background: #179B55; }
+        .calib-check.bad { color: var(--msbp-red-ink); background: var(--msbp-red-tint); }
+        .calib-check.bad::before { background: var(--msbp-red); }
+        .calib-marker-state {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 8px;
+            margin-top: 10px;
+        }
+        .calib-marker-state > div {
+            padding: 10px;
+            background: var(--bg-3);
+            border: 1px solid var(--rule);
+        }
+        .calib-marker-state strong {
+            display: block;
+            margin-top: 5px;
+            color: var(--ink);
+            font-family: var(--font-mono);
+            font-size: 12px;
+        }
+        .marker-instructions {
+            margin: 0;
+            padding-left: 22px;
+            color: var(--ink-2);
+            font-size: 13px;
+            line-height: 1.55;
+        }
+        .marker-instructions li { padding: 3px 0 7px 5px; }
+        .marker-instructions strong { color: var(--ink); }
+        .marker-layout {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(110px, 1fr));
+            gap: 10px;
+            margin-top: 14px;
+            padding: 14px;
+            background: var(--bg-3);
+            border: 1px dashed var(--border-2);
+        }
+        .marker-corner {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+            padding: 10px;
+            background: var(--surface);
+            border: 1px solid var(--rule);
+            font-family: var(--font-mono);
+            font-size: 11px;
+        }
+        .marker-corner:nth-child(3) { grid-column: 2; }
+        .marker-corner:nth-child(4) { grid-column: 1; grid-row: 2; }
+        .marker-corner b { color: var(--msbp-red); font-size: 15px; }
+        .marker-sheet {
+            display: grid;
+            grid-template-columns: repeat(4, minmax(130px, 1fr));
+            gap: 12px;
+            margin-top: 16px;
+        }
+        .marker-card {
+            min-width: 0;
+            padding: 12px;
+            text-align: center;
+            background: #fff;
+            border: 1px solid var(--rule);
+        }
+        .marker-card img {
+            display: block;
+            width: 100%;
+            aspect-ratio: 1;
+            object-fit: contain;
+            background: #fff;
+        }
+        .marker-card strong {
+            display: block;
+            margin: 8px 0;
+            color: #0A0A0A;
+            font-family: var(--font-mono);
+            font-size: 12px;
+        }
+        .marker-card .px-btn { width: 100%; justify-content: center; }
+        .calib-quality {
+            margin-top: 12px;
+            padding: 12px;
+            background: var(--bg-3);
+            border: 1px solid var(--rule);
+        }
+        .calib-quality-head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            margin-bottom: 9px;
+        }
+        .calib-quality-score {
+            color: var(--ink);
+            font-family: var(--font-display);
+            font-size: 24px;
+            font-weight: 400;
+        }
+        .calib-quality-grid {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 6px;
+        }
+        .calib-quality-grid span {
+            padding: 7px;
+            color: var(--ink-3);
+            background: var(--surface);
+            border: 1px solid var(--rule);
+            font-family: var(--font-mono);
+            font-size: 9.5px;
+            overflow-wrap: anywhere;
+        }
+        .calib-quality-warnings {
+            margin: 8px 0 0;
+            padding-left: 18px;
+            color: var(--msbp-red-ink);
+            font-size: 11px;
+        }
+        pre.calib-output {
+            min-height: 54px;
+            max-height: 260px;
+            margin: 10px 0 0;
+            padding: 12px;
+            overflow: auto;
+            color: #FAFAF8;
+            background: #0A0A0A;
+            border-radius: 2px;
+            font-family: var(--font-mono);
+            font-size: 10.5px;
+            line-height: 1.5;
+            white-space: pre-wrap;
+        }
+        .measure-result {
+            min-height: 46px;
+            margin-top: 10px;
+            padding: 12px;
+            color: var(--ink-2);
+            background: var(--bg-3);
+            border: 1px solid var(--rule);
+            font-family: var(--font-mono);
+            font-size: 12px;
+        }
+        .measure-result strong {
+            color: var(--msbp-red);
+            font-family: var(--font-display);
+            font-size: 23px;
+            font-weight: 450;
+        }
+        .calib-note {
+            padding: 10px 12px;
+            color: var(--ink-3);
+            background: var(--bg-3);
+            border-left: 3px solid var(--msbp-red);
+            font-size: 11.5px;
+            line-height: 1.5;
+        }
+        [hidden] { display: none !important; }
+        @media (max-width: 880px) {
+            .calib-grid { grid-template-columns: 1fr; }
+            .marker-sheet { grid-template-columns: repeat(2, minmax(120px, 1fr)); }
+        }
+        @media (max-width: 560px) {
+            .calib-wrap { width: min(100% - 20px, 1180px); padding-top: 14px; }
+            .calib-step { padding: 14px; }
+            .calib-hero { align-items: flex-start; flex-direction: column; }
+            .calib-meta,
+            .calib-checks,
+            .calib-marker-state,
+            .calib-quality-grid { grid-template-columns: 1fr; }
+            .marker-sheet { grid-template-columns: 1fr 1fr; }
+            .calib-preview-shell { min-height: 220px; }
+        }
+        @media print {
+            body * { visibility: hidden !important; }
+            #markerPrintArea,
+            #markerPrintArea * { visibility: visible !important; }
+            #markerPrintArea {
+                position: absolute;
+                inset: 0;
+                display: grid;
+                grid-template-columns: 1fr 1fr;
+                gap: 18mm;
+                width: 190mm;
+                padding: 8mm;
+                background: white;
+            }
+            #markerPrintArea .marker-card {
+                break-inside: avoid;
+                border: 0;
+            }
+            #markerPrintArea .marker-card img {
+                width: 68mm;
+                height: 68mm;
+                margin: 0 auto;
+            }
+            #markerPrintArea .px-btn { display: none !important; }
+        }
+    </style>
+</head>
+<body>
+
+<header class="px-header">
+    <div class="px-header-left">
+        <a href="/" style="text-decoration:none"><span class="px-logo">perimetr</span></a>
+        <nav class="px-nav">
+            <a href="/">Podgląd</a>
+            <a href="/review.html">Historia</a>
+            <a href="/calibrate.html" class="active">Kalibracja</a>
+        </nav>
+    </div>
+    <div class="px-header-right">
+        <a href="/" class="px-btn">← Wróć do panelu</a>
+    </div>
+</header>
+
+<main class="calib-wrap">
+    <div class="calib-hero">
+        <div>
+            <h1>Kalibracja aktywnej kamery</h1>
+            <p>
+                Kalibracja korzysta z dokładnie tego samego strumienia, który oglądasz
+                w panelu — także gdy obraz wysyła telefon. Podgląd poniżej pochodzi
+                wyłącznie z <span class="px-mono">/ws/live</span>; homografia jest liczona
+                na świeżej, surowej klatce zapisanej przez backend dla wybranego
+                <span class="px-mono">camera_id</span>.
+            </p>
+        </div>
+    </div>
+
+    <section class="calib-step" aria-labelledby="streamTitle">
+        <div class="calib-step-head">
+            <div>
+                <h2 id="streamTitle">1 · Aktywny strumień</h2>
+                <p class="calib-step-lead">
+                    Wybierz kamerę widoczną w rejestrze i połącz podgląd. Strona nie
+                    uruchamia kamery tego komputera bez Twojego działania.
+                </p>
+            </div>
+        </div>
+
+        <div class="calib-row">
+            <div class="calib-field calib-field--wide">
+                <label for="cameraSelect">Kamera do kalibracji</label>
+                <select id="cameraSelect" aria-label="Kamera do kalibracji">
+                    <option value="cam_default">cam_default · oczekiwanie na rejestr</option>
+                </select>
+            </div>
+            <div class="calib-actions">
+                <button class="px-btn" id="refreshCamerasBtn" type="button">
+                    <i data-lucide="refresh-cw"></i>Odśwież listę
+                </button>
+                <button class="px-btn px-btn--danger" id="connectStreamBtn" type="button" disabled>
+                    <i data-lucide="refresh-cw"></i>Ponów połączenie
+                </button>
+            </div>
+        </div>
+
+        <div class="calib-grid">
+            <div>
+                <div class="calib-preview-shell" id="previewShell">
+                    <canvas id="previewCanvas" width="640" height="480"
+                            aria-label="Podgląd wybranej kamery"></canvas>
+                    <div class="calib-preview-empty" id="previewEmpty">
+                        Wybierz kamerę online z listy. Podgląd połączy się automatycznie.
+                    </div>
+                    <div class="calib-live-chip" id="liveChip">
+                        <span class="calib-live-dot"></span>
+                        <span id="liveChipText">rozłączono</span>
+                    </div>
+                </div>
+                <div class="status status-idle" id="streamStatus">
+                    Pobieranie listy aktywnych kamer…
+                </div>
+            </div>
+
+            <div>
+                <dl class="calib-meta">
+                    <div><dt>Status kamery</dt><dd id="cameraOnline">—</dd></div>
+                    <div><dt>WebSocket</dt><dd id="socketStatus">rozłączony</dd></div>
+                    <div><dt>Tryb</dt><dd id="cameraMode">—</dd></div>
+                    <div><dt>Ostatnia klatka</dt><dd id="cameraLastSeen">—</dd></div>
+                    <div><dt>Rozdzielczość</dt><dd id="cameraResolution">—</dd></div>
+                    <div><dt>Świeżość</dt><dd id="frameFreshness">brak klatki</dd></div>
+                </dl>
+                <div class="calib-marker-state">
+                    <div>
+                        <span class="calib-eyebrow">Wykryte ID</span>
+                        <strong id="detectedMarkerIds">—</strong>
+                    </div>
+                    <div>
+                        <span class="calib-eyebrow">Brakujące ID</span>
+                        <strong id="missingMarkerIds">10 · 20 · 30 · 40</strong>
+                    </div>
+                    <div>
+                        <span class="calib-eyebrow">Walidacja klatki</span>
+                        <strong id="previewValidity">oczekiwanie</strong>
+                    </div>
+                    <div>
+                        <span class="calib-eyebrow">Kalibracja</span>
+                        <strong id="calibrationFlag">brak</strong>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <section class="calib-step" aria-labelledby="markersTitle">
+        <div class="calib-step-head">
+            <div>
+                <h2 id="markersTitle">2 · Przygotuj markery</h2>
+                <p class="calib-step-lead">
+                    Słownik: ArUco <span class="px-mono">DICT_4X4_50</span>.
+                    Użyj czterech różnych markerów i nie zmieniaj ich rozmiaru
+                    niezależnie od siebie.
+                </p>
+            </div>
+            <div class="calib-actions">
+                <button class="px-btn" id="downloadAllMarkersBtn" type="button">
+                    Pobierz 4 PNG
+                </button>
+                <button class="px-btn" id="printMarkersBtn" type="button">
+                    Drukuj / zapisz PDF
+                </button>
+            </div>
+        </div>
+
+        <div class="calib-grid">
+            <div>
+                <ol class="marker-instructions">
+                    <li>
+                        Wydrukuj markery <strong>10, 20, 30 i 40</strong> na białym,
+                        matowym papierze. Zachowaj biały margines i kwadratowe proporcje.
+                    </li>
+                    <li>
+                        Połóż wszystkie cztery na <strong>tej samej płaszczyźnie
+                        podłoża</strong>, płasko, bez zagięć i odblasków. Nie przyklejaj
+                        ich do pionowej ściany, jeśli kalibrujesz odległości po ziemi.
+                    </li>
+                    <li>
+                        Patrząc na obraz z wybranej kamery ułóż:
+                        <strong>10 = lewy górny, 20 = prawy górny,
+                        30 = prawy dolny, 40 = lewy dolny</strong>.
+                    </li>
+                    <li>
+                        Zmierz w metrach odległość <strong>między środkami</strong>
+                        markerów 10–20 (szerokość) oraz 10–40 (wysokość).
+                        Nie mierz krawędzi papieru.
+                    </li>
+                    <li>
+                        Całe markery muszą być widoczne i ostre. Usuń lampę świecącą
+                        w obiektyw, ustabilizuj telefon i wypełnij obszarem referencyjnym
+                        możliwie dużą część kadru.
+                    </li>
+                    <li>
+                        W pomieszczeniu użyj markerów o boku około
+                        <strong>15–25 cm</strong>; na budowie i z większej odległości
+                        zastosuj większy format.
+                    </li>
+                    <li>
+                        Po zapisaniu kalibracji nie zmieniaj orientacji telefonu,
+                        obiektywu, cropu ani proporcji obrazu i nie przesuwaj statywu.
+                        Każda taka zmiana wymaga ponownej kalibracji.
+                    </li>
+                </ol>
+            </div>
+            <div>
+                <div class="marker-layout" aria-label="Układ markerów widziany przez kamerę">
+                    <div class="marker-corner"><span>lewy górny · TL</span><b>10</b></div>
+                    <div class="marker-corner"><span>prawy górny · TR</span><b>20</b></div>
+                    <div class="marker-corner"><span>prawy dolny · BR</span><b>30</b></div>
+                    <div class="marker-corner"><span>lewy dolny · BL</span><b>40</b></div>
+                </div>
+                <div class="calib-note" style="margin-top:10px">
+                    Obrót pojedynczego znacznika nie zmienia jego ID, ale wszystkie
+                    cztery muszą pozostać w całości w kadrze podczas kalibracji.
+                </div>
+            </div>
+        </div>
+
+        <div class="marker-sheet" id="markerPrintArea">
+            <article class="marker-card">
+                <img src="/api/calibration/markers/10.png" alt="Marker ArUco 10">
+                <strong>ArUco 10 · TL</strong>
+                <a class="px-btn" href="/api/calibration/markers/10.png" download="aruco-10.png">Pobierz PNG</a>
+            </article>
+            <article class="marker-card">
+                <img src="/api/calibration/markers/20.png" alt="Marker ArUco 20">
+                <strong>ArUco 20 · TR</strong>
+                <a class="px-btn" href="/api/calibration/markers/20.png" download="aruco-20.png">Pobierz PNG</a>
+            </article>
+            <article class="marker-card">
+                <img src="/api/calibration/markers/30.png" alt="Marker ArUco 30">
+                <strong>ArUco 30 · BR</strong>
+                <a class="px-btn" href="/api/calibration/markers/30.png" download="aruco-30.png">Pobierz PNG</a>
+            </article>
+            <article class="marker-card">
+                <img src="/api/calibration/markers/40.png" alt="Marker ArUco 40">
+                <strong>ArUco 40 · BL</strong>
+                <a class="px-btn" href="/api/calibration/markers/40.png" download="aruco-40.png">Pobierz PNG</a>
+            </article>
+        </div>
+    </section>
+
+    <section class="calib-step" aria-labelledby="calibrationTitle">
+        <div class="calib-step-head">
+            <div>
+                <h2 id="calibrationTitle">3 · Oblicz kalibrację</h2>
+                <p class="calib-step-lead">
+                    Przycisk odblokuje się tylko dla kamery online, świeżej klatki,
+                    czterech unikalnych ID oraz dodatnich wymiarów.
+                </p>
+            </div>
+        </div>
+
+        <div class="calib-grid">
+            <div>
+                <div class="calib-row">
+                    <div class="calib-field">
+                        <label for="cameraId">Camera ID</label>
+                        <input id="cameraId" value="cam_default" readonly>
+                    </div>
+                    <div class="calib-field calib-field--wide">
+                        <label for="markerIds">ID markerów · TL, TR, BR, BL</label>
+                        <input id="markerIds" value="10, 20, 30, 40"
+                               inputmode="numeric" autocomplete="off">
+                    </div>
+                </div>
+                <div class="calib-row">
+                    <div class="calib-field">
+                        <label for="widthM">Szerokość 10–20 [m]</label>
+                        <input id="widthM" type="number" min="0.01" max="1000"
+                               step="0.01" value="3.00">
+                    </div>
+                    <div class="calib-field">
+                        <label for="heightM">Wysokość 10–40 [m]</label>
+                        <input id="heightM" type="number" min="0.01" max="1000"
+                               step="0.01" value="2.00">
+                    </div>
+                </div>
+
+                <div class="calib-checks">
+                    <div class="calib-check bad" id="checkOnline">kamera online</div>
+                    <div class="calib-check bad" id="checkFresh">świeża klatka ≤ 3 s</div>
+                    <div class="calib-check ok" id="checkIds">4 unikalne ID</div>
+                    <div class="calib-check ok" id="checkDimensions">poprawne wymiary</div>
+                </div>
+
+                <div class="calib-actions">
+                    <button class="px-btn px-btn--danger" id="calibrateLatestBtn"
+                            type="button" disabled>
+                        <i data-lucide="target"></i>Wykonaj kalibrację
+                    </button>
+                    <button class="px-btn" id="refreshPreviewBtn" type="button">
+                        Sprawdź markery
+                    </button>
+                    <button class="px-btn" id="clearCalibrationBtn" type="button">
+                        Usuń kalibrację
+                    </button>
+                </div>
+                <div class="status status-idle" id="calibrationStatus">
+                    Połącz świeży strumień i sprawdź ułożenie markerów.
+                </div>
+            </div>
+
+            <div>
+                <div class="calib-quality" id="qualityPanel">
+                    <div class="calib-quality-head">
+                        <div>
+                            <span class="calib-eyebrow">Jakość geometrii</span>
+                            <div id="qualityStatus">brak wyniku</div>
+                        </div>
+                        <div class="calib-quality-score" id="qualityScore">—</div>
+                    </div>
+                    <div class="calib-quality-grid" id="qualityMetrics">
+                        <span>pokrycie: —</span>
+                        <span>kąt min.: —</span>
+                        <span>reprojekcja: —</span>
+                    </div>
+                    <ul class="calib-quality-warnings" id="qualityWarnings"></ul>
+                </div>
+                <pre class="calib-output" id="currentCalibration">Brak zapisanej kalibracji.</pre>
+            </div>
+        </div>
+    </section>
+
+    <section class="calib-step" aria-labelledby="measureTitle">
+        <div class="calib-step-head">
+            <div>
+                <h2 id="measureTitle">4 · Test dwóch punktów</h2>
+                <p class="calib-step-lead">
+                    Po zapisaniu kalibracji wybierz dwa punkty na podłożu w podglądzie.
+                    Backend przeliczy ich położenie przez zapisaną homografię.
+                </p>
+            </div>
+        </div>
+        <div class="calib-actions">
+            <button class="px-btn" id="startMeasureBtn" type="button" disabled>
+                Wybierz 2 punkty na obrazie
+            </button>
+            <button class="px-btn" id="resetMeasureBtn" type="button" disabled>
+                Wyczyść pomiar
+            </button>
+        </div>
+        <div class="status status-idle" id="measureStatus">
+            Najpierw wykonaj lub odczytaj kalibrację tej kamery.
+        </div>
+        <div class="measure-result" id="measureResult">
+            Wynik odległości pojawi się tutaj.
+        </div>
+    </section>
+
+
+</main>
+
+<script>
+(function () {
+    "use strict";
+
+    const FRAME_FRESH_MS = 3000;
+    const CAMERA_REFRESH_MS = 3000;
+    const PREVIEW_ANALYSIS_MIN_MS = 900;
+    const DEFAULT_MARKER_IDS = [10, 20, 30, 40];
+
+    const dom = {
+        cameraSelect: document.getElementById("cameraSelect"),
+        cameraId: document.getElementById("cameraId"),
+        refreshCamerasBtn: document.getElementById("refreshCamerasBtn"),
+        connectStreamBtn: document.getElementById("connectStreamBtn"),
+        previewShell: document.getElementById("previewShell"),
+        previewCanvas: document.getElementById("previewCanvas"),
+        previewEmpty: document.getElementById("previewEmpty"),
+        liveChip: document.getElementById("liveChip"),
+        liveChipText: document.getElementById("liveChipText"),
+        streamStatus: document.getElementById("streamStatus"),
+        cameraOnline: document.getElementById("cameraOnline"),
+        socketStatus: document.getElementById("socketStatus"),
+        cameraMode: document.getElementById("cameraMode"),
+        cameraLastSeen: document.getElementById("cameraLastSeen"),
+        cameraResolution: document.getElementById("cameraResolution"),
+        frameFreshness: document.getElementById("frameFreshness"),
+        detectedMarkerIds: document.getElementById("detectedMarkerIds"),
+        missingMarkerIds: document.getElementById("missingMarkerIds"),
+        previewValidity: document.getElementById("previewValidity"),
+        calibrationFlag: document.getElementById("calibrationFlag"),
+        markerIds: document.getElementById("markerIds"),
+        widthM: document.getElementById("widthM"),
+        heightM: document.getElementById("heightM"),
+        checkOnline: document.getElementById("checkOnline"),
+        checkFresh: document.getElementById("checkFresh"),
+        checkIds: document.getElementById("checkIds"),
+        checkDimensions: document.getElementById("checkDimensions"),
+        calibrateLatestBtn: document.getElementById("calibrateLatestBtn"),
+        refreshPreviewBtn: document.getElementById("refreshPreviewBtn"),
+        clearCalibrationBtn: document.getElementById("clearCalibrationBtn"),
+        calibrationStatus: document.getElementById("calibrationStatus"),
+        qualityStatus: document.getElementById("qualityStatus"),
+        qualityScore: document.getElementById("qualityScore"),
+        qualityMetrics: document.getElementById("qualityMetrics"),
+        qualityWarnings: document.getElementById("qualityWarnings"),
+        currentCalibration: document.getElementById("currentCalibration"),
+        startMeasureBtn: document.getElementById("startMeasureBtn"),
+        resetMeasureBtn: document.getElementById("resetMeasureBtn"),
+        measureStatus: document.getElementById("measureStatus"),
+        measureResult: document.getElementById("measureResult"),
+        downloadAllMarkersBtn: document.getElementById("downloadAllMarkersBtn"),
+        printMarkersBtn: document.getElementById("printMarkersBtn"),
+    };
+
+    const previewCtx = dom.previewCanvas.getContext("2d");
+
+    const State = {
+        cameras: [],
+        cameraId: "",
+        selectionLocked: false,
+        selectionSource: "auto-fallback",
+        cameraOnline: false,
+        cameraMode: null,
+        cameraLastSeen: null,
+        cameraResolution: null,
+        ws: null,
+        wsGeneration: 0,
+        wsConnected: false,
+        imageGeneration: 0,
+        lastFrame: null,
+        pendingBinaryFrame: null,
+        wsMarkers: [],
+        previewAnalysis: null,
+        previewAnalysisBusy: false,
+        previewAnalysisAt: 0,
+        previewAnalysisTimer: null,
+        calibration: null,
+        calibrationBusy: false,
+        camerasBusy: false,
+        measuring: false,
+        measurePoints: [],
+        measureResult: null,
+    };
+
+    function setBoxStatus(element, message, kind) {
+        element.textContent = message;
+        element.className = "status status-" + kind;
+    }
+
+    function formatError(error) {
+        if (!error) return "Nieznany błąd";
+        return error.message || String(error);
+    }
+
+    async function responseError(response) {
+        let detail = "";
+        try {
+            const body = await response.json();
+            detail = body.detail || body.message || "";
+        } catch (_) {
+            try { detail = await response.text(); } catch (_) { /* noop */ }
+        }
+        return new Error(detail || ("HTTP " + response.status));
+    }
+
+    function queryCameraId() {
+        return (new URLSearchParams(window.location.search).get("camera_id") || "").trim();
+    }
+
+    function storedCameraId() {
+        try { return (localStorage.getItem("perimetr:camera_id") || "").trim(); }
+        catch (_) { return ""; }
+    }
+
+    function chooseInitialCamera(cameras) {
+        // Required precedence: URL → localStorage → first online → cam_default.
+        const fromUrl = queryCameraId();
+        const urlCameraExists = fromUrl && cameras.some(function (camera) {
+            return camera.camera_id === fromUrl;
+        });
+        // Older versions wrote the synthetic fallback into the URL. Do not
+        // let that stale `?camera_id=cam_default` block a real phone forever;
+        // a registered cam_default remains a normal explicit URL selection.
+        if (fromUrl && (fromUrl !== "cam_default" || urlCameraExists)) {
+            return {
+                cameraId: fromUrl,
+                locked: true,
+                remember: true,
+                source: "url",
+            };
+        }
+        const fromStorage = storedCameraId();
+        const storedExists = fromStorage && cameras.some(function (camera) {
+            return camera.camera_id === fromStorage;
+        });
+        if (storedExists) {
+            return {
+                cameraId: fromStorage,
+                locked: true,
+                remember: false,
+                source: "stored",
+            };
+        }
+        const firstOnline = cameras.find(function (camera) {
+            return camera.online === true;
+        });
+        if (firstOnline) {
+            return {
+                cameraId: firstOnline.camera_id,
+                locked: true,
+                remember: true,
+                source: "first-online",
+            };
+        }
+        // This is a display fallback only. It must not enter localStorage or
+        // block a real stream that appears during a later registry refresh.
+        return {
+            cameraId: "cam_default",
+            locked: false,
+            remember: false,
+            source: "auto-fallback",
+        };
+    }
+
+    function rememberCameraId(cameraId) {
+        try { localStorage.setItem("perimetr:camera_id", cameraId); } catch (_) { /* noop */ }
+        try {
+            const next = new URL(window.location.href);
+            next.searchParams.set("camera_id", cameraId);
+            history.replaceState(null, "", next);
+        } catch (_) { /* Firefox private/file contexts can reject history writes. */ }
+    }
+
+    function cameraById(cameraId) {
+        return State.cameras.find(function (camera) {
+            return camera.camera_id === cameraId;
+        }) || null;
+    }
+
+    function formatMode(mode) {
+        if (mode === "checkpoint") return "bramka PPE";
+        if (mode === "site") return "teren / site";
+        return mode || "—";
+    }
+
+    function formatResolution(width, height) {
+        return width && height ? width + "×" + height : "—";
+    }
+
+    function formatRelativeEpoch(epochSeconds) {
+        const value = Number(epochSeconds);
+        if (!Number.isFinite(value) || value <= 0) return "—";
+        const seconds = Math.max(0, (Date.now() / 1000) - value);
+        if (seconds < 1) return "teraz";
+        if (seconds < 60) return Math.round(seconds) + " s temu";
+        return new Date(value * 1000).toLocaleString("pl-PL");
+    }
+
+    function renderCameraOptions(selectedId) {
+        const rows = State.cameras.slice();
+        if (!rows.some(function (camera) { return camera.camera_id === selectedId; })) {
+            rows.unshift({
+                camera_id: selectedId,
+                online: false,
+                mode: null,
+                width: null,
+                height: null,
+                last_seen: null,
+                synthetic: true,
+            });
+        }
+        dom.cameraSelect.innerHTML = "";
+        rows.forEach(function (camera) {
+            const option = document.createElement("option");
+            option.value = camera.camera_id;
+            const state = camera.online ? "online" : "offline";
+            const resolution = camera.width && camera.height
+                ? " · " + camera.width + "×" + camera.height : "";
+            const calibrationState = camera.calibrated
+                ? " · skalibrowana" : " · bez kalibracji";
+            option.textContent = camera.camera_id + " · " + state
+                + resolution + calibrationState;
+            option.selected = camera.camera_id === selectedId;
+            dom.cameraSelect.appendChild(option);
+        });
+    }
+
+    function applyCameraId(cameraId, options) {
+        options = options || {};
+        const next = (cameraId || "cam_default").trim() || "cam_default";
+        const changed = next !== State.cameraId;
+        const previousSource = State.selectionSource;
+        State.cameraId = next;
+        if (options.locked !== undefined) {
+            State.selectionLocked = Boolean(options.locked);
+        }
+        if (options.source) State.selectionSource = options.source;
+        const placeholderResolved =
+            previousSource === "auto-fallback" &&
+            State.selectionSource !== "auto-fallback";
+        const selectionChanged = changed || placeholderResolved;
+        if (selectionChanged) {
+            State.cameraOnline = false;
+            State.cameraMode = null;
+            State.cameraLastSeen = null;
+            State.cameraResolution = null;
+        }
+        dom.cameraId.value = next;
+        if (options.remember === true) rememberCameraId(next);
+        renderCameraOptions(next);
+        updateCameraMetadata();
+        if (selectionChanged) {
+            disconnectStream(false);
+            clearRemotePreview("Łączenie z wybraną kamerą " + next + "…");
+            State.previewAnalysis = null;
+            State.calibration = null;
+            State.measurePoints = [];
+            State.measureResult = null;
+            State.measuring = false;
+            setBoxStatus(
+                dom.calibrationStatus,
+                "Sprawdź markery i stan kalibracji wybranej kamery.",
+                "idle"
+            );
+            setBoxStatus(
+                dom.measureStatus,
+                "Najpierw odczytaj lub wykonaj poprawną kalibrację tej kamery.",
+                "idle"
+            );
+            renderPreview();
+            renderMeasurement();
+            refreshCalibration();
+            schedulePreviewAnalysis(true);
+            window.setTimeout(autoConnectSelectedCamera, 0);
+        }
+    }
+
+    async function refreshCameras(options) {
+        options = options || {};
+        if (State.camerasBusy) return;
+        State.camerasBusy = true;
+        dom.refreshCamerasBtn.disabled = true;
+        try {
+            const response = await fetch("/api/cameras", {
+                credentials: "same-origin",
+                cache: "no-store",
+            });
+            if (!response.ok) throw await responseError(response);
+            const body = await response.json();
+            State.cameras = Array.isArray(body.cameras) ? body.cameras : [];
+            let selection = null;
+            if (!State.cameraId || options.chooseInitial) {
+                selection = chooseInitialCamera(State.cameras);
+            } else if (!State.selectionLocked) {
+                const firstOnline = State.cameras.find(function (camera) {
+                    return camera.online === true;
+                });
+                if (firstOnline) {
+                    selection = {
+                        cameraId: firstOnline.camera_id,
+                        locked: true,
+                        remember: true,
+                        source: "first-online",
+                    };
+                }
+            }
+            if (selection) {
+                applyCameraId(selection.cameraId, selection);
+            } else {
+                applyCameraId(State.cameraId || "cam_default", { remember: false });
+            }
+            updateCameraMetadata();
+            autoConnectSelectedCamera();
+            if (!State.wsConnected) schedulePreviewAnalysis();
+            if (!State.cameraOnline && !State.wsConnected) {
+                setBoxStatus(
+                    dom.streamStatus,
+                    "Wybrana kamera nie wysłała klatki w ostatnich 10 sekundach.",
+                    "idle"
+                );
+            }
+        } catch (error) {
+            if (!State.cameraId) {
+                const fallback = chooseInitialCamera([]);
+                applyCameraId(fallback.cameraId, fallback);
+            }
+            setBoxStatus(
+                dom.streamStatus,
+                "Nie udało się pobrać rejestru kamer: " + formatError(error),
+                "err"
+            );
+        } finally {
+            State.camerasBusy = false;
+            dom.refreshCamerasBtn.disabled = false;
+            updateReadiness();
+        }
+    }
+
+    function updateCameraMetadata(frameData) {
+        const row = cameraById(State.cameraId);
+        if (frameData) {
+            State.cameraMode = frameData.mode || State.cameraMode;
+            State.cameraLastSeen = frameData.timestamp || State.cameraLastSeen;
+            if (State.lastFrame) {
+                State.cameraResolution = {
+                    width: State.lastFrame.width,
+                    height: State.lastFrame.height,
+                };
+            }
+        } else {
+            State.cameraMode = row ? row.mode : State.cameraMode;
+            State.cameraLastSeen = row ? row.last_seen : State.cameraLastSeen;
+            if (row && row.width && row.height) {
+                State.cameraResolution = { width: row.width, height: row.height };
+            }
+        }
+        State.cameraOnline = Boolean(
+            (row && row.online === true) ||
+            (State.wsConnected && isFrameFresh())
+        );
+        dom.cameraOnline.textContent = State.cameraOnline ? "online" : "offline";
+        dom.cameraMode.textContent = formatMode(State.cameraMode);
+        dom.cameraLastSeen.textContent = formatRelativeEpoch(State.cameraLastSeen);
+        dom.cameraResolution.textContent = State.cameraResolution
+            ? formatResolution(State.cameraResolution.width, State.cameraResolution.height)
+            : "—";
+        dom.socketStatus.textContent = State.wsConnected ? "połączony" : "rozłączony";
+        dom.connectStreamBtn.disabled = !State.cameraOnline;
+        updateReadiness();
+    }
+
+    function disconnectStream(updateMessage) {
+        State.wsGeneration += 1;
+        const socket = State.ws;
+        State.ws = null;
+        State.wsConnected = false;
+        State.pendingBinaryFrame = null;
+        if (socket) {
+            socket.onopen = null;
+            socket.onmessage = null;
+            socket.onerror = null;
+            socket.onclose = null;
+            try { socket.close(); } catch (_) { /* noop */ }
+        }
+        dom.socketStatus.textContent = "rozłączony";
+        dom.liveChip.classList.remove("online", "stale");
+        dom.liveChipText.textContent = "rozłączono";
+        if (updateMessage) {
+            setBoxStatus(dom.streamStatus, "Podgląd WebSocket został rozłączony.", "idle");
+        }
+        updateCameraMetadata();
+    }
+
+    function autoConnectSelectedCamera() {
+        if (!State.cameraOnline) return;
+        if (State.ws && (
+            State.ws.readyState === WebSocket.OPEN ||
+            State.ws.readyState === WebSocket.CONNECTING
+        )) return;
+        connectStream(false);
+    }
+
+    function connectStream(forceReconnect) {
+        if (!State.cameraOnline) {
+            setBoxStatus(dom.streamStatus, "Najpierw wybierz kamerę oznaczoną jako online.", "err");
+            return;
+        }
+        const socketActive = State.ws && (
+            State.ws.readyState === WebSocket.OPEN ||
+            State.ws.readyState === WebSocket.CONNECTING
+        );
+        if (socketActive && forceReconnect !== true) return;
+        disconnectStream(false);
+        const generation = ++State.wsGeneration;
+        const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+        const query = "?camera_id=" + encodeURIComponent(State.cameraId) + "&binary=true";
+        const socket = new WebSocket(
+            protocol + "//" + window.location.host + "/ws/live" + query
+        );
+        socket.binaryType = "blob";
+        State.ws = socket;
+        dom.connectStreamBtn.disabled = true;
+        dom.socketStatus.textContent = "łączenie";
+        dom.liveChipText.textContent = "łączenie";
+        setBoxStatus(
+            dom.streamStatus,
+            "Łączenie z /ws/live; oczekiwanie na " + State.cameraId + "…",
+            "info"
+        );
+
+        socket.onopen = function () {
+            if (generation !== State.wsGeneration) return;
+            State.wsConnected = true;
+            dom.socketStatus.textContent = "połączony";
+            dom.liveChipText.textContent = "oczekiwanie";
+            setBoxStatus(
+                dom.streamStatus,
+                "Połączono. Oczekiwanie na klatkę wybranej kamery.",
+                "info"
+            );
+            updateCameraMetadata();
+        };
+        socket.onmessage = function (event) {
+            if (generation !== State.wsGeneration) return;
+            if (typeof event.data !== "string") {
+                const metadata = State.pendingBinaryFrame;
+                State.pendingBinaryFrame = null;
+                if (metadata) receiveLiveFrameBlob(metadata, event.data);
+                return;
+            }
+            let data;
+            try { data = JSON.parse(event.data); }
+            catch (_) { return; }
+            if ((data.camera_id || "cam_default") !== State.cameraId) return;
+            if (data.frame_transport === "binary-jpeg") {
+                State.pendingBinaryFrame = data;
+            } else {
+                receiveLiveFrame(data);
+            }
+        };
+        socket.onerror = function () {
+            if (generation !== State.wsGeneration) return;
+            setBoxStatus(dom.streamStatus, "Błąd połączenia WebSocket.", "err");
+        };
+        socket.onclose = function () {
+            if (generation !== State.wsGeneration) return;
+            State.ws = null;
+            State.wsConnected = false;
+            dom.socketStatus.textContent = "rozłączony";
+            dom.liveChip.classList.remove("online");
+            dom.liveChip.classList.add("stale");
+            dom.liveChipText.textContent = "strumień przerwany";
+            setBoxStatus(
+                dom.streamStatus,
+                "Strumień został przerwany. Kliknij „Połącz”, aby spróbować ponownie.",
+                "err"
+            );
+            updateCameraMetadata();
+        };
+    }
+
+    function clearRemotePreview(message) {
+        State.imageGeneration += 1;
+        if (
+            State.lastFrame &&
+            State.lastFrame.image &&
+            typeof State.lastFrame.image.close === "function"
+        ) {
+            State.lastFrame.image.close();
+        }
+        State.lastFrame = null;
+        State.pendingBinaryFrame = null;
+        State.wsMarkers = [];
+        dom.previewCanvas.width = 640;
+        dom.previewCanvas.height = 480;
+        previewCtx.clearRect(0, 0, dom.previewCanvas.width, dom.previewCanvas.height);
+        dom.previewShell.style.aspectRatio = "4 / 3";
+        dom.previewEmpty.textContent = message || "Oczekiwanie na klatkę…";
+        dom.previewEmpty.hidden = false;
+        updateMarkerState();
+        updateReadiness();
+    }
+
+    function applyRemoteImage(data, image, width, height, generation) {
+        if (generation !== State.imageGeneration || data.camera_id !== State.cameraId) {
+            if (image && typeof image.close === "function") image.close();
+            return;
+        }
+        if (
+            State.lastFrame &&
+            State.lastFrame.image &&
+            typeof State.lastFrame.image.close === "function"
+        ) {
+            State.lastFrame.image.close();
+        }
+        State.wsMarkers = Array.isArray(data.markers) ? data.markers : [];
+        State.lastFrame = {
+            cameraId: State.cameraId,
+            data: data,
+            image: image,
+            receivedAt: Date.now(),
+            width: width,
+            height: height,
+        };
+        State.cameraOnline = true;
+        dom.previewCanvas.width = width;
+        dom.previewCanvas.height = height;
+        dom.previewShell.style.aspectRatio = width + " / " + height;
+        dom.previewEmpty.hidden = true;
+        dom.liveChip.classList.remove("stale");
+        dom.liveChip.classList.add("online");
+        dom.liveChipText.textContent = "live · " + State.cameraId;
+        setBoxStatus(
+            dom.streamStatus,
+            "Odbieranie binarnej klatki JPEG z /ws/live.",
+            "ok"
+        );
+        updateCameraMetadata(data);
+        renderPreview();
+        updateMarkerState();
+        schedulePreviewAnalysis();
+    }
+
+    function receiveLiveFrame(data) {
+        if (!data.frame_jpeg_b64) return;
+        const generation = ++State.imageGeneration;
+        const image = new Image();
+        image.onload = function () {
+            applyRemoteImage(
+                data,
+                image,
+                image.naturalWidth || image.width,
+                image.naturalHeight || image.height,
+                generation
+            );
+        };
+        image.onerror = function () {
+            if (generation !== State.imageGeneration) return;
+            setBoxStatus(dom.streamStatus, "Nie można zdekodować klatki WebSocket.", "err");
+        };
+        image.src = "data:image/jpeg;base64," + data.frame_jpeg_b64;
+    }
+
+    async function receiveLiveFrameBlob(data, blob) {
+        const generation = ++State.imageGeneration;
+        try {
+            const bitmap = await createImageBitmap(blob);
+            applyRemoteImage(
+                data,
+                bitmap,
+                bitmap.width,
+                bitmap.height,
+                generation
+            );
+        } catch (_) {
+            if (generation === State.imageGeneration) {
+                setBoxStatus(
+                    dom.streamStatus,
+                    "Nie można zdekodować binarnej klatki WebSocket.",
+                    "err"
+                );
+            }
+        }
+    }
+
+    function markerId(marker) {
+        const value = marker.marker_id !== undefined ? marker.marker_id : marker.id;
+        return Number(value);
+    }
+
+    function markerCorners(marker) {
+        return marker.corners_px || marker.corners || [];
+    }
+
+    function markerCenter(marker) {
+        return marker.center_px || marker.center || null;
+    }
+
+    function visibleMarkers() {
+        if (State.previewAnalysis &&
+            Array.isArray(State.previewAnalysis.detected_markers)) {
+            return State.previewAnalysis.detected_markers;
+        }
+        return State.wsMarkers;
+    }
+
+    function renderPreview() {
+        const frame = State.lastFrame;
+        if (!frame || !frame.image) return;
+        previewCtx.clearRect(0, 0, dom.previewCanvas.width, dom.previewCanvas.height);
+        previewCtx.drawImage(frame.image, 0, 0, dom.previewCanvas.width, dom.previewCanvas.height);
+
+        const required = new Set(parseMarkerIds());
+        visibleMarkers().forEach(function (marker) {
+            const corners = markerCorners(marker);
+            const id = markerId(marker);
+            if (!Array.isArray(corners) || corners.length < 3 || !Number.isFinite(id)) return;
+            const color = required.has(id) ? "#36D17D" : "#FFB020";
+            previewCtx.save();
+            previewCtx.strokeStyle = color;
+            previewCtx.lineWidth = Math.max(2, dom.previewCanvas.width / 480);
+            previewCtx.beginPath();
+            corners.forEach(function (point, index) {
+                if (!Array.isArray(point) || point.length < 2) return;
+                if (index === 0) previewCtx.moveTo(Number(point[0]), Number(point[1]));
+                else previewCtx.lineTo(Number(point[0]), Number(point[1]));
+            });
+            previewCtx.closePath();
+            previewCtx.stroke();
+            const center = markerCenter(marker) || corners[0];
+            const label = "ID " + id;
+            previewCtx.font = "600 14px ui-monospace, monospace";
+            const width = previewCtx.measureText(label).width + 12;
+            const x = Math.max(0, Math.min(Number(center[0]) - width / 2, dom.previewCanvas.width - width));
+            const y = Math.max(0, Math.min(Number(center[1]) + 12, dom.previewCanvas.height - 23));
+            previewCtx.fillStyle = "rgba(10,10,10,.82)";
+            previewCtx.fillRect(x, y, width, 21);
+            previewCtx.fillStyle = color;
+            previewCtx.textBaseline = "middle";
+            previewCtx.fillText(label, x + 6, y + 11);
+            previewCtx.restore();
+        });
+
+        if (State.measurePoints.length) {
+            previewCtx.save();
+            previewCtx.strokeStyle = "#DD211C";
+            previewCtx.fillStyle = "#DD211C";
+            previewCtx.lineWidth = Math.max(2, dom.previewCanvas.width / 480);
+            if (State.measurePoints.length === 2) {
+                previewCtx.beginPath();
+                previewCtx.moveTo(State.measurePoints[0][0], State.measurePoints[0][1]);
+                previewCtx.lineTo(State.measurePoints[1][0], State.measurePoints[1][1]);
+                previewCtx.stroke();
+            }
+            State.measurePoints.forEach(function (point, index) {
+                previewCtx.beginPath();
+                previewCtx.arc(point[0], point[1], 7, 0, Math.PI * 2);
+                previewCtx.fill();
+                const label = String(index + 1);
+                previewCtx.fillStyle = "#FFFFFF";
+                previewCtx.font = "700 11px ui-monospace, monospace";
+                previewCtx.textAlign = "center";
+                previewCtx.textBaseline = "middle";
+                previewCtx.fillText(label, point[0], point[1] + .5);
+                previewCtx.fillStyle = "#DD211C";
+            });
+            previewCtx.restore();
+        }
+    }
+
+    function parseMarkerIds() {
+        const parts = dom.markerIds.value.split(/[\s,;]+/).filter(Boolean);
+        const ids = parts.map(function (value) { return Number.parseInt(value, 10); });
+        if (ids.some(function (value) {
+            return !Number.isInteger(value) || value < 0 || value >= 50;
+        })) {
+            return [];
+        }
+        return ids;
+    }
+
+    function dimensions() {
+        return {
+            widthM: Number(dom.widthM.value),
+            heightM: Number(dom.heightM.value),
+        };
+    }
+
+    function validMarkerIds(ids) {
+        return ids.length === 4 && new Set(ids).size === 4;
+    }
+
+    function validDimensions(values) {
+        return Number.isFinite(values.widthM) && values.widthM > 0 &&
+            Number.isFinite(values.heightM) && values.heightM > 0;
+    }
+
+    function validLocalCameraId(cameraId) {
+        return /^[a-zA-Z0-9_.-]{1,64}$/.test(cameraId);
+    }
+
+    function requiredMarkersReady(requiredIds) {
+        const analysis = State.previewAnalysis;
+        if (
+            !validMarkerIds(requiredIds) ||
+            !analysis ||
+            analysis.camera_id !== State.cameraId ||
+            analysis.frame_available !== true ||
+            analysis.fresh !== true ||
+            analysis.valid !== true
+        ) {
+            return false;
+        }
+        const analyzedIds = Array.isArray(analysis.required_marker_ids)
+            ? analysis.required_marker_ids.map(Number) : [];
+        if (
+            analyzedIds.length !== requiredIds.length ||
+            analyzedIds.some(function (id, index) {
+                return id !== requiredIds[index];
+            })
+        ) {
+            return false;
+        }
+        const detectedIds = new Set(
+            (analysis.detected_markers || [])
+                .map(markerId)
+                .filter(Number.isFinite)
+        );
+        return requiredIds.every(function (id) {
+            return detectedIds.has(id);
+        });
+    }
+
+    function isFrameFresh() {
+        return Boolean(
+            State.lastFrame &&
+            State.lastFrame.cameraId === State.cameraId &&
+            Date.now() - State.lastFrame.receivedAt <= FRAME_FRESH_MS
+        );
+    }
+
+    function calibrationReadyForMeasurement() {
+        const analysis = State.previewAnalysis;
+        return Boolean(
+            State.calibration &&
+            isFrameFresh() &&
+            analysis &&
+            analysis.camera_id === State.cameraId &&
+            analysis.frame_available === true &&
+            analysis.fresh === true &&
+            (
+                analysis.calibration_valid_for_frame === true ||
+                analysis.calibration_aspect_compatible === true
+            )
+        );
+    }
+
+    function setCheck(element, ok) {
+        element.classList.toggle("ok", ok);
+        element.classList.toggle("bad", !ok);
+    }
+
+    function updateReadiness() {
+        const requiredIds = parseMarkerIds();
+        const markerIdsValid = validMarkerIds(requiredIds);
+        const idsOk = requiredMarkersReady(requiredIds);
+        const dimensionsOk = validDimensions(dimensions());
+        const backendFresh = Boolean(
+            State.previewAnalysis &&
+            State.previewAnalysis.camera_id === State.cameraId &&
+            State.previewAnalysis.frame_available === true &&
+            State.previewAnalysis.fresh === true
+        );
+        const fresh = isFrameFresh() && backendFresh;
+        const online = State.cameraOnline;
+        setCheck(dom.checkOnline, online);
+        setCheck(dom.checkFresh, fresh);
+        setCheck(dom.checkIds, idsOk);
+        setCheck(dom.checkDimensions, dimensionsOk);
+        const detectedIds = new Set(
+            (
+                State.previewAnalysis &&
+                Array.isArray(State.previewAnalysis.detected_markers)
+                    ? State.previewAnalysis.detected_markers : []
+            )
+                .map(markerId)
+                .filter(Number.isFinite)
+        );
+        const detectedRequired = markerIdsValid
+            ? requiredIds.filter(function (id) { return detectedIds.has(id); }).length
+            : 0;
+        dom.checkIds.textContent = idsOk
+            ? "4/4 wymaganych markerów wykryte"
+            : detectedRequired + "/4 wymaganych markerów";
+        const ready = online && fresh && idsOk && dimensionsOk && !State.calibrationBusy;
+        dom.calibrateLatestBtn.disabled = !ready;
+        dom.connectStreamBtn.disabled = !online || Boolean(
+            State.ws && State.ws.readyState === WebSocket.CONNECTING
+        );
+        dom.startMeasureBtn.disabled = !calibrationReadyForMeasurement();
+        dom.resetMeasureBtn.disabled =
+            State.measurePoints.length === 0 && !State.measureResult && !State.measuring;
+
+        if (State.lastFrame) {
+            const age = Math.max(0, Date.now() - State.lastFrame.receivedAt);
+            dom.frameFreshness.textContent = age <= FRAME_FRESH_MS
+                ? (age / 1000).toFixed(1) + " s · świeża"
+                : (age / 1000).toFixed(1) + " s · nieaktualna";
+            dom.liveChip.classList.toggle("online", fresh);
+            dom.liveChip.classList.toggle("stale", !fresh);
+            if (!fresh) dom.liveChipText.textContent = "klatka nieaktualna";
+        } else {
+            const analysis = State.previewAnalysis;
+            if (analysis && analysis.frame_available) {
+                const apiAge = Number(analysis.frame_age_sec);
+                dom.frameFreshness.textContent =
+                    (Number.isFinite(apiAge) ? apiAge.toFixed(1) + " s · " : "") +
+                    (analysis.fresh ? "świeża w API · brak podglądu" : "nieaktualna w API");
+            } else {
+                dom.frameFreshness.textContent = "brak klatki";
+            }
+        }
+    }
+
+    function updateMarkerState() {
+        const required = parseMarkerIds();
+        const detected = visibleMarkers()
+            .map(markerId)
+            .filter(Number.isFinite);
+        const detectedUnique = Array.from(new Set(detected));
+        const missing = required.filter(function (id) {
+            return !detectedUnique.includes(id);
+        });
+        dom.detectedMarkerIds.textContent = detectedUnique.length
+            ? detectedUnique.join(" · ") : "—";
+        dom.missingMarkerIds.textContent = missing.length ? missing.join(" · ") : "brak";
+
+        const analysis = State.previewAnalysis;
+        if (!analysis) {
+            dom.previewValidity.textContent = State.lastFrame ? "sprawdzanie…" : "oczekiwanie";
+        } else if (analysis.valid === true) {
+            dom.previewValidity.textContent = "gotowa";
+        } else {
+            dom.previewValidity.textContent =
+                analysis.validation_error || "wymaga poprawy";
+        }
+        const active = Boolean(
+            (analysis && (
+                analysis.calibration_exists ||
+                analysis.calibration_active
+            )) ||
+            State.calibration
+        );
+        const compatible = !analysis || Boolean(
+            analysis.calibration_valid_for_frame ||
+            analysis.calibration_aspect_compatible
+        );
+        dom.calibrationFlag.textContent = active
+            ? (
+                compatible
+                    ? "aktywna"
+                    : "aktywna · " + (
+                        analysis.calibration_compatibility_warning ||
+                        "inny format obrazu"
+                    )
+            )
+            : "brak";
+        renderPreview();
+    }
+
+    function previewUrl() {
+        const ids = parseMarkerIds();
+        const query = encodeURIComponent(
+            (validMarkerIds(ids) ? ids : DEFAULT_MARKER_IDS).join(",")
+        );
+        return "/api/calibration/" + encodeURIComponent(State.cameraId) +
+            "/preview?marker_ids=" + query;
+    }
+
+    function schedulePreviewAnalysis(force) {
+        if (!State.cameraId) return;
+        const elapsed = Date.now() - State.previewAnalysisAt;
+        if (!force && elapsed < PREVIEW_ANALYSIS_MIN_MS) {
+            if (!State.previewAnalysisTimer) {
+                State.previewAnalysisTimer = window.setTimeout(function () {
+                    State.previewAnalysisTimer = null;
+                    refreshPreviewAnalysis();
+                }, PREVIEW_ANALYSIS_MIN_MS - elapsed);
+            }
+            return;
+        }
+        refreshPreviewAnalysis();
+    }
+
+    async function refreshPreviewAnalysis() {
+        if (State.previewAnalysisBusy || !State.cameraId) return;
+        State.previewAnalysisBusy = true;
+        State.previewAnalysisAt = Date.now();
+        const requestedCamera = State.cameraId;
+        try {
+            const response = await fetch(previewUrl(), {
+                credentials: "same-origin",
+                cache: "no-store",
+            });
+            if (!response.ok) throw await responseError(response);
+            const analysis = await response.json();
+            if (requestedCamera !== State.cameraId) return;
+            // Preview is metadata-only. The visible canvas intentionally
+            // remains sourced exclusively from /ws/live.
+            State.previewAnalysis = analysis;
+            if (analysis.mode) State.cameraMode = analysis.mode;
+            if (analysis.received_at || analysis.last_seen) {
+                State.cameraLastSeen = analysis.received_at || analysis.last_seen;
+            }
+            if (analysis.frame_width && analysis.frame_height) {
+                State.cameraResolution = {
+                    width: analysis.frame_width,
+                    height: analysis.frame_height,
+                };
+            }
+            updateMarkerState();
+            updateCameraMetadata();
+            if (analysis.quality) renderQuality(analysis.quality);
+        } catch (error) {
+            if (requestedCamera !== State.cameraId) return;
+            State.previewAnalysis = {
+                valid: false,
+                validation_error: formatError(error),
+                detected_markers: State.wsMarkers,
+                missing_marker_ids: parseMarkerIds(),
+            };
+            updateMarkerState();
+        } finally {
+            State.previewAnalysisBusy = false;
+            if (requestedCamera !== State.cameraId) {
+                schedulePreviewAnalysis(true);
+            }
+        }
+    }
+
+    function formatMetric(value, suffix, digits) {
+        const number = Number(value);
+        return Number.isFinite(number)
+            ? number.toFixed(digits === undefined ? 3 : digits) + (suffix || "")
+            : "—";
+    }
+
+    function renderQuality(quality) {
+        quality = quality || {};
+        const score = Number(quality.score);
+        const scorePercent = Number(quality.score_percent);
+        const coverage = quality.coverage_ratio !== undefined
+            ? quality.coverage_ratio : quality.quadrilateral_area_ratio;
+        dom.qualityStatus.textContent = quality.status || "brak wyniku";
+        dom.qualityScore.textContent = Number.isFinite(scorePercent)
+            ? scorePercent.toFixed(1) + "%"
+            : (
+                Number.isFinite(score)
+                    ? Math.round(score * (score <= 1 ? 100 : 1)) + "%"
+                    : "—"
+            );
+        const rows = [
+            "pokrycie: " + formatMetric(coverage, "", 3),
+            "krawędź min.: " + formatMetric(quality.min_edge_ratio, "", 3),
+            "marker min.: " + formatMetric(quality.smallest_marker_area_px, " px²", 0),
+            "kąt min.: " + formatMetric(quality.min_angle_deg, "°", 1),
+            "kąt max.: " + formatMetric(quality.max_angle_deg, "°", 1),
+            "reprojekcja: " + formatMetric(quality.reprojection_error_normalized, "", 4),
+            "uwarunkowanie: " + formatMetric(quality.condition_number, "", 1),
+        ];
+        dom.qualityMetrics.innerHTML = "";
+        rows.forEach(function (text) {
+            const item = document.createElement("span");
+            item.textContent = text;
+            dom.qualityMetrics.appendChild(item);
+        });
+        dom.qualityWarnings.innerHTML = "";
+        const warnings = (quality.warnings && quality.warnings.length)
+            ? quality.warnings : (quality.messages || []);
+        warnings.forEach(function (warning) {
+            const item = document.createElement("li");
+            item.textContent = warning;
+            dom.qualityWarnings.appendChild(item);
+        });
+    }
+
+    function renderCalibration(calibration) {
+        State.calibration = calibration || null;
+        dom.currentCalibration.textContent = calibration
+            ? JSON.stringify(calibration, null, 2)
+            : "Brak zapisanej kalibracji dla " + State.cameraId + ".";
+        if (calibration && calibration.quality) renderQuality(calibration.quality);
+        updateMarkerState();
+        updateReadiness();
+        renderMeasurement();
+    }
+
+    async function refreshCalibration() {
+        const requestedCamera = State.cameraId;
+        if (!requestedCamera) return;
+        if (
+            State.selectionSource === "auto-fallback" &&
+            !cameraById(requestedCamera)
+        ) {
+            renderCalibration(null);
+            dom.currentCalibration.textContent =
+                "Oczekiwanie na aktywną kamerę — cam_default jest tylko nazwą zastępczą.";
+            return;
+        }
+        try {
+            const response = await fetch(
+                "/api/calibration/" + encodeURIComponent(requestedCamera),
+                { credentials: "same-origin", cache: "no-store" }
+            );
+            if (response.status === 404) {
+                if (requestedCamera === State.cameraId) renderCalibration(null);
+                return;
+            }
+            if (!response.ok) throw await responseError(response);
+            const calibration = await response.json();
+            if (requestedCamera === State.cameraId) renderCalibration(calibration);
+        } catch (error) {
+            if (requestedCamera !== State.cameraId) return;
+            dom.currentCalibration.textContent =
+                "Nie udało się odczytać kalibracji: " + formatError(error);
+        }
+    }
+
+    async function calibrateFromLatest() {
+        updateReadiness();
+        if (dom.calibrateLatestBtn.disabled) {
+            setBoxStatus(
+                dom.calibrationStatus,
+                "Wymagana jest kamera online, świeża klatka, 4 ID i poprawne wymiary.",
+                "err"
+            );
+            return;
+        }
+        const requestedCamera = State.cameraId;
+        const ids = parseMarkerIds();
+        const values = dimensions();
+        State.calibrationBusy = true;
+        updateReadiness();
+        setBoxStatus(
+            dom.calibrationStatus,
+            "Obliczanie homografii z najnowszej surowej klatki…",
+            "info"
+        );
+        try {
+            const response = await fetch(
+                "/api/calibration/" + encodeURIComponent(requestedCamera) + "/from-latest",
+                {
+                    method: "POST",
+                    credentials: "same-origin",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        marker_ids: ids,
+                        width_m: values.widthM,
+                        height_m: values.heightM,
+                    }),
+                }
+            );
+            if (!response.ok) throw await responseError(response);
+            const calibration = await response.json();
+            if (requestedCamera !== State.cameraId) return;
+            renderCalibration(calibration);
+            setBoxStatus(
+                dom.calibrationStatus,
+                "Kalibracja zapisana. Sprawdź jakość i wykonaj test dwóch punktów.",
+                "ok"
+            );
+            await refreshPreviewAnalysis();
+        } catch (error) {
+            if (requestedCamera !== State.cameraId) return;
+            setBoxStatus(
+                dom.calibrationStatus,
+                "Kalibracja nie powiodła się: " + formatError(error),
+                "err"
+            );
+        } finally {
+            State.calibrationBusy = false;
+            updateReadiness();
+        }
+    }
+
+    async function clearCalibration() {
+        if (!State.cameraId) return;
+        const requestedCamera = State.cameraId;
+        try {
+            const response = await fetch(
+                "/api/calibration/" + encodeURIComponent(requestedCamera),
+                { method: "DELETE", credentials: "same-origin" }
+            );
+            if (!response.ok && response.status !== 404) {
+                throw await responseError(response);
+            }
+            if (requestedCamera !== State.cameraId) return;
+            renderCalibration(null);
+            State.previewAnalysis = null;
+            setBoxStatus(dom.calibrationStatus, "Kalibracja została usunięta.", "info");
+            schedulePreviewAnalysis(true);
+        } catch (error) {
+            if (requestedCamera !== State.cameraId) return;
+            setBoxStatus(
+                dom.calibrationStatus,
+                "Nie udało się usunąć kalibracji: " + formatError(error),
+                "err"
+            );
+        }
+    }
+
+    function beginMeasurement() {
+        if (!calibrationReadyForMeasurement()) {
+            setBoxStatus(
+                dom.measureStatus,
+                "Pomiar wymaga świeżej klatki i kalibracji zgodnej z formatem obrazu.",
+                "err"
+            );
+            return;
+        }
+        State.measuring = true;
+        State.measurePoints = [];
+        State.measureResult = null;
+        dom.previewCanvas.classList.add("is-measuring");
+        setBoxStatus(dom.measureStatus, "Kliknij pierwszy punkt na podłożu.", "info");
+        renderPreview();
+        renderMeasurement();
+    }
+
+    function canvasPointFromEvent(event) {
+        const rect = dom.previewCanvas.getBoundingClientRect();
+        if (!rect.width || !rect.height) return null;
+        return [
+            (event.clientX - rect.left) * dom.previewCanvas.width / rect.width,
+            (event.clientY - rect.top) * dom.previewCanvas.height / rect.height,
+        ];
+    }
+
+    function handleMeasureCanvasClick(event) {
+        if (
+            !State.measuring ||
+            !State.lastFrame ||
+            !calibrationReadyForMeasurement()
+        ) return;
+        const point = canvasPointFromEvent(event);
+        if (!point) return;
+        State.measurePoints.push(point);
+        renderPreview();
+        if (State.measurePoints.length === 1) {
+            setBoxStatus(dom.measureStatus, "Punkt 1 zapisany. Kliknij punkt 2.", "info");
+            updateReadiness();
+            return;
+        }
+        if (State.measurePoints.length === 2) {
+            State.measuring = false;
+            dom.previewCanvas.classList.remove("is-measuring");
+            submitMeasurement();
+        }
+    }
+
+    async function submitMeasurement() {
+        const requestedCamera = State.cameraId;
+        const points = State.measurePoints.map(function (point) {
+            return [point[0], point[1]];
+        });
+        const frameWidth = dom.previewCanvas.width;
+        const frameHeight = dom.previewCanvas.height;
+        if (points.length !== 2 || !State.lastFrame) return;
+        setBoxStatus(dom.measureStatus, "Przeliczanie odległości…", "info");
+        try {
+            const response = await fetch(
+                "/api/calibration/" + encodeURIComponent(requestedCamera) + "/measure",
+                {
+                    method: "POST",
+                    credentials: "same-origin",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        point_a: [points[0][0], points[0][1]],
+                        point_b: [points[1][0], points[1][1]],
+                        frame_width: frameWidth,
+                        frame_height: frameHeight,
+                    }),
+                }
+            );
+            if (!response.ok) throw await responseError(response);
+            const result = await response.json();
+            if (requestedCamera !== State.cameraId) return;
+            State.measureResult = result;
+            setBoxStatus(dom.measureStatus, "Pomiar zakończony.", "ok");
+        } catch (error) {
+            if (requestedCamera !== State.cameraId) return;
+            State.measureResult = { error: formatError(error) };
+            setBoxStatus(
+                dom.measureStatus,
+                "Nie udało się wykonać pomiaru: " + formatError(error),
+                "err"
+            );
+        }
+        renderMeasurement();
+        updateReadiness();
+    }
+
+    function renderMeasurement() {
+        if (State.measureResult && Number.isFinite(Number(State.measureResult.distance_m))) {
+            dom.measureResult.innerHTML = "";
+            const value = document.createElement("strong");
+            value.textContent = Number(State.measureResult.distance_m).toFixed(3) + " m";
+            dom.measureResult.appendChild(value);
+            const details = document.createElement("div");
+            details.textContent = " · odległość po płaszczyźnie skalibrowanego podłoża";
+            dom.measureResult.appendChild(details);
+        } else if (State.measureResult && State.measureResult.error) {
+            dom.measureResult.textContent = State.measureResult.error;
+        } else {
+            dom.measureResult.textContent = State.measuring
+                ? "Wybieranie punktów na obrazie…"
+                : "Wynik odległości pojawi się tutaj.";
+        }
+        updateReadiness();
+    }
+
+    function resetMeasurement() {
+        State.measuring = false;
+        State.measurePoints = [];
+        State.measureResult = null;
+        dom.previewCanvas.classList.remove("is-measuring");
+        setBoxStatus(
+            dom.measureStatus,
+            State.calibration
+                ? "Kliknij „Wybierz 2 punkty”, aby rozpocząć nowy test."
+                : "Najpierw wykonaj lub odczytaj kalibrację tej kamery.",
+            "idle"
+        );
+        renderPreview();
+        renderMeasurement();
+    }
+
+    function markerDownloadUrl(id) {
+        return "/api/calibration/markers/" + id + ".png";
+    }
+
+    function downloadAllMarkers() {
+        DEFAULT_MARKER_IDS.forEach(function (id, index) {
+            window.setTimeout(function () {
+                const link = document.createElement("a");
+                link.href = markerDownloadUrl(id);
+                link.download = "aruco-" + id + ".png";
+                document.body.appendChild(link);
+                link.click();
+                link.remove();
+            }, index * 180);
+        });
+    }
+
+    function bindEventsOnce() {
+        dom.refreshCamerasBtn.addEventListener("click", function () {
+            refreshCameras();
+        });
+        dom.connectStreamBtn.addEventListener("click", function () {
+            connectStream(true);
+        });
+        dom.cameraSelect.addEventListener("change", function () {
+            applyCameraId(dom.cameraSelect.value, {
+                remember: true,
+                locked: true,
+                source: "manual",
+            });
+            autoConnectSelectedCamera();
+        });
+        dom.markerIds.addEventListener("input", function () {
+            State.previewAnalysis = null;
+            updateMarkerState();
+            updateReadiness();
+            schedulePreviewAnalysis(true);
+        });
+        dom.widthM.addEventListener("input", updateReadiness);
+        dom.heightM.addEventListener("input", updateReadiness);
+        dom.refreshPreviewBtn.addEventListener("click", function () {
+            schedulePreviewAnalysis(true);
+        });
+        dom.calibrateLatestBtn.addEventListener("click", calibrateFromLatest);
+        dom.clearCalibrationBtn.addEventListener("click", clearCalibration);
+        dom.startMeasureBtn.addEventListener("click", beginMeasurement);
+        dom.resetMeasureBtn.addEventListener("click", resetMeasurement);
+        dom.previewCanvas.addEventListener("click", handleMeasureCanvasClick);
+        dom.downloadAllMarkersBtn.addEventListener("click", downloadAllMarkers);
+        dom.printMarkersBtn.addEventListener("click", function () { window.print(); });
+        window.addEventListener("beforeunload", function () {
+            disconnectStream(false);
+        }, { once: true });
+    }
+
+    async function initialize() {
+        bindEventsOnce();
+        clearRemotePreview("Pobieranie rejestru kamer…");
+        renderQuality(null);
+        await refreshCameras({ chooseInitial: true });
+        updateMarkerState();
+        updateReadiness();
+        window.setInterval(function () {
+            refreshCameras();
+        }, CAMERA_REFRESH_MS);
+        window.setInterval(function () {
+            updateCameraMetadata();
+            updateReadiness();
+        }, 500);
+        if (window.lucide) window.lucide.createIcons();
+        else {
+            document.addEventListener("DOMContentLoaded", function () {
+                if (window.lucide) window.lucide.createIcons();
+            }, { once: true });
+        }
+    }
+
+    initialize();
+})();
+</script>
+</body>
+</html>

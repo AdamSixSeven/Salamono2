@@ -18,7 +18,7 @@ def main():
     parser.add_argument("--video", required=True, help="Video file path")
     parser.add_argument("--server", default="http://localhost:8000",
                         help="Backend URL")
-    parser.add_argument("--fps", type=float, default=2.0,
+    parser.add_argument("--fps", type=float, default=10.0,
                         help="Frames per second to send")
     parser.add_argument("--loop", action="store_true",
                         help="Loop video continuously")
@@ -77,12 +77,13 @@ def main():
             n_det = len(data.get("detections", []))
             n_active = len(data.get("active_dangers", []))
             n_confirmed = len(data.get("confirmed_alerts", []))
+            n_posture = len(data.get("confirmed_posture_alerts", []))
             proc_ms = data.get("processing_ms", 0)
-            total_alerts += n_confirmed
+            total_alerts += n_confirmed + n_posture
             sent += 1
 
             status = ""
-            if n_confirmed > 0:
+            if n_confirmed > 0 or n_posture > 0:
                 status = " *** ALARM ***"
             elif n_active > 0:
                 status = " (danger pending)"
@@ -90,7 +91,7 @@ def main():
             print(f"  [{sent:4d}] Frame {frame_idx:5d} | "
                   f"Dets: {n_det:2d} | "
                   f"Active: {n_active} | "
-                  f"Alerts: {n_confirmed} | "
+                  f"Alerts: {n_confirmed} | Posture: {n_posture} | "
                   f"Proc: {proc_ms:6.1f}ms | "
                   f"Total alerts: {total_alerts}{status}")
 

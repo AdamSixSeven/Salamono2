@@ -1,15 +1,126 @@
-data/
-__pycache__/
-*.pyc
-*.pyo
+# Local configuration and secrets
 .env
-*.pt
-*.onnx
-*.engine
+.env.*
+!.env.example
+*.local
+
+# Python virtual environments
 .venv/
 venv/
+env/
+ENV/
+
+# Python caches, test output and coverage
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pyre/
+.hypothesis/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# Build and packaging output
+build/
 dist/
 *.egg-info/
-.pytest_cache/
+.eggs/
+*.whl
+
+# IDE and operating-system files
+.vscode/
+.idea/
+*.code-workspace
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Runtime databases, logs, alerts, calibration and evidence
+data/
+logs/
+*.sqlite
+*.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
+*.db
+*.jsonl
+*.log
+
+# Captures, recordings and generated media
+captures/
+recordings/
+screenshots/
+uploads/
+runs/
+outputs/
+exports/
+reports/
+*.jpg
+*.jpeg
+*.png
+*.bmp
+*.tif
+*.tiff
+*.gif
+*.webp
+*.heic
+*.heif
+*.mp4
+*.avi
+*.mkv
+*.webm
+*.mov
+*.m4v
+*.wav
+*.mp3
+*.aac
+
+# Intentional documentation/frontend assets may be committed here
+!frontend/assets/**
+!docs/assets/**
+
+# Downloaded or exported AI models
+*.pt
+*.pth
+*.onnx
+*.engine
+*.trt
+*.tflite
+*.task
+models/*.bin
+weights/
+
+# Generated QR and marker files
+worker-*.png
+aruco-*.png
+markers-*.pdf
+
+# TLS keys and local certificates
 nginx/certs/*.pem
 nginx/certs/*.key
+*.p12
+*.pfx
+
+# JavaScript dependencies
+node_modules/
+
+# Local archives and hand-off packages
+*.rar
+*.zip
+*.7z
+*.tar
+*.tar.gz
+*.tgz
+
+# Temporary tool output
+.tmp/
+tmp/
+temp/
+.agents/
