@@ -75,15 +75,15 @@ def test_analyzer_uses_crop_of_largest_qualifying_person_and_maps_pose_back():
 
     assert result.inference_ran is True
     assert len(estimator.calls) == 1
-    # 18% margin: x=[67, 300], y clipped to [0, 200].
-    assert estimator.calls[0][0] == (200, 233, 3)
+    # Stabilized square crop uses 24% margin and clips to the frame.
+    assert estimator.calls[0][0] == (200, 268, 3)
     assert len(result.assessments) == 1
     assessment = result.assessments[0]
     assert assessment.person is largest
     assert assessment.frame_width == 300
     assert assessment.frame_height == 200
     assert assessment.landmarks is not None
-    assert np.isclose(assessment.landmarks[0, 0], (67 + 0.5 * 233) / 300)
+    assert np.isclose(assessment.landmarks[0, 0], (32 + 0.5 * 268) / 300)
     assert np.isclose(assessment.landmarks[0, 1], 0.5)
 
 
@@ -122,12 +122,10 @@ def test_cached_landmarks_are_private_and_follow_current_person_box():
     assert new_landmarks is not None
     assert not np.shares_memory(old_landmarks, new_landmarks)
 
-    old_x_px = old_landmarks[11, 0] * 640
-    old_y_px = old_landmarks[11, 1] * 480
-    relative_x = (old_x_px - 190) / (450 - 190)
-    relative_y = (old_y_px - 80) / (470 - 80)
-    expected_x = (210 + relative_x * (500 - 210)) / 640
-    expected_y = (90 + relative_y * (470 - 90)) / 480
+    old_center = ((190 + 450) * 0.5, (80 + 470) * 0.5)
+    new_center = ((210 + 500) * 0.5, (90 + 470) * 0.5)
+    expected_x = old_landmarks[11, 0] + (new_center[0] - old_center[0]) / 640
+    expected_y = old_landmarks[11, 1] + (new_center[1] - old_center[1]) / 480
     assert np.isclose(new_landmarks[11, 0], expected_x)
     assert np.isclose(new_landmarks[11, 1], expected_y)
 
@@ -198,3 +196,37 @@ def test_posture_worker_has_one_pending_slot_and_replaces_it_with_latest():
     finally:
         manager.release.set()
         worker.close()
+
+
+def test_optical_flow_tracks_visible_landmarks_between_pose_samples():
+    from backend.posture_detector import track_pose_optical_flow
+
+    previous = np.zeros((120, 160), dtype=np.uint8)
+    current = np.zeros_like(previous)
+    pose = _pose()
+    # Put textured blobs at visible landmarks and translate the whole frame.
+    for landmark in pose:
+        x = int(round(float(landmark[0]) * 160))
+        y = int(round(float(landmark[1]) * 120))
+        cv = (x, y)
+        import cv2
+        cv2.circle(previous, cv, 3, 255, -1)
+        cv2.circle(current, (x + 4, y + 2), 3, 255, -1)
+
+    fallback = pose.copy()
+    tracked, count = track_pose_optical_flow(
+        previous,
+        current,
+        pose,
+        fallback,
+        frame_width=160,
+        frame_height=120,
+        bbox=(20, 10, 140, 115),
+        min_visibility=0.5,
+        fb_threshold_px=2.0,
+        max_jump_frac=0.2,
+    )
+
+    assert count >= 8
+    assert tracked[11, 0] > pose[11, 0]
+    assert tracked[11, 1] > pose[11, 1]

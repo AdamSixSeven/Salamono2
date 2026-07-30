@@ -1,4 +1,3 @@
-/* Smooth, bounded MediaPipe landmark interpolation for the live overlay. */
 (function (root, factory) {
     "use strict";
 
@@ -12,7 +11,7 @@
 })(typeof window !== "undefined" ? window : globalThis, function () {
     "use strict";
 
-    const DEFAULT_DURATION_MS = 180;
+    const DEFAULT_DURATION_MS = 45;
     const MAX_LANDMARKS = 33;
 
     function cloneLandmarks(landmarks) {
@@ -50,8 +49,30 @@
         return t * t * (3 - 2 * t);
     }
 
+    function easeOutCubic(progress) {
+        const t = Math.max(0, Math.min(1, Number(progress) || 0));
+        return 1 - Math.pow(1 - t, 3);
+    }
+
+    function maximumMovement(previous, current) {
+        const left = cloneLandmarks(previous);
+        const right = cloneLandmarks(current);
+        let maximum = 0;
+        const count = Math.min(left.length, right.length);
+        for (let index = 0; index < count; index += 1) {
+            const a = left[index];
+            const b = right[index];
+            if (!a || !b || a.length < 2 || b.length < 2) continue;
+            const dx = Number(b[0]) - Number(a[0]);
+            const dy = Number(b[1]) - Number(a[1]);
+            if (!Number.isFinite(dx) || !Number.isFinite(dy)) continue;
+            maximum = Math.max(maximum, Math.hypot(dx, dy));
+        }
+        return maximum;
+    }
+
     function interpolateLandmarks(previous, current, progress) {
-        const eased = smoothStep(progress);
+        const eased = easeOutCubic(progress);
         const target = cloneLandmarks(current);
         const source = cloneLandmarks(previous);
         return target.map((landmark, index) => {
@@ -101,8 +122,6 @@
                 const existing = this.tracks.get(trackId);
                 seen.add(trackId);
 
-                // app.js emits the same payload before and after image decode.
-                // Do not reset a running transition for that duplicate event.
                 if (existing && token !== null && existing.token === token &&
                     sameLandmarks(existing.current, target)) {
                     return;
@@ -115,10 +134,17 @@
                 const previous = existing
                     ? this._sampleState(existing, now)
                     : cloneLandmarks(target);
+                const movement = maximumMovement(previous, target);
+                const durationMs = movement > 0.05
+                    ? Math.min(18, this.durationMs)
+                    : movement > 0.025
+                        ? Math.min(30, this.durationMs)
+                        : this.durationMs;
                 this.tracks.set(trackId, {
                     previous: previous,
                     current: cloneLandmarks(target),
-                    startedAt: existing ? now : now - this.durationMs,
+                    startedAt: existing ? now : now - durationMs,
+                    durationMs: durationMs,
                     token: token,
                 });
             });
@@ -138,8 +164,9 @@
         isAnimating(nowMs) {
             const now = Number(nowMs) || 0;
             for (const state of this.tracks.values()) {
+                const duration = Number(state.durationMs) || this.durationMs;
                 if (!sameLandmarks(state.previous, state.current) &&
-                    now - state.startedAt < this.durationMs) {
+                    now - state.startedAt < duration) {
                     return true;
                 }
             }
@@ -155,7 +182,8 @@
         }
 
         _sampleState(state, now) {
-            const progress = (now - state.startedAt) / this.durationMs;
+            const duration = Number(state.durationMs) || this.durationMs;
+            const progress = (now - state.startedAt) / duration;
             if (progress >= 1) return cloneLandmarks(state.current);
             if (progress <= 0) return cloneLandmarks(state.previous);
             return interpolateLandmarks(state.previous, state.current, progress);
@@ -168,5 +196,7 @@
         cloneLandmarks,
         interpolateLandmarks,
         smoothStep,
+        easeOutCubic,
+        maximumMovement,
     };
 });

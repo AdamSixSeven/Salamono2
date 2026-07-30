@@ -266,12 +266,6 @@ input, select { font-family: inherit; }
   letter-spacing: 0.1em;
   text-transform: uppercase;
 }
-.px-card-hint {
-  font-size: 11px;
-  color: var(--ink-4);
-  line-height: 1.4;
-}
-
 /* ============================================================
    Main layout
    ============================================================ */
@@ -651,12 +645,6 @@ input, select { font-family: inherit; }
 }
 .px-draw-actions { display: flex; gap: 8px; }
 .px-draw-actions .px-btn { flex: 1; }
-.px-draw-hint {
-  font-size: 11px;
-  color: var(--ink-4);
-  line-height: 1.4;
-}
-
 /* ============================================================
    Alarms history (right sidebar)
    ============================================================ */
@@ -785,13 +773,6 @@ input, select { font-family: inherit; }
   text-transform: uppercase;
   color: var(--ink);
 }
-.px-modal-sub {
-  margin: 6px 0 20px;
-  font-size: 13px;
-  color: var(--ink-3);
-  line-height: 1.4;
-}
-
 .px-qr-frame {
   display: inline-flex;
   padding: 14px;
@@ -815,12 +796,6 @@ input, select { font-family: inherit; }
   background: var(--surface-2);
   border: 1px solid var(--border-2);
 }
-.px-modal-hint {
-  font-size: 11px;
-  color: var(--ink-4);
-  line-height: 1.4;
-}
-
 /* ============================================================
    Posture / coordination analysis badge
    ============================================================ */
@@ -862,7 +837,7 @@ input, select { font-family: inherit; }
 }
 
 
-/* Worker QR identification badge */
+/* Worker marker identification badge */
 .px-worker-badge {
   position: absolute;
   right: 14px;
@@ -897,7 +872,95 @@ input, select { font-family: inherit; }
   opacity: 0.72;
 }
 
-.px-worker-tools { gap: 8px; }
+.px-worker-tools {
+  gap: 0;
+  transition: padding .22s ease, border-color .22s ease, box-shadow .22s ease;
+}
+
+.px-worker-tools-toggle {
+  width: 100%;
+  min-height: 22px;
+  padding: 0;
+  border: 0;
+  color: inherit;
+  background: transparent;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  user-select: none;
+}
+
+.px-worker-tools-toggle:focus-visible {
+  outline: 1px solid var(--ink);
+  outline-offset: 6px;
+}
+
+.px-worker-tools-toggle-meta {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  min-width: 18px;
+}
+
+.px-worker-tools-chevron {
+  width: 15px;
+  height: 15px;
+  flex: none;
+  stroke-width: 1.8;
+  transition: transform .22s cubic-bezier(.2, .75, .25, 1);
+}
+
+.px-worker-tools--expanded .px-worker-tools-chevron {
+  transform: rotate(180deg);
+}
+
+.px-worker-tools .px-worker-count {
+  max-width: 90px;
+  opacity: 1;
+  overflow: hidden;
+  transform: translateX(0);
+  transition: max-width .2s ease, opacity .14s ease, transform .2s ease;
+}
+
+.px-worker-tools--collapsed .px-worker-count {
+  max-width: 0;
+  opacity: 0;
+  transform: translateX(5px);
+}
+
+.px-worker-tools-body {
+  height: 0;
+  overflow: hidden;
+  opacity: 0;
+  pointer-events: none;
+  will-change: height, opacity;
+  transition:
+    height .24s cubic-bezier(.2, .75, .25, 1),
+    opacity .16s ease;
+}
+
+.px-worker-tools--expanded .px-worker-tools-body {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.px-worker-tools-body-inner {
+  display: flex;
+  min-height: 0;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 12px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .px-worker-tools,
+  .px-worker-tools-chevron,
+  .px-worker-tools .px-worker-count,
+  .px-worker-tools-body {
+    transition-duration: 0.01ms !important;
+  }
+}
 .px-worker-count {
   font-family: var(--font-mono);
   font-size: 10px;

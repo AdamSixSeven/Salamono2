@@ -1,8 +1,3 @@
-/* ============================================================
-   Perimetr — Strefy niebezpieczne
-   Rysowanie polygonów + strefy z markerów ArUco
-   Kolory MSBP: DANGER = czerwony, WARNING = ambar (#FFB020 na wideo)
-   ============================================================ */
 (function () {
     "use strict";
 
@@ -44,9 +39,24 @@
     let personDistances = [];
     let postureAssessments = [];
     let workerIdentifications = [];
+    const workerOverlayTracks = new Map();
+    const WORKER_OVERLAY_MIN_INTERPOLATION_MS = 12;
+    const WORKER_OVERLAY_MAX_INTERPOLATION_MS = 32;
+    const WORKER_OVERLAY_INTERPOLATION_RATIO = 0.28;
+    const WORKER_OVERLAY_TRANSITION_HEADSTART = 0.60;
+    const WORKER_OVERLAY_FADE_IN_MS = 45;
+    const WORKER_OVERLAY_HOLD_MS = 1500;
+    const WORKER_OVERLAY_FADE_MS = 450;
+    const WORKER_OVERLAY_RENDER_INTERVAL_MS = 1000 / 60;
+    let workerOverlayLastFrameKey = "";
+    let workerOverlayAnimationFrame = null;
+    let workerOverlayLastDrawAt = 0;
+    let workerOverlayLastInputAt = 0;
+    let pendingSpatialFrame = null;
+    let pendingSpatialFallbackTimer = null;
     const postureInterpolator = window.PerimetrPostureInterpolation
         ? new window.PerimetrPostureInterpolation.TrackInterpolator({
-            durationMs: 180,
+            durationMs: 45,
         })
         : {
             update: () => false,
@@ -63,11 +73,11 @@
             zones: true,
             markers: true,
             distances: true,
+            worker_id: true,
         };
     let drawing = false;
     let draftPoly = [];          // [[x_norm, y_norm], ...]
 
-    // ---------- Kolory MSBP na wideo ---------------------
 
     const COLOR = {
         dangerStroke: "#DD211C",
@@ -101,6 +111,206 @@
             ? window.performance.now() : Date.now();
     }
 
+    function workerOverlayNow() {
+        return window.performance && typeof window.performance.now === "function"
+            ? window.performance.now() : Date.now();
+    }
+
+    function blendNumber(previous, next, alpha) {
+        const a = Number(previous);
+        const b = Number(next);
+        if (!Number.isFinite(a)) return Number.isFinite(b) ? b : 0;
+        if (!Number.isFinite(b)) return a;
+        return a + (b - a) * alpha;
+    }
+
+    function blendBox(previous, next, alpha) {
+        if (!validBox(next)) return validBox(previous) ? previous.slice() : [];
+        if (!validBox(previous)) return next.map(Number);
+        return next.map((value, index) => blendNumber(previous[index], value, alpha));
+    }
+
+    function validPolygon(poly) {
+        return Array.isArray(poly) && poly.length >= 3 && poly.every(point =>
+            Array.isArray(point) && point.length >= 2 &&
+            Number.isFinite(Number(point[0])) && Number.isFinite(Number(point[1]))
+        );
+    }
+
+    function blendPolygon(previous, next, alpha) {
+        if (!validPolygon(next)) return validPolygon(previous)
+            ? previous.map(point => point.slice()) : [];
+        if (!validPolygon(previous) || previous.length !== next.length) {
+            return next.map(point => [Number(point[0]), Number(point[1])]);
+        }
+        return next.map((point, index) => [
+            blendNumber(previous[index][0], point[0], alpha),
+            blendNumber(previous[index][1], point[1], alpha),
+        ]);
+    }
+
+    function clamp01(value) {
+        return Math.max(0, Math.min(1, Number(value) || 0));
+    }
+
+    function easeInOut(value) {
+        const t = clamp01(value);
+        return t * t * (3 - 2 * t);
+    }
+
+
+    function workerOverlayTransitionDuration(previousBox, nextBox, inputDeltaMs) {
+        if (!validBox(previousBox) || !validBox(nextBox)) return 1;
+        const oldCx = (Number(previousBox[0]) + Number(previousBox[2])) / 2;
+        const oldCy = (Number(previousBox[1]) + Number(previousBox[3])) / 2;
+        const newCx = (Number(nextBox[0]) + Number(nextBox[2])) / 2;
+        const newCy = (Number(nextBox[1]) + Number(nextBox[3])) / 2;
+        const oldW = Math.max(1, Number(previousBox[2]) - Number(previousBox[0]));
+        const oldH = Math.max(1, Number(previousBox[3]) - Number(previousBox[1]));
+        const newW = Math.max(1, Number(nextBox[2]) - Number(nextBox[0]));
+        const newH = Math.max(1, Number(nextBox[3]) - Number(nextBox[1]));
+        const scale = Math.max(1, Math.hypot(oldW, oldH));
+        const motionRatio = Math.hypot(newCx - oldCx, newCy - oldCy) / scale;
+        const sizeRatio = Math.max(
+            Math.abs(newW - oldW) / oldW,
+            Math.abs(newH - oldH) / oldH
+        );
+
+        if (motionRatio > 0.22 || sizeRatio > 0.28) return 1;
+
+        const cadence = Number.isFinite(Number(inputDeltaMs))
+            ? Number(inputDeltaMs) : 33;
+        return Math.max(
+            WORKER_OVERLAY_MIN_INTERPOLATION_MS,
+            Math.min(
+                WORKER_OVERLAY_MAX_INTERPOLATION_MS,
+                cadence * WORKER_OVERLAY_INTERPOLATION_RATIO
+            )
+        );
+    }
+
+    function sampleWorkerTrack(track, now) {
+        const duration = Math.max(1, Number(track.transitionDurationMs) || 1);
+        const progress = easeInOut((now - track.transitionStartedAt) / duration);
+        return {
+            box: blendBox(track.startBox, track.targetBox, progress),
+            polygon: blendPolygon(track.startPolygon, track.targetPolygon, progress),
+            transitionComplete: progress >= 0.999,
+        };
+    }
+
+    function updateWorkerOverlayTracks(rawIdentities, frameKey) {
+        const now = workerOverlayNow();
+        if (frameKey && frameKey === workerOverlayLastFrameKey) return;
+        workerOverlayLastFrameKey = frameKey || ("local:" + now);
+        const inputDeltaMs = workerOverlayLastInputAt > 0
+            ? Math.max(1, now - workerOverlayLastInputAt)
+            : 33;
+        workerOverlayLastInputAt = now;
+
+        (rawIdentities || []).forEach(identity => {
+            if (!identity || !identity.worker_id || !validBox(identity.person_box)) return;
+            const key = String(identity.worker_id);
+            const previous = workerOverlayTracks.get(key);
+            const sampled = previous
+                ? sampleWorkerTrack(previous, now)
+                : {
+                    box: identity.person_box.map(Number),
+                    polygon: validPolygon(identity.tag_polygon)
+                        ? identity.tag_polygon.map(point => [Number(point[0]), Number(point[1])])
+                        : [],
+                };
+            const nextPolygon = validPolygon(identity.tag_polygon)
+                ? identity.tag_polygon.map(point => [Number(point[0]), Number(point[1])])
+                : sampled.polygon;
+            const liveRead = !identity.cached;
+
+            const targetBox = identity.person_box.map(Number);
+            const transitionDurationMs = previous
+                ? workerOverlayTransitionDuration(sampled.box, targetBox, inputDeltaMs)
+                : 1;
+            workerOverlayTracks.set(key, {
+                identity: Object.assign({}, previous ? previous.identity : {}, identity),
+                startBox: sampled.box,
+                targetBox: targetBox,
+                startPolygon: sampled.polygon,
+                targetPolygon: nextPolygon,
+                transitionStartedAt: now - transitionDurationMs * WORKER_OVERLAY_TRANSITION_HEADSTART,
+                transitionDurationMs: transitionDurationMs,
+                createdAt: previous ? previous.createdAt : now,
+                lastSeenAt: now,
+                lastLiveAt: liveRead
+                    ? now
+                    : (previous ? previous.lastLiveAt : now),
+            });
+        });
+
+        const maxAge = WORKER_OVERLAY_HOLD_MS + WORKER_OVERLAY_FADE_MS;
+        workerOverlayTracks.forEach((track, key) => {
+            if (now - track.lastSeenAt > maxAge) workerOverlayTracks.delete(key);
+        });
+        scheduleWorkerOverlayAnimation();
+    }
+
+    function workerOverlaySnapshot(timestamp) {
+        const now = Number.isFinite(Number(timestamp)) ? Number(timestamp) : workerOverlayNow();
+        const maxAge = WORKER_OVERLAY_HOLD_MS + WORKER_OVERLAY_FADE_MS;
+        const out = [];
+        workerOverlayTracks.forEach((track, key) => {
+            const age = now - track.lastSeenAt;
+            if (age > maxAge) {
+                workerOverlayTracks.delete(key);
+                return;
+            }
+            const sampled = sampleWorkerTrack(track, now);
+            const fadeIn = clamp01((now - track.createdAt) / WORKER_OVERLAY_FADE_IN_MS);
+            const fadeOut = age <= WORKER_OVERLAY_HOLD_MS
+                ? 1
+                : clamp01(1 - (age - WORKER_OVERLAY_HOLD_MS) / WORKER_OVERLAY_FADE_MS);
+            out.push(Object.assign({}, track.identity, {
+                person_box: sampled.box,
+                tag_polygon: sampled.polygon,
+                overlay_opacity: fadeIn * fadeOut,
+                overlay_age_ms: age,
+            }));
+        });
+        return out;
+    }
+
+    function workerOverlayAnimationEnabled() {
+        return !!(layers.worker_id || layers.markers) && workerOverlayTracks.size > 0;
+    }
+
+    function cancelWorkerOverlayAnimation() {
+        if (workerOverlayAnimationFrame !== null) {
+            window.cancelAnimationFrame(workerOverlayAnimationFrame);
+            workerOverlayAnimationFrame = null;
+        }
+        workerOverlayLastDrawAt = 0;
+    }
+
+    function scheduleWorkerOverlayAnimation() {
+        if (!workerOverlayAnimationEnabled() || workerOverlayAnimationFrame !== null) return;
+        workerOverlayAnimationFrame = window.requestAnimationFrame(timestamp => {
+            workerOverlayAnimationFrame = null;
+            if (timestamp - workerOverlayLastDrawAt >= WORKER_OVERLAY_RENDER_INTERVAL_MS) {
+                workerOverlayLastDrawAt = timestamp;
+                workerIdentifications = workerOverlaySnapshot(timestamp);
+                drawOverlay(timestamp);
+            }
+            if (workerOverlayAnimationEnabled()) scheduleWorkerOverlayAnimation();
+            else cancelWorkerOverlayAnimation();
+        });
+    }
+
+    function clearWorkerOverlayTracks() {
+        workerOverlayTracks.clear();
+        workerOverlayLastFrameKey = "";
+        workerOverlayLastInputAt = 0;
+        workerIdentifications = [];
+        cancelWorkerOverlayAnimation();
+    }
+
     function cancelPostureAnimation() {
         if (postureAnimationFrame === null) return;
         window.cancelAnimationFrame(postureAnimationFrame);
@@ -117,7 +327,6 @@
         });
     }
 
-    // ---------- API zon ---------------------
 
     async function fetchZones() {
         try {
@@ -128,7 +337,6 @@
             renderZoneList();
             drawOverlay();
         } catch (e) {
-            console.error("Failed to load zones:", e);
         }
     }
 
@@ -174,7 +382,6 @@
         }
     }
 
-    // ---------- Lista stref w bocznym panelu ---------------------
 
     function renderZoneList() {
         zoneList.innerHTML = "";
@@ -236,7 +443,6 @@
         });
     }
 
-    // ---------- Rysowanie polygonu na overlay ---------------------
 
     function polygonFor(z) {
         if (livePolygons[z.id]) return livePolygons[z.id];
@@ -244,10 +450,6 @@
     }
 
     function zonesForOverlay() {
-        // `active_zones` is resolved by the backend for the exact current
-        // frame.  Prefer it after the first WS message so remote edits,
-        // disabled zones and marker-zone expiry cannot leave a stale polygon
-        // from the separately fetched configuration on a raw preview.
         return hasLiveZoneState ? liveActiveZones : zones;
     }
 
@@ -300,8 +502,6 @@
 
     function drawMarkers() {
         if (!layers.markers) return;
-        // liveMarkers przychodzą z WS w pixel space bieżącej klatki.
-        // canvas ma taki sam pixel size jak klatka (renderFrame w app.js ustawia).
         liveMarkers.forEach(m => {
             const c = m.corners;
             if (!Array.isArray(c) || c.length < 3) return;
@@ -314,7 +514,6 @@
             for (let i = 1; i < c.length; i++) zoneCtx.lineTo(c[i][0], c[i][1]);
             zoneCtx.closePath();
             zoneCtx.stroke();
-            // ID pod środkiem markera
             const cx = m.center[0], cy = m.center[1];
             const label = String(m.marker_id);
             zoneCtx.font = "500 11px 'JetBrains Mono', ui-monospace, monospace";
@@ -332,14 +531,14 @@
             zoneCtx.restore();
         });
 
-        // QR identyfikatora pracownika jest również markerem obrazu.  Jego
-        // obrys znika razem z warstwą „Markery”, natomiast sam profil nadal
-        // działa w logice detekcji i na karcie pracownika.
         workerIdentifications.forEach(identity => {
             const poly = identity.tag_polygon || [];
-            if (identity.cached || poly.length < 3) return;
+            if (poly.length < 3) return;
             zoneCtx.save();
-            zoneCtx.lineWidth = 2;
+            zoneCtx.globalAlpha = Math.max(0, Math.min(1,
+                Number(identity.overlay_opacity === undefined ? 1 : identity.overlay_opacity)
+            ));
+            zoneCtx.lineWidth = 2.25;
             zoneCtx.strokeStyle = COLOR.worker;
             zoneCtx.beginPath();
             poly.forEach((pt, index) => {
@@ -407,22 +606,29 @@
             drawChip(label, x1, y1 - 22, color, "#0A0A0A");
         });
 
-        // Powiązanie QR z osobą jest metadanymi bboxa, więc respektuje ten sam
-        // lokalny przełącznik.  Wyłączenie BBOX nie wyłącza identyfikacji.
+    }
+
+    function drawWorkerIds() {
+        if (!layers.worker_id) return;
         workerIdentifications.forEach(identity => {
             const box = identity.person_box;
             if (!validBox(box) || !identity.worker_id) return;
             const name = identity.full_name ||
                 [identity.first_name, identity.last_name].filter(Boolean).join(" ");
             const suffix = name ? " · " + name : "";
+            zoneCtx.save();
+            zoneCtx.globalAlpha = Math.max(0, Math.min(1,
+                Number(identity.overlay_opacity === undefined ? 1 : identity.overlay_opacity)
+            ));
             drawChip(
-                "ID " + identity.worker_id + suffix + (identity.cached ? " ~" : ""),
+                "ID " + identity.worker_id + suffix,
                 Number(box[0]),
                 Number(box[1]) + 3,
                 "rgba(82, 30, 128, 0.92)",
                 "#FFFFFF",
                 { fontSize: 11, height: 18 },
             );
+            zoneCtx.restore();
         });
     }
 
@@ -440,7 +646,6 @@
     function drawDistances() {
         if (!layers.distances) return;
 
-        // Odległość osoby od wykrytej maszyny/pojazdu.
         liveDangers.forEach(danger => {
             const personBox = danger.person && danger.person.box;
             const hazardBox = danger.hazard && danger.hazard.box;
@@ -472,7 +677,6 @@
             );
         });
 
-        // Najbliższa granica skonfigurowanej strefy dla każdej osoby.
         personDistances.forEach(distance => {
             const box = distance.person_box;
             if (!validBox(box)) return;
@@ -573,8 +777,12 @@
                 const score = Number.isFinite(Number(assessment.risk_score))
                     ? " · " + Math.round(Number(assessment.risk_score) * 100) + "%"
                     : "";
+                const behavior = assessment.behavior_label
+                    ? " · " + assessment.behavior_label + " " +
+                      Math.round(Number(assessment.behavior_confidence || 0) * 100) + "%"
+                    : "";
                 drawChip(
-                    "POSTURE #" + assessment.track_id + score,
+                    "POSTURE #" + assessment.track_id + score + behavior,
                     Number(box[0]),
                     Number(box[1]) - 44,
                     color,
@@ -595,6 +803,7 @@
 
     function drawOverlay(animationTimestamp) {
         syncCanvasSize();
+        workerIdentifications = workerOverlaySnapshot(animationTimestamp);
         zoneCtx.clearRect(0, 0, zoneCanvas.width, zoneCanvas.height);
 
         if (layers.zones) {
@@ -607,9 +816,6 @@
                 drawPolygon(poly, colorsFor(z.severity), { label: label });
             });
 
-            // Dynamic zones are attached to the current machine detection.
-            // The backend supplies a projected metric polygon after ground-plane
-            // calibration, or a cheap image-space fallback before calibration.
             dynamicSafetyZones
                 .slice()
                 .sort((a, b) => (a.severity === "DANGER") - (b.severity === "DANGER"))
@@ -622,7 +828,7 @@
                     } else if (z.threshold_px !== null && z.threshold_px !== undefined) {
                         limit = Math.round(z.threshold_px) + " px";
                     }
-                    const mode = z.calibrated ? "metryczna" : "demo 2D";
+                    const mode = z.calibrated ? "metryczna" : "pikselowa";
                     drawPolygon(poly, colorsFor(z.severity), {
                         label: "MASZYNA · " + z.severity + " · " + limit + " · " + mode,
                         lineWidth: z.severity === "DANGER" ? 3 : 2,
@@ -632,8 +838,7 @@
 
         drawDistances();
         drawBoxes();
-        // POS controls the MediaPipe skeleton independently from detector
-        // BBOX. It only affects drawing; posture analysis and alerts continue.
+        drawWorkerIds();
         drawPosture(animationTimestamp);
         drawMarkers();
 
@@ -644,7 +849,6 @@
         }
     }
 
-    // ---------- Interakcje: rysowanie polygonu ---------------------
 
     function startDrawing() {
         drawing = true;
@@ -745,7 +949,6 @@
     cancelBtn.addEventListener("click", cancelDrawing);
     saveBtn.addEventListener("click", commitDrawing);
 
-    // ---------- Interakcje: strefa z markerów ---------------------
 
     function openMarkerPanel() {
         markerPanel.classList.remove("hidden");
@@ -790,7 +993,6 @@
     if (markerCancelBtn) markerCancelBtn.addEventListener("click", closeMarkerPanel);
     if (markerSaveBtn) markerSaveBtn.addEventListener("click", commitMarkerZone);
 
-    // ---------- Redraw loop + WS listener ---------------------
 
     const observer = new MutationObserver(() => drawOverlay());
     observer.observe(liveCanvas, { attributes: true, attributeFilter: ["width", "height"] });
@@ -816,19 +1018,35 @@
         );
         if (animationActive) schedulePostureAnimation();
         else cancelPostureAnimation();
-        workerIdentifications = d.worker_identifications || [];
+        const workerFrameKey = [d.camera_id || cameraId, d.frame_id || d.timestamp || ""].join(":");
+        updateWorkerOverlayTracks(d.worker_identifications || [], workerFrameKey);
+        workerIdentifications = workerOverlaySnapshot();
+        scheduleWorkerOverlayAnimation();
     }
 
     document.addEventListener("perimetr-frame", (evt) => {
-        consumeFrame(evt.detail || {});
-        drawOverlay();
+        pendingSpatialFrame = evt.detail || {};
+        if (pendingSpatialFallbackTimer !== null) {
+            window.clearTimeout(pendingSpatialFallbackTimer);
+        }
+        pendingSpatialFallbackTimer = window.setTimeout(() => {
+            pendingSpatialFallbackTimer = null;
+            if (!pendingSpatialFrame) return;
+            const data = pendingSpatialFrame;
+            pendingSpatialFrame = null;
+            consumeFrame(data);
+            drawOverlay();
+        }, 180);
     });
 
-    // app.js fires this after the raw image has decoded and both canvases have
-    // the exact current-frame dimensions.  It prevents one-frame drift when
-    // switching between 16:9 USB and 4:3 phone cameras.
     document.addEventListener("perimetr-frame-rendered", (evt) => {
-        consumeFrame(evt.detail || {});
+        if (pendingSpatialFallbackTimer !== null) {
+            window.clearTimeout(pendingSpatialFallbackTimer);
+            pendingSpatialFallbackTimer = null;
+        }
+        const data = evt.detail || pendingSpatialFrame || {};
+        pendingSpatialFrame = null;
+        consumeFrame(data);
         drawOverlay();
     });
 
@@ -846,7 +1064,7 @@
         postureAssessments = [];
         postureInterpolator.clear();
         cancelPostureAnimation();
-        workerIdentifications = [];
+        clearWorkerOverlayTracks();
         drawOverlay();
         fetchZones();
     });
@@ -855,6 +1073,8 @@
         layers = evt.detail || layers;
         if (layers.posture) schedulePostureAnimation();
         else cancelPostureAnimation();
+        if (layers.worker_id || layers.markers) scheduleWorkerOverlayAnimation();
+        else cancelWorkerOverlayAnimation();
         drawOverlay();
     });
 

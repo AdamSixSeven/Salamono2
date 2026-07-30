@@ -1,16 +1,14 @@
-# Local configuration and secrets
+# Local configuration
 .env
 .env.*
 !.env.example
 *.local
 
-# Python virtual environments
+# Python environments and caches
 .venv/
 venv/
 env/
 ENV/
-
-# Python caches, test output and coverage
 __pycache__/
 *.py[cod]
 *$py.class
@@ -24,14 +22,14 @@ __pycache__/
 htmlcov/
 coverage.xml
 
-# Build and packaging output
+# Build output
 build/
 dist/
 *.egg-info/
 .eggs/
 *.whl
 
-# IDE and operating-system files
+# IDE and operating system
 .vscode/
 .idea/
 *.code-workspace
@@ -42,18 +40,18 @@ dist/
 Thumbs.db
 desktop.ini
 
-# Runtime databases, logs, alerts, calibration and evidence
+# Runtime state, calibration and evidence
 data/
 logs/
+*.log
+*.jsonl
 *.sqlite
 *.sqlite3
 *.sqlite3-shm
 *.sqlite3-wal
 *.db
-*.jsonl
-*.log
 
-# Captures, recordings and generated media
+# Captures and generated media
 captures/
 recordings/
 screenshots/
@@ -81,12 +79,10 @@ reports/
 *.wav
 *.mp3
 *.aac
-
-# Intentional documentation/frontend assets may be committed here
 !frontend/assets/**
 !docs/assets/**
 
-# Downloaded or exported AI models
+# Downloaded models and ML caches
 *.pt
 *.pth
 *.onnx
@@ -94,32 +90,30 @@ reports/
 *.trt
 *.tflite
 *.task
+*.safetensors
 models/*.bin
+models/depth3d/
 weights/
+.cache/huggingface/
 
-# Generated QR and marker files
+# Generated markers and credentials
 worker-*.png
 aruco-*.png
 markers-*.pdf
-
-# TLS keys and local certificates
 nginx/certs/*.pem
 nginx/certs/*.key
 *.p12
 *.pfx
 
-# JavaScript dependencies
+# Dependencies, archives and temporary output
 node_modules/
-
-# Local archives and hand-off packages
 *.rar
 *.zip
 *.7z
 *.tar
 *.tar.gz
 *.tgz
-
-# Temporary tool output
+*.sha256
 .tmp/
 tmp/
 temp/

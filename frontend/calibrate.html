@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Perimetr — Kalibracja kamery</title>
-    <link rel="stylesheet" href="style.css?v=20260724-calibration-live-3">
+    <link rel="stylesheet" href="style.css?v=2.2.0">
     <script src="https://unpkg.com/lucide@latest" defer></script>
     <style>
         .calib-wrap {
@@ -60,13 +60,6 @@
             font-weight: 400;
             letter-spacing: 0.06em;
             text-transform: uppercase;
-        }
-        .calib-step-lead {
-            max-width: 720px;
-            margin: 5px 0 0;
-            color: var(--ink-3);
-            font-size: 12px;
-            line-height: 1.5;
         }
         .calib-grid {
             display: grid;
@@ -278,15 +271,6 @@
             font-family: var(--font-mono);
             font-size: 12px;
         }
-        .marker-instructions {
-            margin: 0;
-            padding-left: 22px;
-            color: var(--ink-2);
-            font-size: 13px;
-            line-height: 1.55;
-        }
-        .marker-instructions li { padding: 3px 0 7px 5px; }
-        .marker-instructions strong { color: var(--ink); }
         .marker-layout {
             display: grid;
             grid-template-columns: repeat(2, minmax(110px, 1fr));
@@ -467,6 +451,7 @@
             <a href="/">Podgląd</a>
             <a href="/review.html">Historia</a>
             <a href="/calibrate.html" class="active">Kalibracja</a>
+            <a href="/depth3d.html">Głębia</a>
         </nav>
     </div>
     <div class="px-header-right">
@@ -478,24 +463,13 @@
     <div class="calib-hero">
         <div>
             <h1>Kalibracja aktywnej kamery</h1>
-            <p>
-                Kalibracja korzysta z dokładnie tego samego strumienia, który oglądasz
-                w panelu — także gdy obraz wysyła telefon. Podgląd poniżej pochodzi
-                wyłącznie z <span class="px-mono">/ws/live</span>; homografia jest liczona
-                na świeżej, surowej klatce zapisanej przez backend dla wybranego
-                <span class="px-mono">camera_id</span>.
-            </p>
         </div>
     </div>
 
     <section class="calib-step" aria-labelledby="streamTitle">
         <div class="calib-step-head">
             <div>
-                <h2 id="streamTitle">1 · Aktywny strumień</h2>
-                <p class="calib-step-lead">
-                    Wybierz kamerę widoczną w rejestrze i połącz podgląd. Strona nie
-                    uruchamia kamery tego komputera bez Twojego działania.
-                </p>
+                <h2 id="streamTitle">Aktywny strumień</h2>
             </div>
         </div>
 
@@ -522,7 +496,7 @@
                     <canvas id="previewCanvas" width="640" height="480"
                             aria-label="Podgląd wybranej kamery"></canvas>
                     <div class="calib-preview-empty" id="previewEmpty">
-                        Wybierz kamerę online z listy. Podgląd połączy się automatycznie.
+                        Brak obrazu.
                     </div>
                     <div class="calib-live-chip" id="liveChip">
                         <span class="calib-live-dot"></span>
@@ -530,7 +504,7 @@
                     </div>
                 </div>
                 <div class="status status-idle" id="streamStatus">
-                    Pobieranie listy aktywnych kamer…
+                    Ładowanie kamer…
                 </div>
             </div>
 
@@ -568,12 +542,7 @@
     <section class="calib-step" aria-labelledby="markersTitle">
         <div class="calib-step-head">
             <div>
-                <h2 id="markersTitle">2 · Przygotuj markery</h2>
-                <p class="calib-step-lead">
-                    Słownik: ArUco <span class="px-mono">DICT_4X4_50</span>.
-                    Użyj czterech różnych markerów i nie zmieniaj ich rozmiaru
-                    niezależnie od siebie.
-                </p>
+                <h2 id="markersTitle">Markery kalibracyjne</h2>
             </div>
             <div class="calib-actions">
                 <button class="px-btn" id="downloadAllMarkersBtn" type="button">
@@ -587,53 +556,11 @@
 
         <div class="calib-grid">
             <div>
-                <ol class="marker-instructions">
-                    <li>
-                        Wydrukuj markery <strong>10, 20, 30 i 40</strong> na białym,
-                        matowym papierze. Zachowaj biały margines i kwadratowe proporcje.
-                    </li>
-                    <li>
-                        Połóż wszystkie cztery na <strong>tej samej płaszczyźnie
-                        podłoża</strong>, płasko, bez zagięć i odblasków. Nie przyklejaj
-                        ich do pionowej ściany, jeśli kalibrujesz odległości po ziemi.
-                    </li>
-                    <li>
-                        Patrząc na obraz z wybranej kamery ułóż:
-                        <strong>10 = lewy górny, 20 = prawy górny,
-                        30 = prawy dolny, 40 = lewy dolny</strong>.
-                    </li>
-                    <li>
-                        Zmierz w metrach odległość <strong>między środkami</strong>
-                        markerów 10–20 (szerokość) oraz 10–40 (wysokość).
-                        Nie mierz krawędzi papieru.
-                    </li>
-                    <li>
-                        Całe markery muszą być widoczne i ostre. Usuń lampę świecącą
-                        w obiektyw, ustabilizuj telefon i wypełnij obszarem referencyjnym
-                        możliwie dużą część kadru.
-                    </li>
-                    <li>
-                        W pomieszczeniu użyj markerów o boku około
-                        <strong>15–25 cm</strong>; na budowie i z większej odległości
-                        zastosuj większy format.
-                    </li>
-                    <li>
-                        Po zapisaniu kalibracji nie zmieniaj orientacji telefonu,
-                        obiektywu, cropu ani proporcji obrazu i nie przesuwaj statywu.
-                        Każda taka zmiana wymaga ponownej kalibracji.
-                    </li>
-                </ol>
-            </div>
-            <div>
                 <div class="marker-layout" aria-label="Układ markerów widziany przez kamerę">
                     <div class="marker-corner"><span>lewy górny · TL</span><b>10</b></div>
                     <div class="marker-corner"><span>prawy górny · TR</span><b>20</b></div>
                     <div class="marker-corner"><span>prawy dolny · BR</span><b>30</b></div>
                     <div class="marker-corner"><span>lewy dolny · BL</span><b>40</b></div>
-                </div>
-                <div class="calib-note" style="margin-top:10px">
-                    Obrót pojedynczego znacznika nie zmienia jego ID, ale wszystkie
-                    cztery muszą pozostać w całości w kadrze podczas kalibracji.
                 </div>
             </div>
         </div>
@@ -665,11 +592,7 @@
     <section class="calib-step" aria-labelledby="calibrationTitle">
         <div class="calib-step-head">
             <div>
-                <h2 id="calibrationTitle">3 · Oblicz kalibrację</h2>
-                <p class="calib-step-lead">
-                    Przycisk odblokuje się tylko dla kamery online, świeżej klatki,
-                    czterech unikalnych ID oraz dodatnich wymiarów.
-                </p>
+                <h2 id="calibrationTitle">Parametry kalibracji</h2>
             </div>
         </div>
 
@@ -719,7 +642,7 @@
                     </button>
                 </div>
                 <div class="status status-idle" id="calibrationStatus">
-                    Połącz świeży strumień i sprawdź ułożenie markerów.
+                    Brak wyniku kalibracji.
                 </div>
             </div>
 
@@ -747,11 +670,7 @@
     <section class="calib-step" aria-labelledby="measureTitle">
         <div class="calib-step-head">
             <div>
-                <h2 id="measureTitle">4 · Test dwóch punktów</h2>
-                <p class="calib-step-lead">
-                    Po zapisaniu kalibracji wybierz dwa punkty na podłożu w podglądzie.
-                    Backend przeliczy ich położenie przez zapisaną homografię.
-                </p>
+                <h2 id="measureTitle">Pomiar kontrolny</h2>
             </div>
         </div>
         <div class="calib-actions">
@@ -763,10 +682,10 @@
             </button>
         </div>
         <div class="status status-idle" id="measureStatus">
-            Najpierw wykonaj lub odczytaj kalibrację tej kamery.
+            Brak aktywnej kalibracji.
         </div>
         <div class="measure-result" id="measureResult">
-            Wynik odległości pojawi się tutaj.
+            Brak pomiaru.
         </div>
     </section>
 
@@ -888,14 +807,10 @@
     }
 
     function chooseInitialCamera(cameras) {
-        // Required precedence: URL → localStorage → first online → cam_default.
         const fromUrl = queryCameraId();
         const urlCameraExists = fromUrl && cameras.some(function (camera) {
             return camera.camera_id === fromUrl;
         });
-        // Older versions wrote the synthetic fallback into the URL. Do not
-        // let that stale `?camera_id=cam_default` block a real phone forever;
-        // a registered cam_default remains a normal explicit URL selection.
         if (fromUrl && (fromUrl !== "cam_default" || urlCameraExists)) {
             return {
                 cameraId: fromUrl,
@@ -927,8 +842,6 @@
                 source: "first-online",
             };
         }
-        // This is a display fallback only. It must not enter localStorage or
-        // block a real stream that appears during a later registry refresh.
         return {
             cameraId: "cam_default",
             locked: false,
@@ -1034,12 +947,12 @@
             State.measuring = false;
             setBoxStatus(
                 dom.calibrationStatus,
-                "Sprawdź markery i stan kalibracji wybranej kamery.",
+                "Brak kalibracji dla wybranej kamery.",
                 "idle"
             );
             setBoxStatus(
                 dom.measureStatus,
-                "Najpierw odczytaj lub wykonaj poprawną kalibrację tej kamery.",
+                "Brak aktywnej kalibracji.",
                 "idle"
             );
             renderPreview();
@@ -1680,8 +1593,6 @@
             if (!response.ok) throw await responseError(response);
             const analysis = await response.json();
             if (requestedCamera !== State.cameraId) return;
-            // Preview is metadata-only. The visible canvas intentionally
-            // remains sourced exclusively from /ws/live.
             State.previewAnalysis = analysis;
             if (analysis.mode) State.cameraMode = analysis.mode;
             if (analysis.received_at || analysis.last_seen) {
@@ -1779,7 +1690,7 @@
         ) {
             renderCalibration(null);
             dom.currentCalibration.textContent =
-                "Oczekiwanie na aktywną kamerę — cam_default jest tylko nazwą zastępczą.";
+                "Brak aktywnej kamery.";
             return;
         }
         try {
@@ -1989,7 +1900,7 @@
         } else {
             dom.measureResult.textContent = State.measuring
                 ? "Wybieranie punktów na obrazie…"
-                : "Wynik odległości pojawi się tutaj.";
+                : "Brak pomiaru.";
         }
         updateReadiness();
     }
@@ -2002,8 +1913,8 @@
         setBoxStatus(
             dom.measureStatus,
             State.calibration
-                ? "Kliknij „Wybierz 2 punkty”, aby rozpocząć nowy test."
-                : "Najpierw wykonaj lub odczytaj kalibrację tej kamery.",
+                ? "Gotowy do pomiaru."
+                : "Brak aktywnej kalibracji.",
             "idle"
         );
         renderPreview();

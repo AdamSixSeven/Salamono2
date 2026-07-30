@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Perimetr — Panel kierownika</title>
-    <link rel="stylesheet" href="style.css?v=20260724-live-layers-6">
+    <link rel="stylesheet" href="style.css?v=2.2.0">
     <script src="https://unpkg.com/lucide@latest" defer></script>
 </head>
 <body>
@@ -16,6 +16,7 @@
             <a href="/" class="active">Podgląd</a>
             <a href="/review.html">Historia</a>
             <a href="/calibrate.html">Kalibracja</a>
+            <a href="/depth3d.html">Głębia</a>
         </nav>
     </div>
     <div class="px-header-right">
@@ -67,13 +68,14 @@
                 <i data-lucide="plus"></i>Dodaj kamerę
             </button>
             <div class="px-layers">
-                <span class="px-layers-label">Warstwy</span>
+                <span class="px-layers-label">Moduły</span>
                 <span class="msbp-tag msbp-tag--solid msbp-tag--btn" data-layer="boxes">Bboxy</span>
                 <span class="msbp-tag msbp-tag--solid msbp-tag--btn"
                       data-layer="posture" title="Szkielet MediaPipe">POS</span>
                 <span class="msbp-tag msbp-tag--solid msbp-tag--btn" data-layer="zones">Strefy</span>
                 <span class="msbp-tag msbp-tag--solid msbp-tag--btn" data-layer="markers">Markery</span>
                 <span class="msbp-tag msbp-tag--solid msbp-tag--btn" data-layer="distances">Odległości</span>
+                <span class="msbp-tag msbp-tag--solid msbp-tag--btn" data-layer="worker_id" title="Identyfikacja pracownika znacznikiem">ID</span>
             </div>
         </div>
 
@@ -83,7 +85,7 @@
 
             <div class="px-video-no-signal" id="noSignal">
                 <p>Brak sygnału</p>
-                <p class="hint">Uruchom kamerę lub symulator</p>
+                <p class="hint">Brak aktywnego obrazu</p>
             </div>
 
             <div class="px-video-chip px-video-chip--tl" id="liveChip">
@@ -114,9 +116,9 @@
             </div>
 
             <div class="px-worker-badge hidden" id="workerBadge">
-                <div class="px-worker-title">IDENTYFIKACJA QR</div>
+                <div class="px-worker-title">IDENTYFIKACJA ZNACZNIKIEM</div>
                 <div class="px-worker-ids" id="workerIds">—</div>
-                <div class="px-worker-meta" id="workerMeta">znacznik na kamizelce / plecach</div>
+                <div class="px-worker-meta" id="workerMeta">—</div>
             </div>
         </div>
 
@@ -133,7 +135,7 @@
             <span class="sep">·</span>
             <span id="postureStatus">postura —</span>
             <span class="sep">·</span>
-            <span id="workerStatus">QR —</span>
+            <span id="workerStatus">Znacznik —</span>
             <span class="grow"></span>
             <button type="button" class="px-btn px-btn--link" id="snapshotBtn">Zrzut klatki</button>
         </div>
@@ -158,9 +160,6 @@
 
             <div class="px-zone-list" id="zoneList"></div>
 
-            <span class="px-card-hint">
-                Rysowanie: klikaj wierzchołki na podglądzie, dwuklik zamyka polygon.
-            </span>
 
             <div class="px-draw-panel hidden" id="zoneDrawPanel">
                 <input id="zoneName" type="text" placeholder="Nazwa (np. Wykop A)" maxlength="40">
@@ -174,7 +173,6 @@
                     <button type="button" class="px-btn px-btn--solid" id="zoneSaveBtn" disabled>Zapisz</button>
                     <button type="button" class="px-btn" id="zoneCancelBtn">Anuluj</button>
                 </div>
-                <span class="px-draw-hint">Klikaj wierzchołki na podglądzie. Dwuklik zamyka polygon (min. 3 pkt).</span>
             </div>
 
             <div class="px-marker-panel hidden" id="markerZonePanel">
@@ -190,16 +188,24 @@
                     <button type="button" class="px-btn px-btn--solid" id="markerZoneSaveBtn">Zapisz</button>
                     <button type="button" class="px-btn" id="markerZoneCancelBtn">Anuluj</button>
                 </div>
-                <span class="px-draw-hint">Rozłóż markery ArUco na ziemi w narożnikach strefy, wpisz ID w kolejności (obwód).</span>
             </div>
         </div>
 
-        <div class="px-card px-worker-tools">
-            <div class="px-card-hd">
+        <div class="px-card px-worker-tools px-worker-tools--collapsed" id="workerToolsCard">
+            <button type="button"
+                    class="px-card-hd px-worker-tools-toggle"
+                    id="workerToolsToggle"
+                    aria-expanded="false"
+                    aria-controls="workerToolsBody">
                 <span class="px-card-title">Identyfikator pracownika</span>
-                <span class="px-worker-count" id="workerRegistryCount">0 wpisów</span>
-            </div>
+                <span class="px-worker-tools-toggle-meta">
+                    <span class="px-worker-count" id="workerRegistryCount">0 wpisów</span>
+                    <i class="px-worker-tools-chevron" data-lucide="chevron-down" aria-hidden="true"></i>
+                </span>
+            </button>
 
+            <div class="px-worker-tools-body" id="workerToolsBody" aria-hidden="true">
+                <div class="px-worker-tools-body-inner">
             <div class="px-worker-picker">
                 <label class="px-field-label" for="workerRegistrySelect">Rejestr pracowników</label>
                 <div class="px-worker-picker-row">
@@ -214,7 +220,7 @@
 
             <form class="px-worker-form" id="workerRegistryForm" novalidate>
                 <label class="px-worker-field px-worker-field--id">
-                    <span>ID QR *</span>
+                    <span>ID pracownika *</span>
                     <input id="workerQrInput" name="worker_id" type="text" placeholder="np. W-001"
                            maxlength="64" autocomplete="off" required>
                 </label>
@@ -239,9 +245,7 @@
                     </label>
                 </div>
 
-                <div class="px-worker-feedback" id="workerRegistryStatus" role="status" aria-live="polite">
-                    Pola oznaczone * są wymagane.
-                </div>
+                <div class="px-worker-feedback" id="workerRegistryStatus" role="status" aria-live="polite"></div>
                 <div class="px-worker-actions">
                     <button type="submit" class="px-btn px-btn--solid" id="workerSaveBtn">
                         <i data-lucide="save"></i><span>Zapisz</span>
@@ -257,18 +261,19 @@
 
             <div class="px-worker-qr-preview hidden" id="workerQrPreview">
                 <div class="px-worker-qr-image-wrap">
-                    <img id="workerQrPreviewImg" alt="Kod QR identyfikatora pracownika">
+                    <img id="workerQrPreviewImg" alt="Znacznik identyfikatora pracownika">
                 </div>
                 <div class="px-worker-qr-preview-info">
-                    <strong id="workerQrPreviewTitle">QR pracownika</strong>
-                    <span id="workerQrPreviewPayload" class="px-mono">worker:—</span>
+                    <strong id="workerQrPreviewTitle">Znacznik pracownika</strong>
+                    <span id="workerQrPreviewPayload" class="px-mono">tag:—</span>
                     <a class="px-btn" id="workerQrDownloadBtn" href="#" download>
                         <i data-lucide="download"></i><span>Pobierz ponownie</span>
                     </a>
                 </div>
             </div>
 
-            <span class="px-card-hint">Przycisk generuje wysokiej jakości PNG, rozpoczyna pobieranie i pokazuje podgląd. QR zawiera wyłącznie ID w formacie <span class="px-mono">worker:&lt;ID&gt;</span>.</span>
+                </div>
+            </div>
         </div>
 
         <div class="px-card" style="flex:1;min-height:0">
@@ -296,7 +301,6 @@
             <i data-lucide="x"></i>
         </button>
         <div class="px-modal-title" id="pairModalTitle">Podłącz telefon</div>
-        <div class="px-modal-sub">Zeskanuj kod aparatem telefonu, żeby uruchomić kamerę on-site.</div>
         <div class="px-qr-frame">
             <img id="pairQrImg" alt="Kod QR do sparowania telefonu" width="240" height="240">
         </div>
@@ -304,13 +308,12 @@
             <input type="text" id="pairUrl" readonly>
             <button class="px-btn" id="pairCopyBtn">Kopiuj</button>
         </div>
-        <div class="px-modal-hint" id="pairHint">Kod prowadzi do <span class="px-mono">/phone/capture.html</span> na tym serwerze.</div>
     </div>
 </div>
 
-<script src="posture_interpolation.js?v=20260724-live-layers-6"></script>
-<script src="app.js?v=20260724-live-layers-6"></script>
-<script src="zones.js?v=20260724-live-layers-6"></script>
+<script src="posture_interpolation.js?v=2.2.0"></script>
+<script src="app.js?v=2.2.0"></script>
+<script src="zones.js?v=2.2.0"></script>
 <script>
   document.addEventListener("DOMContentLoaded", () => {
     if (window.lucide) window.lucide.createIcons();

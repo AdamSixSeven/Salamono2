@@ -1,4 +1,5 @@
 import base64
+import logging
 import os
 import secrets
 import threading
@@ -14,6 +15,12 @@ from backend.calibration import CalibrationStore
 from backend.camera_registry import CameraRegistry
 from backend.danger_rules import DangerDetector, TemporalFilter
 from backend.detector import Detector, PPE_CATEGORIES
+from backend.depth3d import Depth3DResultStore, MonocularDepthEstimator
+from backend.depth3d_profiles import (
+    CalibrationStoreAdapter,
+    CaptureStoreAdapter,
+    Depth3DProfileStore,
+)
 from backend.worker_identification import WorkerIdentifier, UnidentifiedWorkerMonitor
 from backend.worker_store import WorkerStore
 from backend.frame_store import FrameStore
@@ -25,11 +32,14 @@ from backend.marker_scheduler import MarkerScheduler
 from backend.models import StatsOut
 from backend.ppe_rules import PPEChecker
 from backend.posture_detector import PostureManager, PostureWorker
-from backend.routes import alerts, calibration, debug, ingest, pair, reports, workers, ws, zones
+from backend.runtime_options import RuntimeProcessingStore
+from backend.routes import alerts, calibration, depth3d, ingest, pair, reports, runtime, workers, ws, zones
 from backend.ws_manager import ConnectionManager
 from backend.zone_rules import ZoneBreachDetector, ZoneTemporalFilter
 from backend.zones_store import ZoneStore
 from config import CONFIG
+
+logger = logging.getLogger(__name__)
 
 ALERTS_LOG_PATH = os.path.join(CONFIG.flagged_frames_dir, "..", "alerts.jsonl")
 ZONES_PATH = os.path.join(CONFIG.flagged_frames_dir, "..", "zones.json")
@@ -39,7 +49,6 @@ CAMERA_ONLINE_MAX_AGE_SECONDS = 10.0
 PANEL_PASSWORD = os.getenv("PANEL_PASSWORD", "")
 DEMO_TOKEN = os.getenv("DEMO_TOKEN", "")
 DEMO_COOKIE = "perimetr_demo"
-# Keep embedded demo sessions authenticated across tab reloads.
 DEMO_COOKIE_MAX_AGE = 12 * 60 * 60
 
 PUBLIC_PATHS = {"/api/health"}
@@ -67,14 +76,29 @@ async def lifespan(app: FastAPI):
                 confidence=CONFIG.ppe.confidence,
             )
             app.state.ppe_checker = PPEChecker()
-            print(f"[startup] PPE checkpoint mode ready ({ppe_path})")
-        except Exception as e:
-            print(f"[startup] PPE model failed to load: {e}")
+            logger.info("PPE model loaded: %s", ppe_path)
+        except Exception:
+            logger.exception("PPE model failed to load: %s", ppe_path)
     else:
-        print(f"[startup] PPE model not found at {ppe_path}; checkpoint mode disabled")
+        logger.warning("PPE model not found: %s", ppe_path)
     app.state.ws_manager = ConnectionManager()
     app.state.frame_store = FrameStore()
     app.state.latest_frame_store = LatestFrameStore(max_cameras=16)
+    app.state.runtime_processing_store = RuntimeProcessingStore(max_cameras=64)
+    app.state.depth3d_profile_store = Depth3DProfileStore(
+        CONFIG.depth3d.calibration_profiles_dir,
+        legacy_calibration_path=CONFIG.depth3d.calibration_path,
+        max_views=40,
+    )
+    app.state.depth3d_capture_store = CaptureStoreAdapter(app.state.depth3d_profile_store)
+    app.state.depth3d_calibration_store = CalibrationStoreAdapter(app.state.depth3d_profile_store)
+    app.state.depth3d_result_store = Depth3DResultStore(max_cameras=8)
+    app.state.depth3d_estimator = MonocularDepthEstimator(
+        enabled=CONFIG.depth3d.enabled,
+        model_id=CONFIG.depth3d.model_id,
+        device=CONFIG.depth3d.device,
+        local_files_only=CONFIG.depth3d.local_files_only,
+    )
     app.state.evidence_recorder = EvidenceRecorder()
     app.state.alert_store = AlertStore(ALERTS_LOG_PATH)
     app.state.zone_store = ZoneStore(ZONES_PATH)
@@ -103,31 +127,39 @@ async def lifespan(app: FastAPI):
     app.state.unidentified_worker_monitor = UnidentifiedWorkerMonitor()
     app.state.worker_store = WorkerStore(CONFIG.worker_id.database_path)
     if app.state.posture_manager.available:
-        print(
-            "[startup] posture analysis ready "
-            f"({CONFIG.posture.model_path}, {CONFIG.posture.sample_fps:g} fps)"
+        logger.info(
+            "Posture analysis ready: model=%s fps=%s",
+            CONFIG.posture.model_path,
+            f"{CONFIG.posture.sample_fps:g}",
         )
+        if app.state.posture_manager.behavior_available:
+            classifier = app.state.posture_manager.behavior_classifier
+            logger.info(
+                "Behavior classifier ready: model=%s device=%s",
+                CONFIG.posture.behavior_model_path,
+                classifier.device,
+            )
+        elif CONFIG.posture.behavior_enabled:
+            logger.warning(
+                "Behavior classifier unavailable: %s",
+                getattr(app.state.posture_manager, "behavior_unavailable_reason", None),
+            )
     else:
-        print(
-            "[startup] posture analysis disabled: "
-            f"{app.state.posture_manager.unavailable_reason}"
+        logger.warning(
+            "Posture analysis unavailable: %s",
+            app.state.posture_manager.unavailable_reason,
         )
     if app.state.worker_identifier.available:
-        print(
-            "[startup] QR worker identification ready "
-            f"({CONFIG.worker_id.sample_fps:g} fps, prefix={CONFIG.worker_id.prefix!r})"
+        logger.info(
+            "Worker marker detection ready: fps=%s format=ArUco-4x4",
+            f"{CONFIG.worker_id.sample_fps:g}",
         )
     else:
-        print(
-            "[startup] QR worker identification disabled: "
-            f"{app.state.worker_identifier.unavailable_reason}"
+        logger.warning(
+            "Worker marker detection unavailable: %s",
+            app.state.worker_identifier.unavailable_reason,
         )
-    # In-memory cache of last-seen polygon per marker-defined zone.
-    # Format: {(camera_id, zone_id): (polygon_normalized, last_seen_ts)}
     app.state.marker_zone_cache = {}
-    # Debug: inject a synthetic person detection into the next N frames.
-    # None when idle. See backend/routes/debug.py.
-    app.state.debug_inject_person = None
     app.state.frame_counter = 0
     app.state.camera_registry = CameraRegistry(max_cameras=32)
     app.state.start_time = time.time()
@@ -156,7 +188,7 @@ async def lifespan(app: FastAPI):
         app.state.evidence_recorder.close()
 
 
-app = FastAPI(title="Perimetr", version="1.0.0", lifespan=lifespan)
+app = FastAPI(title="Perimetr", version="2.2.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -203,7 +235,6 @@ async def basic_auth(request: Request, call_next):
         )
         return response
 
-    # 2) Demo cookie set earlier in the same session — silent pass.
     if DEMO_TOKEN and request.cookies.get(DEMO_COOKIE) == DEMO_TOKEN:
         return await call_next(request)
 
@@ -228,10 +259,11 @@ app.include_router(ingest.router, prefix="/api")
 app.include_router(alerts.router, prefix="/api")
 app.include_router(zones.router, prefix="/api")
 app.include_router(calibration.router, prefix="/api")
-app.include_router(debug.router, prefix="/api")
+app.include_router(depth3d.router, prefix="/api")
 app.include_router(pair.router, prefix="/api")
 app.include_router(workers.router, prefix="/api")
 app.include_router(reports.router, prefix="/api")
+app.include_router(runtime.router, prefix="/api")
 app.include_router(ws.router)
 
 
@@ -343,6 +375,9 @@ async def readiness():
         "person_and_vehicle_detection": getattr(app.state, "detector", None) is not None,
         "ppe_checkpoint": getattr(app.state, "ppe_detector", None) is not None,
         "posture_analysis": bool(posture_manager and posture_manager.available),
+        "learned_behavior_classifier": bool(
+            posture_manager and getattr(posture_manager, "behavior_available", False)
+        ),
         "worker_qr": bool(worker_identifier and worker_identifier.available),
         "evidence_clips": bool(evidence_recorder and evidence_recorder.enabled),
         "operator_review": getattr(app.state, "alert_store", None) is not None,
@@ -357,8 +392,14 @@ async def readiness():
     if not components["posture_analysis"]:
         reason = posture_manager.unavailable_reason if posture_manager else "moduł niezainicjalizowany"
         warnings.append(f"Analiza postury jest niedostępna: {reason}.")
+    elif CONFIG.posture.behavior_enabled and not components["learned_behavior_classifier"]:
+        reason = (
+            getattr(posture_manager, "behavior_unavailable_reason", None)
+            if posture_manager else "moduł niezainicjalizowany"
+        )
+        warnings.append(f"Klasyfikator zachowań TCN jest niedostępny: {reason}.")
     if not components["metric_calibration"]:
-        warnings.append("Brak kalibracji — odległości działają w oznaczonym trybie pikselowym demo.")
+        warnings.append("Brak kalibracji — odległości działają w oznaczonym trybie pikselowym.")
     elif not metric_ready_camera_ids:
         warnings.append(
             "Istnieje kalibracja, ale żadna aktywna kamera nie ma jednocześnie "
@@ -446,6 +487,14 @@ async def modes():
         "posture_unavailable_reason": (
             posture_manager.unavailable_reason if posture_manager else "not initialized"
         ),
+        "behavior_classifier_available": bool(
+            posture_manager and getattr(posture_manager, "behavior_available", False)
+        ),
+        "behavior_classifier_unavailable_reason": (
+            getattr(posture_manager, "behavior_unavailable_reason", None)
+            if posture_manager else "not initialized"
+        ),
+        "behavior_classifier_model": CONFIG.posture.behavior_model_path,
         "worker_identification_available": bool(
             getattr(app.state, "worker_identifier", None)
             and app.state.worker_identifier.available

@@ -1,7 +1,7 @@
-"""Persistent directory mapping visible QR identifiers to worker profiles.
+"""Persistent directory mapping visible worker-marker IDs to profiles.
 
-The QR decoder deliberately remains independent from personal data: it only
-extracts a ``worker_id``.  This store resolves that identifier to the profile
+The marker decoder remains independent from personal data: it only extracts
+a ``worker_id``.  This store resolves that identifier to the profile
 entered by an operator.  SQLite is part of Python's standard library, keeps
 the pilot deployment self-contained, and persists inside the existing
 ``data`` volume used by Docker Compose.

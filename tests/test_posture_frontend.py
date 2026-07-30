@@ -14,12 +14,12 @@ INTERPOLATION = INTERPOLATION_PATH.read_text(encoding="utf-8")
 
 
 def test_posture_interpolation_is_loaded_before_overlay_and_uses_short_raf():
-    interpolation_asset = "posture_interpolation.js?v=20260724-live-layers-6"
-    overlay_asset = "zones.js?v=20260724-live-layers-6"
+    interpolation_asset = "posture_interpolation.js?v=2.2.0"
+    overlay_asset = "zones.js?v=2.2.0"
 
     assert interpolation_asset in INDEX
     assert INDEX.index(interpolation_asset) < INDEX.index(overlay_asset)
-    assert "durationMs: 180" in ZONES
+    assert "durationMs: 45" in ZONES
     assert "window.requestAnimationFrame" in ZONES
     assert "window.cancelAnimationFrame" in ZONES
     assert "drawOverlay(timestamp)" in ZONES
@@ -59,7 +59,7 @@ const assessment = (timestamp, x, track = 7) => ({
     pose_landmarks: pose(x),
 });
 
-const tracks = new api.TrackInterpolator({durationMs: 180});
+const tracks = new api.TrackInterpolator({durationMs: 45});
 const initial = assessment(1, 0);
 tracks.update([initial], 0, "frame-1");
 assert.strictEqual(tracks.size, 1);
@@ -67,26 +67,26 @@ assert.strictEqual(tracks.sample(7, 0)[0][0], 0);
 initial.pose_landmarks[0][0] = 9;
 assert.strictEqual(tracks.sample(7, 0)[0][0], 0);
 
+// Large motion uses a short adaptive transition and ease-out behaviour.
 const target = assessment(2, 1);
 assert.strictEqual(tracks.update([target], 100, "frame-2"), true);
-assert.strictEqual(tracks.isAnimating(190), true);
-assert(Math.abs(tracks.sample(7, 190)[0][0] - 0.5) < 1e-9);
+assert.strictEqual(tracks.isAnimating(109), true);
+const halfway = tracks.sample(7, 109)[0][0];
+assert(halfway > 0.5 && halfway < 1.0);
 
-// app.js emits the same payload before and after the image decode. A duplicate
-// must not restart the transition at 140 ms.
-tracks.update([target], 140, "frame-2");
-assert(Math.abs(tracks.sample(7, 190)[0][0] - 0.5) < 1e-9);
-assert.strictEqual(tracks.sample(7, 280)[0][0], 1);
-assert.strictEqual(tracks.isAnimating(280), false);
+// Duplicate payload must not restart the transition.
+tracks.update([target], 110, "frame-2");
+assert.strictEqual(tracks.sample(7, 118)[0][0], 1);
+assert.strictEqual(tracks.isAnimating(118), false);
 
-// Retarget from the currently displayed midpoint, not from the stale origin.
-tracks.update([assessment(3, 0.8)], 300, "frame-3");
-assert(Math.abs(tracks.sample(7, 390)[0][0] - 0.9) < 1e-9);
+tracks.update([assessment(3, 0.8)], 130, "frame-3");
+const retargeted = tracks.sample(7, 139)[0][0];
+assert(retargeted < 1.0 && retargeted > 0.8);
 
-tracks.update([assessment(4, 0.4, 8)], 500, "frame-4");
+tracks.update([assessment(4, 0.4, 8)], 160, "frame-4");
 assert.strictEqual(tracks.size, 1);
-assert.strictEqual(tracks.sample(7, 500), null);
-assert.strictEqual(tracks.sample(8, 500)[0][0], 0.4);
+assert.strictEqual(tracks.sample(7, 160), null);
+assert.strictEqual(tracks.sample(8, 160)[0][0], 0.4);
 tracks.clear();
 assert.strictEqual(tracks.size, 0);
 """

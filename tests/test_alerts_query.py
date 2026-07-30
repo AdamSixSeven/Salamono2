@@ -54,7 +54,6 @@ def init_app_state(tmp_path):
     app.state.marker_detector = MarkerDetector()
     app.state.calibration_store = CalibrationStore(str(tmp_path / "calibration.json"))
     app.state.marker_zone_cache = {}
-    app.state.debug_inject_person = None
     app.state.ppe_detector = None
     app.state.ppe_checker = None
     app.state.frame_counter = 0
@@ -159,12 +158,12 @@ async def test_report_csv_contains_worker_and_details():
 
 
 @pytest.mark.asyncio
-async def test_worker_qr_endpoint_returns_svg():
+async def test_worker_tag_endpoint_returns_png():
     async with _client() as c:
-        resp = await c.get("/api/worker-qr?worker_id=W-001")
+        resp = await c.get("/api/worker-tag.png?worker_id=W-001")
     assert resp.status_code == 200
-    assert resp.headers["content-type"].startswith("image/svg+xml")
-    assert b"<svg" in resp.content
+    assert resp.headers["content-type"].startswith("image/png")
+    assert resp.content.startswith(b"\x89PNG")
 
 
 @pytest.mark.asyncio

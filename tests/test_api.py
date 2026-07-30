@@ -58,7 +58,6 @@ def init_app_state(tmp_path):
     app.state.marker_detector = MarkerDetector()
     app.state.calibration_store = CalibrationStore(str(tmp_path / "calibration.json"))
     app.state.marker_zone_cache = {}
-    app.state.debug_inject_person = None
     app.state.ppe_detector = None
     app.state.ppe_checker = None
     app.state.frame_counter = 0
@@ -87,11 +86,11 @@ async def test_frontend_assets_revalidate_and_use_matching_versions():
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         page = await client.get("/")
-        stylesheet = await client.get("/style.css?v=20260724-live-layers-6")
+        stylesheet = await client.get("/style.css?v=2.2.0")
 
     assert page.status_code == 200
     assert stylesheet.status_code == 200
-    assert 'style.css?v=20260724-live-layers-6' in page.text
+    assert 'style.css?v=2.2.0' in page.text
     assert page.headers["cache-control"] == "no-cache, must-revalidate"
     assert stylesheet.headers["cache-control"] == "no-cache, must-revalidate"
 
@@ -101,8 +100,8 @@ async def test_frontend_layers_have_independent_client_renderers():
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         page = await client.get("/")
-        app_asset = await client.get("/app.js?v=20260724-live-layers-6")
-        overlay_asset = await client.get("/zones.js?v=20260724-live-layers-6")
+        app_asset = await client.get("/app.js?v=2.2.0")
+        overlay_asset = await client.get("/zones.js?v=2.2.0")
 
     assert page.status_code == 200
     assert app_asset.status_code == 200

@@ -1,10 +1,6 @@
-/* ============================================================
-   Perimetr — Panel kierownika, app runtime
-   ============================================================ */
 (function () {
     "use strict";
 
-    // ---------- State store (prosty pub/sub) -----------------------
 
     const State = {
         wsStatus: "connecting",
@@ -35,12 +31,11 @@
                 const parsed = JSON.parse(raw);
                 return {
                     boxes: parsed.boxes !== false,
-                    // Older saved preferences do not contain this key, so
-                    // MediaPipe remains visible until POS is explicitly off.
                     posture: parsed.posture !== false,
                     zones: parsed.zones !== false,
                     markers: parsed.markers !== false,
                     distances: parsed.distances !== false,
+                    worker_id: parsed.worker_id !== false,
                 };
             }
         } catch (_) { /* ignore */ }
@@ -50,13 +45,13 @@
             zones: true,
             markers: true,
             distances: true,
+            worker_id: true,
         };
     }
     function saveLayers() {
         try { localStorage.setItem("perimetr:layers", JSON.stringify(State.layers)); } catch (_) { }
     }
 
-    // ---------- DOM refs ----------------------------------------
 
     const canvas = document.getElementById("liveCanvas");
     const ctx = canvas.getContext("2d");
@@ -119,6 +114,9 @@
     const workerSaveBtn = document.getElementById("workerSaveBtn");
     const workerDeleteBtn = document.getElementById("workerDeleteBtn");
     const workerNewBtn = document.getElementById("workerNewBtn");
+    const workerToolsCard = document.getElementById("workerToolsCard");
+    const workerToolsToggle = document.getElementById("workerToolsToggle");
+    const workerToolsBody = document.getElementById("workerToolsBody");
     const layerTags = document.querySelectorAll("[data-layer]");
     const cameraSelect = document.getElementById("cameraSelect");
 
@@ -126,7 +124,50 @@
     window.Perimetr.getCameraId = () => State.cameraId;
     window.Perimetr.getLayers = () => ({ ...State.layers });
 
-    // ---------- Init: layer buttons ---------------------------
+    let runtimeSyncTimer = null;
+    let runtimeSyncSequence = 0;
+
+    function runtimeLayerPayload() {
+        return {
+            boxes: !!State.layers.boxes,
+            posture: !!State.layers.posture,
+            zones: !!State.layers.zones,
+            markers: !!State.layers.markers,
+            distances: !!State.layers.distances,
+            worker_id: !!State.layers.worker_id,
+        };
+    }
+
+    function syncRuntimeProcessing(delayMs) {
+        clearTimeout(runtimeSyncTimer);
+        const sequence = ++runtimeSyncSequence;
+        runtimeSyncTimer = setTimeout(async () => {
+            try {
+                const response = await fetch(
+                    "/api/runtime/" + encodeURIComponent(State.cameraId) +
+                    "?mode=" + encodeURIComponent(State.mode),
+                    {
+                        method: "PATCH",
+                        headers: { "Content-Type": "application/json" },
+                        credentials: "same-origin",
+                        body: JSON.stringify(runtimeLayerPayload()),
+                    },
+                );
+                if (!response.ok) throw new Error("HTTP " + response.status);
+                if (sequence !== runtimeSyncSequence) return;
+                const payload = await response.json();
+                const detector = payload.detector_required ? "YOLO aktywne" : "YOLO zatrzymane";
+                layerTags.forEach(tag => {
+                    if (tag.dataset.baseTitle === undefined) {
+                        tag.dataset.baseTitle = tag.title || "";
+                    }
+                    tag.title = (tag.dataset.baseTitle ? tag.dataset.baseTitle + " · " : "") + detector;
+                });
+            } catch (_) {
+            }
+        }, Math.max(0, Number(delayMs) || 0));
+    }
+
 
     function syncLayerButtons() {
         layerTags.forEach(el => {
@@ -149,11 +190,11 @@
             saveLayers();
             syncLayerButtons();
             document.dispatchEvent(new CustomEvent("perimetr-layers", { detail: State.layers }));
+            syncRuntimeProcessing(60);
         });
     });
     syncLayerButtons();
 
-    // ---------- Init: mode segmented ---------------------------
 
     modeSegmented.querySelectorAll("button").forEach(btn => {
         btn.addEventListener("click", () => {
@@ -161,13 +202,12 @@
             modeSegmented.querySelectorAll("button").forEach(b => {
                 b.classList.toggle("active", b === btn);
             });
-            // hide PPE badge when leaving checkpoint
             if (State.mode !== "checkpoint") ppeBadge.classList.add("hidden");
             document.dispatchEvent(new CustomEvent("perimetr-mode", { detail: State.mode }));
+            syncRuntimeProcessing(60);
         });
     });
 
-    // ---------- Init: alarms filter ---------------------------
 
     alarmsFilters.querySelectorAll("[data-filter]").forEach(el => {
         el.addEventListener("click", () => {
@@ -201,7 +241,6 @@
         alertsEmpty.style.display = visible === 0 ? "" : "none";
     }
 
-    // ---------- Alarm banner controls ----------------------------
 
     alarmAckBtn.addEventListener("click", async () => {
         const recordId = State.activeAlarm && State.activeAlarm.recordId;
@@ -218,8 +257,6 @@
                     }),
                 });
             } catch (_) {
-                // The local alarm may still be cleared if the network briefly
-                // fails; the incident remains in history with status `new`.
             }
         }
         clearAlarm();
@@ -245,7 +282,6 @@
         videoEl.classList.remove("alarm");
     }
 
-    // ---------- Snapshot + phone pair ---------------------------
 
     snapshotBtn.addEventListener("click", () => {
         if (!canvas.width || !canvas.height) return;
@@ -260,7 +296,6 @@
     });
 
 
-    // ---------- Browser video demo -------------------------------
 
     let demoVideoAbort = false;
     let demoVideoRunning = false;
@@ -314,7 +349,7 @@
             capture.height = Math.max(2, Math.round(video.videoHeight * scale));
             await video.play();
 
-            const sampleIntervalMs = 200; // 5 FPS: enough for posture and fast CPU demo
+            const sampleIntervalMs = 200;
             while (!video.ended && !demoVideoAbort) {
                 const started = performance.now();
                 cctx.drawImage(video, 0, 0, capture.width, capture.height);
@@ -323,7 +358,6 @@
                 if (remaining > 0) await sleep(remaining);
             }
         } catch (err) {
-            console.error("Demo video failed", err);
             alert("Nie udało się przeanalizować filmu: " + (err.message || err));
         } finally {
             video.pause();
@@ -345,15 +379,12 @@
     });
     demoVideoInput.addEventListener("change", () => runDemoVideo(demoVideoInput.files[0]));
 
-    // ---------- Phone pair QR modal ----------------------------
     const pairModal = document.getElementById("pairModal");
     const pairModalClose = document.getElementById("pairModalClose");
     const pairQrImg = document.getElementById("pairQrImg");
     const pairUrlInput = document.getElementById("pairUrl");
     const pairCopyBtn = document.getElementById("pairCopyBtn");
 
-    // The explicit server parameter keeps phone uploads pointed at this
-    // backend when the QR is displayed inside a different-origin embed.
     function captureUrl() {
         const u = new URL("/phone/capture.html", location.origin);
         u.searchParams.set("server", location.origin);
@@ -364,7 +395,6 @@
     function openPairModal() {
         const url = captureUrl();
         pairUrlInput.value = url;
-        // QR is rendered server-side, avoiding an external CDN dependency.
         pairQrImg.src = "/api/pair-qr?target=" + encodeURIComponent(url);
         pairModal.classList.remove("hidden");
     }
@@ -403,13 +433,82 @@
         }
     });
 
-    // ---------- Worker directory + printable QR -----------------
 
     let selectedWorkerId = null;
+    const WORKER_TOOLS_OPEN_KEY = "perimetr:worker_tools_expanded";
+
+    function loadWorkerToolsExpanded() {
+        try {
+            return localStorage.getItem(WORKER_TOOLS_OPEN_KEY) === "true";
+        } catch (_) {
+            return false;
+        }
+    }
+
+    function saveWorkerToolsExpanded(expanded) {
+        try {
+            localStorage.setItem(WORKER_TOOLS_OPEN_KEY, expanded ? "true" : "false");
+        } catch (_) { /* localStorage can be unavailable in privacy mode */ }
+    }
+
+    function setWorkerToolsExpanded(expanded, options) {
+        if (!workerToolsCard || !workerToolsToggle || !workerToolsBody) return;
+
+        const animate = !(options && options.animate === false);
+        const persist = !(options && options.persist === false);
+        const currentlyExpanded = workerToolsCard.classList.contains("px-worker-tools--expanded");
+
+        workerToolsToggle.setAttribute("aria-expanded", expanded ? "true" : "false");
+        workerToolsBody.setAttribute("aria-hidden", expanded ? "false" : "true");
+        workerToolsCard.classList.toggle("px-worker-tools--expanded", expanded);
+        workerToolsCard.classList.toggle("px-worker-tools--collapsed", !expanded);
+
+        if (persist) saveWorkerToolsExpanded(expanded);
+
+        if (!animate) {
+            const previousTransition = workerToolsBody.style.transition;
+            workerToolsBody.style.transition = "none";
+            workerToolsBody.style.height = expanded ? "auto" : "0px";
+            workerToolsBody.style.opacity = expanded ? "1" : "0";
+            void workerToolsBody.offsetHeight;
+            workerToolsBody.style.transition = previousTransition;
+            return;
+        }
+
+        const currentHeight = workerToolsBody.getBoundingClientRect().height;
+        workerToolsBody.style.height = currentHeight + "px";
+        workerToolsBody.style.opacity = currentlyExpanded ? "1" : "0";
+        void workerToolsBody.offsetHeight;
+
+        requestAnimationFrame(() => {
+            workerToolsBody.style.height = expanded
+                ? workerToolsBody.scrollHeight + "px"
+                : "0px";
+            workerToolsBody.style.opacity = expanded ? "1" : "0";
+        });
+    }
+
+    if (workerToolsBody) {
+        workerToolsBody.addEventListener("transitionend", event => {
+            if (event.propertyName !== "height") return;
+            const expanded = workerToolsCard && workerToolsCard.classList.contains("px-worker-tools--expanded");
+            if (expanded) workerToolsBody.style.height = "auto";
+        });
+    }
+
+    if (workerToolsToggle) {
+        workerToolsToggle.addEventListener("click", () => {
+            const expanded = workerToolsToggle.getAttribute("aria-expanded") === "true";
+            setWorkerToolsExpanded(!expanded);
+        });
+    }
+
+    setWorkerToolsExpanded(loadWorkerToolsExpanded(), { animate: false, persist: false });
+
     let workerRegistryBusy = false;
     const workersById = new Map();
     const workerRequiredFields = [
-        [workerQrInput, "ID QR"],
+        [workerQrInput, "ID znacznika"],
         [workerFirstName, "imię"],
         [workerLastName, "nazwisko"],
         [workerPosition, "stanowisko"],
@@ -491,7 +590,7 @@
         workerRegistrySelect.value = workersById.has(currentId) ? currentId : "";
     }
 
-function workerQrPngUrl(workerId, download) {
+function workerTagPngUrl(workerId, download) {
     const params = new URLSearchParams({
         worker_id: workerId,
     });
@@ -500,10 +599,10 @@ function workerQrPngUrl(workerId, download) {
         params.set("download", "true");
     }
 
-    return "/api/worker-qr.png?" + params.toString();
+    return "/api/worker-tag.png?" + params.toString();
 }
 
-function workerQrFilename(workerId) {
+function workerTagFilename(workerId) {
     const safe = String(workerId || "worker")
         .replace(/[^A-Za-z0-9_.-]+/g, "_")
         .replace(/^[._]+|[._]+$/g, "") || "worker";
@@ -529,11 +628,11 @@ function hideWorkerQrPreview() {
     }
 
     if (workerQrPreviewTitle) {
-        workerQrPreviewTitle.textContent = "QR pracownika";
+        workerQrPreviewTitle.textContent = "Znacznik pracownika";
     }
 
     if (workerQrPreviewPayload) {
-        workerQrPreviewPayload.textContent = "worker:—";
+        workerQrPreviewPayload.textContent = "tag:—";
     }
 }
 
@@ -542,21 +641,21 @@ function showWorkerQrPreview(workerId) {
         return;
     }
 
-    const previewUrl = workerQrPngUrl(workerId, false);
-    const downloadUrl = workerQrPngUrl(workerId, true);
-    const filename = workerQrFilename(workerId);
+    const previewUrl = workerTagPngUrl(workerId, false);
+    const downloadUrl = workerTagPngUrl(workerId, true);
+    const filename = workerTagFilename(workerId);
 
     if (workerQrPreviewImg) {
         workerQrPreviewImg.src = previewUrl;
-        workerQrPreviewImg.alt = "Kod QR pracownika " + workerId;
+        workerQrPreviewImg.alt = "Znacznik pracownika " + workerId;
     }
 
     if (workerQrPreviewTitle) {
-        workerQrPreviewTitle.textContent = "QR · " + workerId;
+        workerQrPreviewTitle.textContent = "Tag · " + workerId;
     }
 
     if (workerQrPreviewPayload) {
-        workerQrPreviewPayload.textContent = "worker:" + workerId;
+        workerQrPreviewPayload.textContent = "worker tag → " + workerId;
     }
 
     if (workerQrDownloadBtn) {
@@ -747,7 +846,7 @@ function showWorkerQrPreview(workerId) {
     workerRegistryForm.addEventListener("submit", saveWorker);
     workerDeleteBtn.addEventListener("click", deleteWorker);
 
-    function generateWorkerQrPng() {
+    function generateWorkerTagPng() {
         const workerId = (workerQrInput.value || "").trim();
         if (!workerId) {
             workerQrInput.focus();
@@ -758,8 +857,8 @@ function showWorkerQrPreview(workerId) {
         showWorkerQrPreview(workerId);
 
         const link = document.createElement("a");
-        link.href = workerQrPngUrl(workerId, true);
-        link.download = workerQrFilename(workerId);
+        link.href = workerTagPngUrl(workerId, true);
+        link.download = workerTagFilename(workerId);
         link.style.display = "none";
         document.body.appendChild(link);
         link.click();
@@ -770,10 +869,9 @@ function showWorkerQrPreview(workerId) {
             "success"
         );
     }
-    workerQrOpenBtn.addEventListener("click", generateWorkerQrPng);
+    workerQrOpenBtn.addEventListener("click", generateWorkerTagPng);
     loadWorkerRegistry().catch(() => {});
 
-    // ---------- WebSocket ----------------------------------
 
     let ws = null;
     let lastRenderedTs = 0;
@@ -856,11 +954,9 @@ function showWorkerQrPreview(workerId) {
         updateWorkers(data);
         maybeRaiseAlarm(data);
 
-        // For zones.js — draws marker-zone polygons and other overlays
         document.dispatchEvent(new CustomEvent("perimetr-frame", { detail: data }));
     }
 
-    // ---------- Frame render ---------------------------------
 
     let frameRenderSequence = 0;
 
@@ -886,8 +982,6 @@ function showWorkerQrPreview(workerId) {
         const sequence = ++frameRenderSequence;
         const img = new Image();
         img.onload = () => {
-            // Image decoding is asynchronous.  Never let an older, slower
-            // decode replace a newer frame and its matching client overlays.
             applyDecodedFrame(img, img.width, img.height, data, sequence);
         };
         img.src = "data:image/jpeg;base64," + data.frame_jpeg_b64;
@@ -910,7 +1004,6 @@ function showWorkerQrPreview(workerId) {
         }
     }
 
-    // ---------- Stats + chips ------------------------------
 
     let fpsFrames = 0, fpsLastTime = performance.now();
     function updateStats(data) {
@@ -954,7 +1047,6 @@ function showWorkerQrPreview(workerId) {
         markerChip.title = data.calibration_warning || "";
     }
 
-    // ---------- Alerts list --------------------------------
 
     const MAX_ALERTS_IN_UI = 100;
 
@@ -999,13 +1091,15 @@ function showWorkerQrPreview(workerId) {
         (data.confirmed_posture_alerts || []).forEach(p => {
             const details = (p.signals || []).slice(0, 2).map(x => POSTURE_SIGNAL_LABELS[x] || x);
             const signals = p.signals || [];
-            const fall = signals.includes("possible_fall");
+            const fall = signals.includes("possible_fall") || signals.includes("ml_fall_down");
+            const lying = signals.includes("ml_lying_down");
             const coordination = signals.some(signal => [
                 "repeated_body_sway", "unstable_trajectory", "irregular_step_pattern",
                 "upper_body_instability", "sudden_balance_loss",
             ].includes(signal));
             const smoking = signals.includes("hand_to_mouth_pattern") && !coordination;
             const title = fall ? "Możliwy upadek"
+                        : lying ? "Wykryto pozycję leżącą"
                         : smoking ? "Możliwy gest palenia"
                         : "Nietypowa koordynacja";
             items.push({
@@ -1030,7 +1124,7 @@ function showWorkerQrPreview(workerId) {
         (data.unidentified_workers || []).forEach(u => items.push({
             severity: u.severity || "WARNING",
             time: u.timestamp,
-            desc: "Osoba bez identyfikatora QR",
+            desc: "Osoba bez znacznika identyfikacyjnego",
             kind: "unidentified_worker",
             thumb: u.frame_thumbnail_url,
         }));
@@ -1069,7 +1163,6 @@ function showWorkerQrPreview(workerId) {
         row.appendChild(thumb);
         row.appendChild(body);
         alertsEmpty.style.display = "none";
-        // insert on top; alertsEmpty is kept at the end and hidden when there are rows
         alertList.insertBefore(row, alertList.firstChild);
         const rows = alertList.querySelectorAll(".px-alert-row");
         if (rows.length > MAX_ALERTS_IN_UI) rows[rows.length - 1].remove();
@@ -1078,7 +1171,6 @@ function showWorkerQrPreview(workerId) {
         filterAlertsUI();
     }
 
-    // ---------- PPE badge (state 1d) --------------------
 
     let ppeHideTimeout = null;
     function updatePPE(data) {
@@ -1106,7 +1198,6 @@ function showWorkerQrPreview(workerId) {
         el.querySelector(".px-ppe-mark").textContent = ok ? "✓" : "✗";
     }
 
-    // ---------- Posture / coordination badge ----------------
 
     const POSTURE_SIGNAL_LABELS = {
         repeated_body_sway: "kołysanie tułowia",
@@ -1116,6 +1207,18 @@ function showWorkerQrPreview(workerId) {
         sudden_balance_loss: "utrata równowagi",
         possible_fall: "możliwy upadek / osunięcie",
         hand_to_mouth_pattern: "powtarzalny gest ręka–usta",
+        ml_fall_down: "TCN: upadek",
+        ml_lying_down: "TCN: pozycja leżąca",
+    };
+
+    const BEHAVIOR_LABELS = {
+        fall_down: "upadek",
+        lying_down: "leżenie",
+        sit_down: "siadanie",
+        sitting: "siedzenie",
+        stand_up: "wstawanie",
+        standing: "stanie",
+        walking: "chodzenie",
     };
 
     function updatePosture(data) {
@@ -1124,7 +1227,8 @@ function showWorkerQrPreview(workerId) {
             postureBadge.classList.add("hidden");
             return;
         }
-        postureStatus.textContent = "postura aktywna";
+        postureStatus.textContent = data.behavior_classifier_available
+            ? "postura + TCN aktywne" : "postura aktywna";
         const assessments = (data.posture_assessments || []).slice();
         if (!assessments.length) {
             postureBadge.classList.add("hidden");
@@ -1148,11 +1252,64 @@ function showWorkerQrPreview(workerId) {
         postureScore.textContent = (statusLabels[p.status] || p.status) +
             " · " + Math.round((p.risk_score || 0) * 100) + "%";
         const labels = (p.signals || []).slice(0, 3).map(x => POSTURE_SIGNAL_LABELS[x] || x);
-        postureSignals.textContent = labels.length ? labels.join(" · ") : "nietypowy wzorzec ruchu";
+        if (p.behavior_label) {
+            const behaviorName = BEHAVIOR_LABELS[p.behavior_label] || p.behavior_label;
+            labels.unshift(
+                "TCN: " + behaviorName + " " +
+                Math.round((p.behavior_confidence || 0) * 100) + "%"
+            );
+        }
+        postureSignals.textContent = labels.length ? labels.slice(0, 4).join(" · ") : "nietypowy wzorzec ruchu";
     }
 
 
-    // ---------- Worker identification (visible QR tag) --------
+
+    const workerUiTracks = new Map();
+    const WORKER_UI_HOLD_MS = 2600;
+    const WORKER_UI_LIVE_GRACE_MS = 1100;
+
+    function stableWorkerIdentities(rawIdentities) {
+        const now = performance.now();
+        (rawIdentities || []).forEach(identity => {
+            if (!identity || !identity.worker_id) return;
+            const key = String(identity.worker_id);
+            const previous = workerUiTracks.get(key);
+            const directRead = identity.cached !== true;
+            workerUiTracks.set(key, {
+                identity: Object.assign({}, previous ? previous.identity : {}, identity),
+                lastSeenAt: now,
+                lastLiveAt: directRead
+                    ? now
+                    : (previous ? previous.lastLiveAt : now),
+            });
+        });
+        const stable = [];
+        workerUiTracks.forEach((track, key) => {
+            if (now - track.lastSeenAt > WORKER_UI_HOLD_MS) {
+                workerUiTracks.delete(key);
+                return;
+            }
+            const liveAgeMs = Math.max(0, now - track.lastLiveAt);
+            stable.push(Object.assign({}, track.identity, {
+                ui_live_age_ms: liveAgeMs,
+                ui_held_only: liveAgeMs > WORKER_UI_LIVE_GRACE_MS,
+            }));
+        });
+        return stable;
+    }
+
+    function setTextIfChanged(element, value) {
+        if (!element) return;
+        const next = String(value == null ? "" : value);
+        if (element.textContent !== next) element.textContent = next;
+    }
+
+    function setHiddenState(element, hidden) {
+        if (!element) return;
+        if (element.classList.contains("hidden") !== !!hidden) {
+            element.classList.toggle("hidden", !!hidden);
+        }
+    }
 
     function workerIdentityName(identity) {
         if (!identity) return "";
@@ -1161,36 +1318,41 @@ function showWorkerQrPreview(workerId) {
     }
 
     function updateWorkers(data) {
-        const identities = data.worker_identifications || [];
+        const identities = stableWorkerIdentities(data.worker_identifications || []);
         const unidentified = data.unidentified_workers || [];
         if (!data.worker_identification_available && identities.length === 0) {
-            workerStatus.textContent = "QR wyłączone";
-            workerBadge.classList.add("hidden");
+            setTextIfChanged(workerStatus, "znaczniki wyłączone");
+            setHiddenState(workerBadge, true);
             return;
         }
-        workerStatus.textContent = identities.length
-            ? "QR " + identities.length
-            : (unidentified.length ? "QR brak " + unidentified.length : "QR aktywne");
+        setTextIfChanged(
+            workerStatus,
+            identities.length
+                ? "znaczniki " + identities.length
+                : (unidentified.length ? "brak znacznika " + unidentified.length : "znaczniki aktywne")
+        );
         if (!identities.length && !unidentified.length) {
-            workerBadge.classList.add("hidden");
+            setHiddenState(workerBadge, true);
             return;
         }
         const unique = new Map();
         identities.forEach(identity => {
             if (!identity.worker_id) return;
             const previous = unique.get(identity.worker_id);
-            // Prefer the enriched occurrence if the same ID appears more than once.
             if (!previous || (!workerIdentityName(previous) && workerIdentityName(identity))) {
                 unique.set(identity.worker_id, identity);
             }
         });
         const identified = Array.from(unique.values());
-        workerIds.textContent = identified.length
-            ? identified.map(identity => {
-                const name = workerIdentityName(identity);
-                return name || "ID " + identity.worker_id;
-            }).join(" · ")
-            : "BRAK ID";
+        setTextIfChanged(
+            workerIds,
+            identified.length
+                ? identified.map(identity => {
+                    const name = workerIdentityName(identity);
+                    return name || "ID " + identity.worker_id;
+                }).join(" · ")
+                : "BRAK ID"
+        );
 
         const profileMeta = identified
             .filter(identity => workerIdentityName(identity))
@@ -1200,17 +1362,17 @@ function showWorkerQrPreview(workerId) {
                 identity.department,
             ].filter(Boolean).join(" · "))
             .join(" | ");
-        const cached = identities.filter(identity => identity.cached).length;
+
+        const heldOnly = identified.length > 0 && identified.every(identity => identity.ui_held_only);
         const trackingMeta = unidentified.length
-            ? "osoby bez widocznego/cached QR: " + unidentified.length
-            : cached
-            ? "utrzymano po chwilowym zasłonięciu: " + cached
-            : "odczytano widoczny znacznik QR";
-        workerMeta.textContent = [profileMeta, trackingMeta].filter(Boolean).join(" • ");
-        workerBadge.classList.remove("hidden");
+            ? "osoby bez widocznego znacznika: " + unidentified.length
+            : heldOnly
+            ? "identyfikacja podtrzymana"
+            : "znacznik pracownika aktywny";
+        setTextIfChanged(workerMeta, [profileMeta, trackingMeta].filter(Boolean).join(" • "));
+        setHiddenState(workerBadge, false);
     }
 
-    // ---------- Alarm banner (state 1c) trigger ------------
 
     function maybeRaiseAlarm(data) {
         if (State.activeAlarm) return;
@@ -1273,7 +1435,6 @@ function showWorkerQrPreview(workerId) {
         }
     }
 
-    // ---------- Bootstrap ---------------------------
 
     function selectCamera(cameraId) {
         State.cameraId = cameraId || "cam_default";
@@ -1286,6 +1447,7 @@ function showWorkerQrPreview(workerId) {
         u.searchParams.set("camera_id", State.cameraId);
         history.replaceState(null, "", u);
         document.dispatchEvent(new CustomEvent("perimetr-camera-changed", { detail: State.cameraId }));
+        syncRuntimeProcessing(0);
         connectWebSocket();
     }
 
@@ -1313,6 +1475,7 @@ function showWorkerQrPreview(workerId) {
     setInterval(refreshCameras, 5000);
 
     filterAlertsUI();
+    syncRuntimeProcessing(0);
     connectWebSocket();
 
 })();

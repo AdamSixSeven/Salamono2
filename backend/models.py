@@ -52,6 +52,12 @@ class PostureAssessmentOut(BaseModel):
     metrics: dict[str, float]
     pose_confidence: float
     history_seconds: float
+    behavior_label: str | None = None
+    behavior_confidence: float = 0.0
+    behavior_probabilities: dict[str, float] = Field(default_factory=dict)
+    behavior_valid_ratio: float = 0.0
+    behavior_window_seconds: float = 0.0
+    behavior_inference_ms: float = 0.0
     person: DetectionOut
     # MediaPipe Pose topology in normalized image coordinates:
     # [x, y, z, visibility].  The panel draws this locally so the live
@@ -307,6 +313,7 @@ class FrameResultOut(BaseModel):
     posture_assessments: list[PostureAssessmentOut] = []
     confirmed_posture_alerts: list[PostureAssessmentOut] = []
     posture_available: bool = False
+    behavior_classifier_available: bool = False
     active_zone_breaches: list[ZoneBreachOut] = []
     confirmed_zone_breaches: list[ZoneBreachOut] = []
     markers: list[MarkerDetectionOut] = []
@@ -324,6 +331,8 @@ class FrameResultOut(BaseModel):
     # frame and are never affected by an operator's local layer switches.
     frame_jpeg_b64: str
     processing_ms: float
+    runtime_options: dict[str, bool] = Field(default_factory=dict)
+    detector_ran: bool = True
 
 
 class FrameAcceptedOut(BaseModel):

@@ -3,9 +3,9 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Perimetr — Historia zdarzeń (audit trail)</title>
-    <link rel="stylesheet" href="style.css">
-    <link rel="stylesheet" href="review.css?v=20260724-worker-registry-2">
+    <title>Perimetr — Historia zdarzeń</title>
+    <link rel="stylesheet" href="style.css?v=2.2.0">
+    <link rel="stylesheet" href="review.css?v=2.2.0">
     <script src="https://unpkg.com/lucide@latest" defer></script>
 </head>
 <body class="review-body">
@@ -17,6 +17,7 @@
             <a href="/">Podgląd</a>
             <a href="/review.html" class="active">Historia</a>
             <a href="/calibrate.html">Kalibracja</a>
+            <a href="/depth3d.html">Głębia</a>
         </nav>
     </div>
     <div class="px-header-right">
@@ -128,7 +129,6 @@
     <div id="reviewGrid" class="review-grid"></div>
     <div id="reviewEmpty" class="review-empty hidden">
         <p>Brak zdarzeń do wyświetlenia</p>
-        <p class="hint">Zmień filtry lub uruchom kamerę aby wygenerować zdarzenia.</p>
     </div>
 </main>
 
@@ -167,7 +167,7 @@
     </div>
 </div>
 
-<script src="review.js?v=20260724-worker-registry-2"></script>
+<script src="review.js?v=2.2.0"></script>
 <script>
 document.addEventListener("DOMContentLoaded", () => {
     if (window.lucide) window.lucide.createIcons();

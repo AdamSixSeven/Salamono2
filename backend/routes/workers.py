@@ -5,8 +5,6 @@ import re
 
 import cv2
 import numpy as np
-import qrcode
-import qrcode.image.svg
 from fastapi import APIRouter, HTTPException, Query, Request, status
 from fastapi.responses import Response
 
@@ -17,6 +15,7 @@ from backend.worker_store import (
     WorkerStore,
 )
 from config import CONFIG
+from backend.worker_tags import render_worker_marker, worker_marker_id
 
 router = APIRouter()
 
@@ -54,7 +53,7 @@ def _clean_path_worker_id(worker_id: str) -> str:
     return worker_id
 
 
-def _validated_qr_worker_id(worker_id: str) -> str:
+def _validated_worker_id(worker_id: str) -> str:
     worker_id = worker_id.strip()
     if (
         not worker_id
@@ -65,20 +64,9 @@ def _validated_qr_worker_id(worker_id: str) -> str:
     return worker_id
 
 
-def _safe_qr_filename_id(worker_id: str) -> str:
+def _safe_worker_filename_id(worker_id: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]+", "_", worker_id).strip("._") or "worker"
 
-
-def _worker_qr(worker_id: str, *, error_correction: int) -> qrcode.QRCode:
-    qr = qrcode.QRCode(
-        version=None,
-        error_correction=error_correction,
-        box_size=1,
-        border=4,
-    )
-    qr.add_data(f"{CONFIG.worker_id.prefix}{worker_id}")
-    qr.make(fit=True)
-    return qr
 
 
 def _centered_text(
@@ -109,76 +97,42 @@ def _centered_text(
     )
 
 
-@router.get("/worker-qr.png")
-def worker_qr_png(
+@router.get("/worker-tag.png")
+def worker_tag_png(
     worker_id: str = Query(..., min_length=1, max_length=64),
     download: bool = Query(False),
 ) -> Response:
-    """Return a high-resolution printable PNG containing ``worker:<ID>``."""
-    worker_id = _validated_qr_worker_id(worker_id)
-    safe_filename_id = _safe_qr_filename_id(worker_id)
-    qr = _worker_qr(
-        worker_id,
-        error_correction=qrcode.constants.ERROR_CORRECT_H,
-    )
+    """Return the compact high-contrast worker marker as printable PNG."""
+    worker_id = _validated_worker_id(worker_id)
+    safe_filename_id = _safe_worker_filename_id(worker_id)
+    marker_id = worker_marker_id(worker_id)
+    marker = render_worker_marker(marker_id, side_pixels=1000, border_bits=1)
 
-    matrix = np.asarray(qr.get_matrix(), dtype=np.uint8)
-    module_count = int(matrix.shape[0])
-    module_scale = max(1, 1000 // module_count)
-    qr_pixels = np.where(matrix > 0, 0, 255).astype(np.uint8)
-    qr_pixels = np.repeat(
-        np.repeat(qr_pixels, module_scale, axis=0),
-        module_scale,
-        axis=1,
-    )
+    # Add a plain white quiet zone around the marker; this significantly helps
+    # detection under blur and at long range.
+    quiet = 120
+    marker = cv2.copyMakeBorder(marker, quiet, quiet, quiet, quiet, cv2.BORDER_CONSTANT, value=255)
 
     margin = 120
     header_height = 130
-    caption_height = 220
-    canvas_width = qr_pixels.shape[1] + margin * 2
-    canvas_height = header_height + qr_pixels.shape[0] + caption_height + margin
+    caption_height = 270
+    canvas_width = marker.shape[1] + margin * 2
+    canvas_height = header_height + marker.shape[0] + caption_height + margin
     canvas = np.full((canvas_height, canvas_width), 255, dtype=np.uint8)
 
-    qr_y = header_height
-    qr_x = (canvas_width - qr_pixels.shape[1]) // 2
-    canvas[
-        qr_y:qr_y + qr_pixels.shape[0],
-        qr_x:qr_x + qr_pixels.shape[1],
-    ] = qr_pixels
+    marker_y = header_height
+    marker_x = (canvas_width - marker.shape[1]) // 2
+    canvas[marker_y:marker_y + marker.shape[0], marker_x:marker_x + marker.shape[1]] = marker
 
-    printable_id = "".join(
-        char if 32 <= ord(char) <= 126 else "_"
-        for char in worker_id
-    )
-    _centered_text(
-        canvas,
-        "PERIMETR - WORKER QR",
-        78,
-        font_scale=1.25,
-        thickness=3,
-    )
-    _centered_text(
-        canvas,
-        f"WORKER ID: {printable_id}",
-        qr_y + qr_pixels.shape[0] + 115,
-        font_scale=1.6,
-        thickness=4,
-    )
-    _centered_text(
-        canvas,
-        "PLACE ON VEST OR BACK",
-        qr_y + qr_pixels.shape[0] + 180,
-        font_scale=0.85,
-        thickness=2,
-    )
+    printable_id = "".join(char if 32 <= ord(char) <= 126 else "_" for char in worker_id)
+    _centered_text(canvas, "PERIMETR - WORKER TAG", 78, font_scale=1.25, thickness=3)
+    _centered_text(canvas, f"WORKER ID: {printable_id}", marker_y + marker.shape[0] + 95, font_scale=1.7, thickness=4)
+    _centered_text(canvas, f"MARKER ID: {marker_id}", marker_y + marker.shape[0] + 160, font_scale=1.2, thickness=3)
+    _centered_text(canvas, "PLACE ON VEST OR BACK", marker_y + marker.shape[0] + 225, font_scale=0.95, thickness=2)
 
-    encoded, buffer = cv2.imencode(
-        ".png",
-        canvas,
-        [cv2.IMWRITE_PNG_COMPRESSION, 3],
-    )
+    encoded, buffer = cv2.imencode('.png', canvas, [cv2.IMWRITE_PNG_COMPRESSION, 3])
     if not encoded:  # pragma: no cover
-        raise HTTPException(500, "Could not generate worker QR PNG")
+        raise HTTPException(500, "Could not generate worker marker PNG")
 
     disposition = "attachment" if download else "inline"
     filename = f"worker-{safe_filename_id}.png"
@@ -188,28 +142,8 @@ def worker_qr_png(
         headers={
             "Cache-Control": "no-store",
             "Content-Disposition": f'{disposition}; filename="{filename}"',
-        },
-    )
-
-
-@router.get("/worker-qr")
-def worker_qr(
-    worker_id: str = Query(..., min_length=1, max_length=64),
-) -> Response:
-    """Generate the legacy printable SVG tag."""
-    worker_id = _validated_qr_worker_id(worker_id)
-    safe_filename_id = _safe_qr_filename_id(worker_id)
-    qr = _worker_qr(
-        worker_id,
-        error_correction=qrcode.constants.ERROR_CORRECT_M,
-    )
-    image = qr.make_image(image_factory=qrcode.image.svg.SvgPathImage)
-    return Response(
-        content=image.to_string(),
-        media_type="image/svg+xml",
-        headers={
-            "Cache-Control": "no-store",
-            "Content-Disposition": f'inline; filename="worker-{safe_filename_id}.svg"',
+            "X-Worker-Marker-Id": str(marker_id),
+            "X-Worker-Tag-Type": "aruco-4x4",
         },
     )
 

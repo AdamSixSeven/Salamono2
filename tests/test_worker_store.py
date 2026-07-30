@@ -182,10 +182,10 @@ def test_worker_summary_is_enriched_but_unknown_ids_still_work(tmp_path):
     assert by_id["W-001"]["department"] == "Roboty ziemne"
     assert "full_name" not in by_id["W-999"]
 
-    # Existing QR generation remains valid even before a profile is created.
-    qr = _request(api, "GET", "/api/worker-qr?worker_id=W-999")
-    assert qr.status_code == 200
-    assert qr.headers["content-type"].startswith("image/svg+xml")
+    # Marker generation remains valid even before a profile is created.
+    tag = _request(api, "GET", "/api/worker-tag.png?worker_id=W-999")
+    assert tag.status_code == 200
+    assert tag.headers["content-type"].startswith("image/png")
 
 
 def _jpeg() -> bytes:
@@ -250,7 +250,6 @@ def test_frame_stream_and_alert_snapshot_include_registered_profile(tmp_path):
     api.state.marker_detector = MarkerDetector()
     api.state.calibration_store = CalibrationStore(str(tmp_path / "calibration.json"))
     api.state.marker_zone_cache = {}
-    api.state.debug_inject_person = None
     api.state.posture_manager = DisabledPosture()
     api.state.evidence_recorder = None
     api.state.frame_counter = 0

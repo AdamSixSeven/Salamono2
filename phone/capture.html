@@ -134,6 +134,56 @@
             cursor: pointer;
         }
         .voice-toggle input { accent-color: #4caf50; }
+
+        .depth-calibration {
+            width: 100%;
+            max-width: 640px;
+            margin-top: 14px;
+            padding: 12px;
+            border: 1px solid #333;
+            border-radius: 4px;
+            background: #151515;
+        }
+        .depth-calibration summary {
+            cursor: pointer;
+            color: #ddd;
+            font-size: 13px;
+            font-weight: 650;
+            letter-spacing: .06em;
+            text-transform: uppercase;
+        }
+        .depth-calibration-grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 8px;
+            margin-top: 12px;
+        }
+        .depth-calibration-grid label { color: #888; font-size: 11px; }
+        .depth-calibration-grid input,
+        .depth-calibration-grid select {
+            width: 100%;
+            margin-top: 4px;
+            padding: 7px 8px;
+            border: 1px solid #333;
+            border-radius: 3px;
+            color: #eee;
+            background: #222;
+        }
+        .depth-calibration-actions { display:flex; flex-wrap:wrap; gap:8px; margin-top:10px; }
+        .depth-calibration-actions button,
+        .depth-calibration-actions a {
+            flex: 1 1 180px;
+            padding: 9px 12px;
+            border: 0;
+            border-radius: 2px;
+            text-align: center;
+            text-decoration: none;
+            font-size: 13px;
+            font-weight: 650;
+        }
+        #depthCaptureBtn { background:#DD211C; color:#fff; }
+        #depthBoardDownload { background:#2B2B2B; color:#fff; }
+        #depthCaptureStatus { margin-top:9px; color:#888; font-family:var(--font-mono, monospace); font-size:11px; line-height:1.45; }
     </style>
 </head>
 <body>
@@ -167,18 +217,40 @@
     </div>
 
     <video id="preview" autoplay playsinline muted></video>
-    <p class="camera-hint">
-        Ustaw nieruchomy telefon na wysokości pasa lub klatki. Pokaż całą sylwetkę
-        (30–50% wysokości kadru) i unikaj lampy skierowanej w obiektyw.
-    </p>
 
     <div class="controls">
         <button id="startBtn">Start</button>
         <button id="stopBtn" disabled>Stop</button>
     </div>
 
-    <div id="statusBar" class="status-idle">Gotowy do uruchomienia</div>
+    <div id="statusBar" class="status-idle">Gotowy</div>
     <div id="stats"></div>
+
+    <details class="depth-calibration">
+        <summary>Kalibracja głębi — zapisz widok szachownicy</summary>
+        <div class="depth-calibration-grid">
+            <label>Narożniki poziomo
+                <input id="depthCornersX" type="number" min="3" max="20" value="9">
+            </label>
+            <label>Narożniki pionowo
+                <input id="depthCornersY" type="number" min="3" max="20" value="6">
+            </label>
+            <label>Bok pola [mm]
+                <input id="depthSquareMm" type="number" min="5" max="300" value="30">
+            </label>
+            <label>Obiektyw
+                <select id="depthLensModel">
+                    <option value="pinhole">Standardowy / 1×</option>
+                    <option value="fisheye">Ultraszeroki / fisheye</option>
+                </select>
+            </label>
+        </div>
+        <div class="depth-calibration-actions">
+            <button id="depthCaptureBtn" type="button">Zapisz ten widok</button>
+            <a id="depthBoardDownload" href="#">Pobierz szachownicę</a>
+        </div>
+        <div id="depthCaptureStatus">Brak zapisanych widoków.</div>
+    </details>
 
     <script>
     (function() {
@@ -193,8 +265,14 @@
         var statusBar = document.getElementById("statusBar");
         var statsEl = document.getElementById("stats");
 
-        // ---- Voice warnings (Web Speech API) ------------------------------
-        // Local voice warnings notify a nearby worker about confirmed events.
+        var depthCornersX = document.getElementById("depthCornersX");
+        var depthCornersY = document.getElementById("depthCornersY");
+        var depthSquareMm = document.getElementById("depthSquareMm");
+        var depthLensModel = document.getElementById("depthLensModel");
+        var depthCaptureBtn = document.getElementById("depthCaptureBtn");
+        var depthBoardDownload = document.getElementById("depthBoardDownload");
+        var depthCaptureStatus = document.getElementById("depthCaptureStatus");
+
         var voiceSupported = "speechSynthesis" in window;
         var voiceCooldownMs = 5000;
         var lastSpokenAt = {}; // message-key → epoch ms
@@ -219,9 +297,6 @@
             speechSynthesis.onvoiceschanged = pickPolishVoice;
         }
 
-        // Cooldown zależny od priorytetu — krzyk PPE powtarzamy szybciej
-        // (2s) bo chcemy żeby pracownik faktycznie zareagował, nie tylko
-        // usłyszał raz.
         var COOLDOWN_MS = { shout: 2000, danger: 5000, warning: 5000 };
 
         function speak(text, key, priority) {
@@ -254,7 +329,6 @@
         function announceAlerts(data) {
             if (!voiceToggle.checked) return;
 
-            // Static-zone approach and breach warnings.
             (data.confirmed_zone_breaches || []).forEach(function(b) {
                 var isApproach = b.rule_name === "zone_approach";
                 var isDanger = b.severity === "DANGER" && !isApproach;
@@ -268,7 +342,6 @@
                       isDanger ? "danger" : "warning");
             });
 
-            // Site hazards — osoba obok pojazdu / w strefie pojazdu.
             (data.confirmed_alerts || []).forEach(function(a) {
                 var isOverlap = a.rule_name === "person_vehicle_overlap";
                 var isDanger = a.severity === "DANGER";
@@ -284,8 +357,6 @@
                       isDanger ? "danger" : "warning");
             });
 
-            // Coordination/posture anomaly.  The camera reports observable
-            // movement only; the message requests a human safety check.
             (data.confirmed_posture_alerts || []).forEach(function(p) {
                 var danger = p.severity === "DANGER";
                 var signals = p.signals || [];
@@ -311,8 +382,6 @@
                 speak("Uwaga: osoba bez rozpoznanego identyfikatora", "worker_id_missing", "warning");
             });
 
-            // PPE warnings use a shorter cooldown and a more prominent voice
-            // profile because immediate worker action is required.
             (data.ppe_checks || []).forEach(function(c) {
                 if (c.severity !== "DANGER" || !c.missing || !c.missing.length) return;
                 var missing = c.missing.slice().sort();
@@ -442,10 +511,6 @@
                 return null;
             }
 
-            // Przełączamy automatycznie tylko wtedy, gdy aktywny obiektyw
-            // wygląda na pomocniczy albo inny obiektyw jest jawnie opisany
-            // jako główny. Przy nieczytelnych nazwach decyzję zostawiamy
-            // przeglądarce i użytkownikowi.
             var currentLabel = current ? current.label : "";
             var preferredIsExplicitMain = /main|primary|głów|glown/i.test(preferred.label || "");
             if (isAuxiliaryLens(currentLabel) || isFrontCamera(currentLabel) || preferredIsExplicitMain) {
@@ -542,8 +607,6 @@
             stopActiveStream();
             return requestCamera(selectedId).catch(function(error) {
                 if (!selectedId) throw error;
-                // Zapamiętany identyfikator może przestać być ważny po
-                // aktualizacji przeglądarki albo zmianie telefonu.
                 storeCameraId("");
                 selectedId = "";
                 cameraSelect.value = "";
@@ -737,16 +800,11 @@
 
         function sendOneFrame() {
             if (!running) return;
-            // Backpressure: jeśli poprzednia klatka jeszcze leci, poczekaj.
-            // Tempo wysyłania samo dostraja się do throughput backendu.
             if (inFlight) {
                 framesSkipped++;
                 scheduleNext(20);
                 return;
             }
-            // Mierz pełny cykl klatki, łącznie z rysowaniem i kodowaniem JPEG.
-            // Przy 22–30 FPS pominięcie czasu toBlob zauważalnie zaniżało
-            // rzeczywiste tempo nawet wtedy, gdy backend odpowiadał szybko.
             var cycleStartedAt = performance.now();
             if (!captureCanvas.width || !captureCanvas.height) sizeCaptureCanvas();
             if (!drawVideoCover(
@@ -766,18 +824,11 @@
 
                 var form = new FormData();
                 form.append("image", blob, "frame.jpg");
-                // Must match CAMERA_ID in frontend/zones.js — otherwise the
-                // backend looks up zones for a different camera and returns
-                // an empty polygon set even when markers are visible.
                 var cameraId = streamCameraId();
                 form.append("camera_id", cameraId);
                 form.append("timestamp", String(Date.now() / 1000));
                 form.append("mode", modeSelect.value);
-                // The panel receives the complete frame over WebSocket.  The
-                // phone only needs analysis metadata in the HTTP response.
                 form.append("include_frame", "false");
-                // Once the metadata WebSocket is connected, the POST only
-                // replaces the latest per-camera slot and returns immediately.
                 form.append(
                     "async_processing",
                     analysisSocketConnected ? "true" : "false"
@@ -805,8 +856,6 @@
                             " | Odrzucone stare: " + (data.dropped_frames || 0) +
                             " | Ostatnia detekcja: " + lastProcMs.toFixed(0) + "ms";
                     } else {
-                        // Compatibility fallback while the metadata socket is
-                        // still connecting.
                         consumeAnalysis(data);
                     }
                 }).catch(function() {
@@ -815,9 +864,6 @@
                     statusBar.className = "status-err";
                 }).finally(function() {
                     inFlight = false;
-                    // Jeśli pełny cykl (JPEG + round-trip + obsługa odpowiedzi)
-                    // jest wolniejszy niż target FPS, następna klatka rusza
-                    // od razu. `inFlight` nadal gwarantuje pojedyncze żądanie.
                     var cycleElapsed = performance.now() - cycleStartedAt;
                     var wait = Math.max(0, targetInterval - cycleElapsed);
                     scheduleNext(wait);
@@ -841,6 +887,62 @@
             inFlight = false;
             stopAnalysisSocket();
         }
+
+
+        function depthCheckerboardBody() {
+            return {
+                inner_corners_x: parseInt(depthCornersX.value, 10) || 9,
+                inner_corners_y: parseInt(depthCornersY.value, 10) || 6,
+                square_length_m: (parseFloat(depthSquareMm.value) || 30) / 1000,
+                lens_model: depthLensModel.value || "pinhole"
+            };
+        }
+
+        function updateDepthBoardLink() {
+            var body = depthCheckerboardBody();
+            var query = new URLSearchParams({
+                inner_corners_x: String(body.inner_corners_x),
+                inner_corners_y: String(body.inner_corners_y),
+                square_length_m: String(body.square_length_m),
+                dpi: "300"
+            });
+            depthBoardDownload.href = serverInput.value.replace(/\/$/, "") + "/api/depth3d/checkerboard.png?" + query.toString();
+        }
+
+        function saveDepthCalibrationView() {
+            if (!running) {
+                depthCaptureStatus.textContent = "Najpierw kliknij Start, aby backend otrzymywał świeże klatki.";
+                return;
+            }
+            depthCaptureBtn.disabled = true;
+            depthCaptureStatus.textContent = "Wykrywanie pełnej szachownicy…";
+            var serverUrl = serverInput.value.replace(/\/$/, "");
+            fetch(serverUrl + "/api/depth3d/" + encodeURIComponent(streamCameraId()) + "/checkerboard/capture", {
+                method: "POST",
+                headers: {"Content-Type": "application/json"},
+                body: JSON.stringify(depthCheckerboardBody()),
+                credentials: "same-origin"
+            }).then(function(response) {
+                return response.json().then(function(payload) {
+                    if (!response.ok) throw new Error(payload && payload.detail ? payload.detail : "HTTP " + response.status);
+                    return payload;
+                });
+            }).then(function(data) {
+                depthCaptureStatus.textContent = data.accepted
+                    ? "Zapisano widok " + data.capture_count + " · narożniki " + data.corner_count + "/" + data.expected_corners + " · pokrycie " + (data.coverage_ratio * 100).toFixed(1) + "% · ostrość " + data.blur_score.toFixed(0)
+                    : (data.warning || "Widok nie został zapisany.");
+            }).catch(function(error) {
+                depthCaptureStatus.textContent = "Błąd: " + error.message;
+            }).finally(function() {
+                depthCaptureBtn.disabled = false;
+            });
+        }
+
+        depthCaptureBtn.addEventListener("click", saveDepthCalibrationView);
+        [depthCornersX, depthCornersY, depthSquareMm, depthLensModel, serverInput].forEach(function(element) {
+            element.addEventListener("change", updateDepthBoardLink);
+        });
+        updateDepthBoardLink();
 
         var storedCameraId = getStoredCameraId();
         if (storedCameraId) {

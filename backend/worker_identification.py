@@ -1,7 +1,7 @@
-"""Lightweight worker identification using visible QR tags.
+"""Lightweight worker identification using visible worker tags.
 
-The module intentionally does not use face recognition.  A worker can wear a
-QR tag on the vest/back with payload ``worker:<identifier>``.  The tag is
+The module intentionally does not use face recognition. A worker can wear a
+simplified ArUco-style marker on the vest/back. The tag is
 matched to the enclosing YOLO person box and cached briefly across occlusions.
 """
 from __future__ import annotations
@@ -14,6 +14,8 @@ import cv2
 import numpy as np
 
 from backend.detector import Detection
+from backend.worker_tags import worker_id_from_marker_id, worker_marker_id
+from backend.worker_store import WorkerStore
 from backend.danger_rules import bbox_iou
 from config import CONFIG, WorkerIDConfig
 
@@ -22,6 +24,7 @@ from config import CONFIG, WorkerIDConfig
 class DecodedWorkerTag:
     payload: str
     polygon: list[tuple[float, float]]
+    source: str = "marker"
 
     @property
     def center(self) -> tuple[float, float]:
@@ -55,41 +58,48 @@ class WorkerTagDecoder(Protocol):
     def decode(self, frame_bgr: np.ndarray) -> list[DecodedWorkerTag]: ...
 
 
-class OpenCVQRDecoder:
+class OpenCVWorkerMarkerDecoder:
+    """Decode only the simplified worker marker.
+
+    Legacy QR decoding was intentionally removed. Worker identification now
+    uses one compact ArUco 4x4 marker path, which is both faster and more
+    stable at distance.
+    """
+
     def __init__(self):
-        self._detector = cv2.QRCodeDetector()
+        self._dictionary = cv2.aruco.getPredefinedDictionary(
+            getattr(cv2.aruco, "DICT_4X4_1000", cv2.aruco.DICT_4X4_250)
+        )
+        self._params = cv2.aruco.DetectorParameters()
+        self._detector = None
+        if hasattr(cv2.aruco, "ArucoDetector"):
+            self._detector = cv2.aruco.ArucoDetector(
+                self._dictionary,
+                self._params,
+            )
 
     def decode(self, frame_bgr: np.ndarray) -> list[DecodedWorkerTag]:
-        tags: list[DecodedWorkerTag] = []
-        try:
-            result = self._detector.detectAndDecodeMulti(frame_bgr)
-        except cv2.error:
-            result = None
-
-        if result:
-            # OpenCV returns (retval, decoded_info, points, straight_qrcode).
-            ok, decoded_info, points, *_ = result
-            if ok and points is not None:
-                for payload, polygon in zip(decoded_info, points):
-                    if not payload:
-                        continue
-                    pts = [(float(x), float(y)) for x, y in np.asarray(polygon).reshape(-1, 2)]
-                    tags.append(DecodedWorkerTag(str(payload), pts))
-
-        if tags:
-            return tags
-
-        # Fallback for OpenCV builds where multi decode is unavailable or
-        # returns false for a single code.
-        try:
-            payload, points, _ = self._detector.detectAndDecode(frame_bgr)
-        except cv2.error:
+        gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+        if self._detector is not None:
+            corners, ids, _ = self._detector.detectMarkers(gray)
+        else:
+            corners, ids, _ = cv2.aruco.detectMarkers(
+                gray,
+                self._dictionary,
+                parameters=self._params,
+            )
+        if ids is None or len(ids) == 0:
             return []
-        if payload and points is not None:
-            pts = [(float(x), float(y)) for x, y in np.asarray(points).reshape(-1, 2)]
-            tags.append(DecodedWorkerTag(str(payload), pts))
-        return tags
 
+        tags: list[DecodedWorkerTag] = []
+        for index, marker_id in enumerate(ids.flatten().tolist()):
+            points = corners[index].reshape(-1, 2)
+            tags.append(DecodedWorkerTag(
+                payload=f"marker:{int(marker_id)}",
+                polygon=[(float(x), float(y)) for x, y in points],
+                source="marker",
+            ))
+        return tags
 
 def _center_distance_ratio(
     box_a: tuple[int, int, int, int],
@@ -103,6 +113,21 @@ def _center_distance_ratio(
     return math.hypot(ax - bx, ay - by) / scale
 
 
+def _translated_polygon(
+    polygon: list[tuple[float, float]],
+    old_box: tuple[int, int, int, int],
+    new_box: tuple[int, int, int, int],
+) -> list[tuple[float, float]]:
+    """Move a cached tag with its person without scaling the marker shape."""
+    old_cx = (old_box[0] + old_box[2]) / 2.0
+    old_cy = (old_box[1] + old_box[3]) / 2.0
+    new_cx = (new_box[0] + new_box[2]) / 2.0
+    new_cy = (new_box[1] + new_box[3]) / 2.0
+    dx = new_cx - old_cx
+    dy = new_cy - old_cy
+    return [(x + dx, y + dy) for x, y in polygon]
+
+
 class WorkerIdentifier:
     def __init__(
         self,
@@ -110,25 +135,45 @@ class WorkerIdentifier:
         decoder: WorkerTagDecoder | None = None,
     ):
         self.cfg = config or CONFIG.worker_id
-        self.decoder = decoder or OpenCVQRDecoder()
+        self.decoder = decoder or OpenCVWorkerMarkerDecoder()
         self.available = bool(self.cfg.enabled)
         self.unavailable_reason = None if self.available else "disabled by WORKER_ID_ENABLED"
         self._last_sample_at: dict[str, float] = {}
         self._cache: dict[str, list[_CacheEntry]] = {}
+        self._worker_store: WorkerStore | None = None
+        self._marker_to_worker_id: dict[int, str] = {}
+        self._marker_index_refreshed_at: float = float("-inf")
+
+    def _refresh_marker_index(self) -> None:
+        # Refresh lazily no more often than once every 5 seconds.
+        import time
+        current = time.time()
+        if current - self._marker_index_refreshed_at < 5.0 and self._marker_to_worker_id:
+            return
+        self._marker_index_refreshed_at = current
+        try:
+            self._worker_store = self._worker_store or WorkerStore(self.cfg.database_path)
+            mapping: dict[int, str] = {}
+            for record in self._worker_store.list():
+                mapping[worker_marker_id(record.worker_id)] = record.worker_id
+            self._marker_to_worker_id = mapping
+        except Exception:
+            # Keep the detector running even when the worker database is not yet available.
+            self._marker_to_worker_id = self._marker_to_worker_id or {}
 
     def _worker_id(self, payload: str) -> str | None:
         payload = payload.strip()
-        if not payload or len(payload) > self.cfg.max_payload_length:
+        if not payload.startswith("marker:"):
             return None
-        if self.cfg.prefix and not payload.startswith(self.cfg.prefix):
+        raw = payload.split(":", 1)[1].strip()
+        if not raw.isdigit():
             return None
-        worker_id = payload[len(self.cfg.prefix):].strip() if self.cfg.prefix else payload
-        if not worker_id or len(worker_id) > 64:
-            return None
-        # Keep IDs printable and safe for CSV/UI rendering.
-        if any(ord(char) < 32 for char in worker_id):
-            return None
-        return worker_id
+        marker_id = int(raw)
+        self._refresh_marker_index()
+        return self._marker_to_worker_id.get(
+            marker_id,
+            worker_id_from_marker_id(marker_id),
+        )
 
     def process(
         self,
@@ -176,11 +221,16 @@ class WorkerIdentifier:
             if entry.worker_id in used_workers:
                 continue
             person = persons[person_idx]
+            entry.tag_polygon = _translated_polygon(
+                entry.tag_polygon,
+                entry.person_box,
+                person.box,
+            )
             entry.person_box = person.box
             identities.append(WorkerIdentity(
                 worker_id=entry.worker_id,
                 person=person,
-                source="qr",
+                source="cache",
                 tag_polygon=list(entry.tag_polygon),
                 frame_timestamp=timestamp,
                 cached=True,
@@ -229,7 +279,7 @@ class WorkerIdentifier:
             identities.append(WorkerIdentity(
                 worker_id=worker_id,
                 person=person,
-                source="qr",
+                source=tag.source,
                 tag_polygon=list(tag.polygon),
                 frame_timestamp=timestamp,
                 cached=False,
@@ -274,7 +324,7 @@ class UnidentifiedWorkerEvent:
 
 
 class UnidentifiedWorkerMonitor:
-    """Temporal warning for people without a visible/cached worker QR.
+    """Temporal warning for people without a visible/cached worker marker.
 
     This is intentionally enabled by policy per mode.  The checkpoint default
     is useful because the person is expected to present the tag; site-wide use

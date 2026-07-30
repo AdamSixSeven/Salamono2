@@ -23,9 +23,9 @@ def person(box=(100, 60, 300, 420)):
     return Detection(0, "person", "person", box, 0.95)
 
 
-def test_qr_tag_is_matched_to_enclosing_person():
+def test_worker_marker_is_matched_to_enclosing_person():
     tag = DecodedWorkerTag(
-        "worker:W-001",
+        "marker:1",
         [(170, 150), (230, 150), (230, 210), (170, 210)],
     )
     identifier = WorkerIdentifier(
@@ -39,9 +39,9 @@ def test_qr_tag_is_matched_to_enclosing_person():
     assert identities[0].cached is False
 
 
-def test_worker_assignment_survives_short_qr_occlusion():
+def test_worker_assignment_survives_short_marker_occlusion():
     tag = DecodedWorkerTag(
-        "worker:W-002",
+        "marker:2",
         [(170, 150), (230, 150), (230, 210), (170, 210)],
     )
     identifier = WorkerIdentifier(
@@ -56,10 +56,10 @@ def test_worker_assignment_survives_short_qr_occlusion():
     assert second[0].cached is True
 
 
-def test_unprefixed_qr_is_ignored():
+def test_non_marker_payload_is_ignored():
     tag = DecodedWorkerTag("https://example.com", [(1, 1), (2, 1), (2, 2), (1, 2)])
     identifier = WorkerIdentifier(
-        WorkerIDConfig(enabled=True, prefix="worker:"),
+        WorkerIDConfig(enabled=True),
         decoder=SequenceDecoder([[tag]]),
     )
     frame = np.zeros((480, 640, 3), dtype=np.uint8)

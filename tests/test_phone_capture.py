@@ -97,3 +97,12 @@ def test_phone_inline_javascript_syntax():
         check=False,
     )
     assert result.returncode == 0, result.stderr.decode("utf-8", "replace")
+
+
+def test_phone_exposes_checkerboard_capture_for_depth_calibration():
+    assert 'id="depthCaptureBtn"' in CAPTURE_HTML
+    assert 'id="depthCornersX"' in CAPTURE_HTML
+    assert 'id="depthCornersY"' in CAPTURE_HTML
+    assert 'id="depthSquareMm"' in CAPTURE_HTML
+    assert '"/checkerboard/capture"' in CAPTURE_HTML
+    assert '"/api/depth3d/checkerboard.png?"' in CAPTURE_HTML

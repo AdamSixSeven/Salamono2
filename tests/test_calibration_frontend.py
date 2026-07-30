@@ -44,7 +44,7 @@ def test_active_camera_selection_has_required_priority_and_registry_source():
     assert 'fetch("/api/cameras"' in SCRIPT
     assert source.index("queryCameraId()") < source.index("storedCameraId()")
     assert source.index("storedCameraId()") < source.index("cameras.find")
-    assert source.index("cameras.find") < source.index("display fallback only")
+    assert source.index("cameras.find") < source.index('cameraId: "cam_default"')
 
 
 def test_temporary_cam_default_does_not_block_first_online_camera():
@@ -56,7 +56,7 @@ def test_temporary_cam_default_does_not_block_first_online_camera():
     assert "storedExists" in choose
     assert "cameras.some" in choose
     assert 'fromUrl !== "cam_default" || urlCameraExists' in choose
-    fallback = choose[choose.index("display fallback only"):]
+    fallback = choose[choose.index('cameraId: "cam_default"'):]
     assert 'cameraId: "cam_default"' in fallback
     assert "locked: false" in fallback
     assert "remember: false" in fallback
@@ -257,22 +257,26 @@ def test_calibration_uses_registered_cameras_only_and_auto_connects():
     assert "skalibrowana" in function_source("renderCameraOptions")
 
 
-def test_marker_instructions_and_png_downloads_cover_default_layout():
-    assert "DICT_4X4_50" in HTML
-    assert "między środkami" in HTML
-    assert "10 = lewy górny" in HTML
-    assert "20 = prawy górny" in HTML
-    assert "30 = prawy dolny" in HTML
-    assert "40 = lewy dolny" in HTML
-    for marker_id in (10, 20, 30, 40):
+def test_marker_downloads_and_default_layout_are_available_without_tutorial_copy():
+    expected_positions = {
+        10: "lewy górny · TL",
+        20: "prawy górny · TR",
+        30: "prawy dolny · BR",
+        40: "lewy dolny · BL",
+    }
+    for marker_id, position in expected_positions.items():
         url = f"/api/calibration/markers/{marker_id}.png"
-        assert HTML.count(url) >= 2  # preview image + download link
+        assert HTML.count(url) >= 2
         assert f'download="aruco-{marker_id}.png"' in HTML
+        assert position in HTML
     assert "window.print()" in SCRIPT
-    assert "15–25 cm" in HTML
-    assert "orientacji telefonu" in HTML
-    assert "obiektywu, cropu ani proporcji obrazu" in HTML
-    assert "nie przesuwaj statywu" in HTML
+    for removed_copy in (
+        "między środkami",
+        "15–25 cm",
+        "orientacji telefonu",
+        "nie przesuwaj statywu",
+    ):
+        assert removed_copy not in HTML
 
 
 def test_event_binding_is_centralized_and_not_called_twice():

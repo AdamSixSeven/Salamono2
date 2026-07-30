@@ -52,18 +52,42 @@ class PostureConfig:
     # Observable coordination/posture anomaly analysis.  This is intentionally
     # not an intoxication classifier; alerts always require human verification.
     enabled: bool = True
-    model_path: str = "models/pose_landmarker_lite.task"
-    # MediaPipe runs independently from the live-frame cadence.  Three samples
-    # per second are sufficient for the 2–4 s temporal windows used below
-    # without making appearance of a person saturate the CPU.
-    sample_fps: float = 3.0
+    # The behavior model was trained from Pose Landmarker Heavy at 15 Hz.
+    # Keep runtime extraction aligned by default; POSTURE_MODEL can switch back
+    # to Full/Lite after retraining or an explicit validation on pilot footage.
+    model_path: str = "models/pose_landmarker_heavy.task"
+    sample_fps: float = 15.0
+
+    # Learned seven-class temporal behavior classifier (TCN).
+    behavior_enabled: bool = True
+    behavior_model_path: str = "models/behavior/tcn_heavy_ch64/model.pt"
+    behavior_device: str = "auto"
+    behavior_feature_fps: float = 15.0
+    behavior_min_valid_ratio: float = 0.45
+    behavior_min_window_coverage: float = 0.70
+    behavior_max_sample_gap_seconds: float = 0.35
+    behavior_inference_stride_samples: int = 3
+    behavior_smoothing_windows: int = 4
+    behavior_fall_threshold: float = 0.80
+    behavior_lying_threshold: float = 0.85
+    behavior_fall_consecutive_windows: int = 1
+    behavior_lying_consecutive_windows: int = 3
+    behavior_alerts_enabled: bool = True
     max_poses: int = 1
     max_camera_instances: int = 2
-    min_person_height_frac: float = 0.25
+    min_person_height_frac: float = 0.18
     min_landmark_visibility: float = 0.50
     min_pose_detection_confidence: float = 0.50
     min_pose_presence_confidence: float = 0.50
     min_tracking_confidence: float = 0.50
+    crop_margin: float = 0.24
+    crop_center_follow: float = 0.72
+    crop_size_follow: float = 0.28
+    optical_flow_enabled: bool = True
+    optical_flow_win_size: int = 21
+    optical_flow_max_level: int = 3
+    optical_flow_fb_threshold_px: float = 1.5
+    optical_flow_max_jump_frac: float = 0.18
 
     history_seconds: float = 4.0
     min_history_seconds: float = 2.0
@@ -113,7 +137,6 @@ class WorkerIDConfig:
     # recognition.  QR payloads must begin with prefix, e.g. worker:W-001.
     enabled: bool = True
     sample_fps: float = 1.5
-    prefix: str = "worker:"
     cache_ttl_seconds: float = 2.0
     match_padding: float = 0.18
     max_payload_length: int = 96
@@ -139,6 +162,27 @@ class EvidenceConfig:
 
 
 @dataclass
+class Depth3DConfig:
+    # Optional monocular metric-depth preview. The small metric V2 model is
+    # loaded lazily and uses CUDA FP16 when available.
+    enabled: bool = False
+    model_id: str = "depth-anything/Depth-Anything-V2-Metric-Indoor-Small-hf"
+    device: str = "cpu"
+    local_files_only: bool = False
+    min_depth_m: float = 0.20
+    max_depth_m: float = 20.0
+    visualization_max_depth_m: float = 10.0
+    point_stride: int = 5
+    export_point_stride: int = 3
+    preview_points: int = 4500
+    jpeg_quality: int = 82
+    target_fps: float = 8.0
+    person_distance_enabled: bool = True
+    calibration_path: str = "data/depth3d_calibration.json"
+    calibration_profiles_dir: str = "data/depth3d_calibrations"
+
+
+@dataclass
 class AppConfig:
     yolo: YOLOConfig = field(default_factory=YOLOConfig)
     danger: DangerConfig = field(default_factory=DangerConfig)
@@ -147,6 +191,7 @@ class AppConfig:
     posture: PostureConfig = field(default_factory=PostureConfig)
     worker_id: WorkerIDConfig = field(default_factory=WorkerIDConfig)
     evidence: EvidenceConfig = field(default_factory=EvidenceConfig)
+    depth3d: Depth3DConfig = field(default_factory=Depth3DConfig)
     flagged_frames_dir: str = "data/flagged_frames"
     host: str = "0.0.0.0"
     port: int = 8000
@@ -192,10 +237,54 @@ def _from_env() -> AppConfig:
         cfg.posture.model_path = v
     if v := os.getenv("POSTURE_SAMPLE_FPS"):
         cfg.posture.sample_fps = float(v)
+    if v := os.getenv("POSTURE_BEHAVIOR_ENABLED"):
+        cfg.posture.behavior_enabled = v.strip().lower() in {"1", "true", "yes", "on"}
+    if v := os.getenv("POSTURE_BEHAVIOR_MODEL"):
+        cfg.posture.behavior_model_path = v
+    if v := os.getenv("POSTURE_BEHAVIOR_DEVICE"):
+        cfg.posture.behavior_device = v
+    if v := os.getenv("POSTURE_BEHAVIOR_FEATURE_FPS"):
+        cfg.posture.behavior_feature_fps = max(0.1, float(v))
+    if v := os.getenv("POSTURE_BEHAVIOR_MIN_VALID_RATIO"):
+        cfg.posture.behavior_min_valid_ratio = min(1.0, max(0.0, float(v)))
+    if v := os.getenv("POSTURE_BEHAVIOR_MIN_WINDOW_COVERAGE"):
+        cfg.posture.behavior_min_window_coverage = min(1.0, max(0.0, float(v)))
+    if v := os.getenv("POSTURE_BEHAVIOR_MAX_SAMPLE_GAP_SEC"):
+        cfg.posture.behavior_max_sample_gap_seconds = max(0.01, float(v))
+    if v := os.getenv("POSTURE_BEHAVIOR_INFERENCE_STRIDE"):
+        cfg.posture.behavior_inference_stride_samples = max(1, int(v))
+    if v := os.getenv("POSTURE_BEHAVIOR_SMOOTHING_WINDOWS"):
+        cfg.posture.behavior_smoothing_windows = max(1, int(v))
+    if v := os.getenv("POSTURE_BEHAVIOR_FALL_THRESHOLD"):
+        cfg.posture.behavior_fall_threshold = min(1.0, max(0.0, float(v)))
+    if v := os.getenv("POSTURE_BEHAVIOR_LYING_THRESHOLD"):
+        cfg.posture.behavior_lying_threshold = min(1.0, max(0.0, float(v)))
+    if v := os.getenv("POSTURE_BEHAVIOR_FALL_WINDOWS"):
+        cfg.posture.behavior_fall_consecutive_windows = max(1, int(v))
+    if v := os.getenv("POSTURE_BEHAVIOR_LYING_WINDOWS"):
+        cfg.posture.behavior_lying_consecutive_windows = max(1, int(v))
+    if v := os.getenv("POSTURE_BEHAVIOR_ALERTS_ENABLED"):
+        cfg.posture.behavior_alerts_enabled = v.strip().lower() in {"1", "true", "yes", "on"}
     if v := os.getenv("POSTURE_MAX_POSES"):
         cfg.posture.max_poses = int(v)
     if v := os.getenv("POSTURE_MIN_PERSON_HEIGHT_FRAC"):
         cfg.posture.min_person_height_frac = float(v)
+    if v := os.getenv("POSTURE_CROP_MARGIN"):
+        cfg.posture.crop_margin = max(0.0, float(v))
+    if v := os.getenv("POSTURE_CROP_CENTER_FOLLOW"):
+        cfg.posture.crop_center_follow = min(1.0, max(0.0, float(v)))
+    if v := os.getenv("POSTURE_CROP_SIZE_FOLLOW"):
+        cfg.posture.crop_size_follow = min(1.0, max(0.0, float(v)))
+    if v := os.getenv("POSTURE_OPTICAL_FLOW_ENABLED"):
+        cfg.posture.optical_flow_enabled = v.strip().lower() in {"1", "true", "yes", "on"}
+    if v := os.getenv("POSTURE_OPTICAL_FLOW_WIN_SIZE"):
+        cfg.posture.optical_flow_win_size = max(5, int(v))
+    if v := os.getenv("POSTURE_OPTICAL_FLOW_MAX_LEVEL"):
+        cfg.posture.optical_flow_max_level = max(0, int(v))
+    if v := os.getenv("POSTURE_OPTICAL_FLOW_FB_THRESHOLD_PX"):
+        cfg.posture.optical_flow_fb_threshold_px = max(0.1, float(v))
+    if v := os.getenv("POSTURE_OPTICAL_FLOW_MAX_JUMP_FRAC"):
+        cfg.posture.optical_flow_max_jump_frac = max(0.01, float(v))
     if v := os.getenv("POSTURE_WARNING_SCORE"):
         cfg.posture.warning_score = float(v)
     if v := os.getenv("POSTURE_DANGER_SCORE"):
@@ -214,8 +303,6 @@ def _from_env() -> AppConfig:
         cfg.worker_id.enabled = v.strip().lower() in {"1", "true", "yes", "on"}
     if v := os.getenv("WORKER_ID_SAMPLE_FPS"):
         cfg.worker_id.sample_fps = float(v)
-    if v := os.getenv("WORKER_ID_PREFIX"):
-        cfg.worker_id.prefix = v
     if v := os.getenv("WORKER_ID_CACHE_TTL_SEC"):
         cfg.worker_id.cache_ttl_seconds = float(v)
     if v := os.getenv("WORKER_ID_REQUIRE_AT_CHECKPOINT"):
@@ -238,6 +325,30 @@ def _from_env() -> AppConfig:
         cfg.evidence.post_seconds = float(v)
     if v := os.getenv("EVIDENCE_SAMPLE_FPS"):
         cfg.evidence.sample_fps = float(v)
+    if v := os.getenv("DEPTH3D_ENABLED"):
+        cfg.depth3d.enabled = v.strip().lower() in {"1", "true", "yes", "on"}
+    if v := os.getenv("DEPTH3D_MODEL_ID"):
+        cfg.depth3d.model_id = v
+    if v := os.getenv("DEPTH3D_DEVICE"):
+        cfg.depth3d.device = v
+    if v := os.getenv("DEPTH3D_LOCAL_FILES_ONLY"):
+        cfg.depth3d.local_files_only = v.strip().lower() in {"1", "true", "yes", "on"}
+    if v := os.getenv("DEPTH3D_MIN_DEPTH_M"):
+        cfg.depth3d.min_depth_m = float(v)
+    if v := os.getenv("DEPTH3D_MAX_DEPTH_M"):
+        cfg.depth3d.max_depth_m = float(v)
+    if v := os.getenv("DEPTH3D_VIS_MAX_DEPTH_M"):
+        cfg.depth3d.visualization_max_depth_m = float(v)
+    if v := os.getenv("DEPTH3D_POINT_STRIDE"):
+        cfg.depth3d.point_stride = max(1, int(v))
+    if v := os.getenv("DEPTH3D_TARGET_FPS"):
+        cfg.depth3d.target_fps = max(0.1, float(v))
+    if v := os.getenv("DEPTH3D_PERSON_DISTANCE_ENABLED"):
+        cfg.depth3d.person_distance_enabled = v.strip().lower() in {"1", "true", "yes", "on"}
+    if v := os.getenv("DEPTH3D_CALIBRATION_PATH"):
+        cfg.depth3d.calibration_path = v
+    if v := os.getenv("DEPTH3D_CALIBRATION_PROFILES_DIR"):
+        cfg.depth3d.calibration_profiles_dir = v
     if v := os.getenv("SERVER_PORT"):
         cfg.port = int(v)
     return cfg

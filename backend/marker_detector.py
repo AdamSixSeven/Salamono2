@@ -1,7 +1,11 @@
-"""ArUco marker detection used for calibration and marker-defined zones.
+"""ArUco marker detection.
 
-The default DICT_4X4_50 dictionary provides 50 compact marker IDs. Detection
-range depends on print size, optics, lighting, motion blur and viewing angle.
+Michał Salamonowicz (2026-07-08): markery na taśmach spełniają trzy role
+naraz — oznaczają strefę niebezpieczną, kalibrują kamerę i pozwalają
+mierzyć odległość pracownika od strefy w metrach.
+
+Używamy dict 4x4_50 (50 markerów po 4x4 bity) — tania taśma A4 czytelna
+z odległości ~10m.
 """
 from __future__ import annotations
 

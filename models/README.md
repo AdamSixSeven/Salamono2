@@ -1,23 +1,17 @@
-# Modele MVP
+# Modele runtime
 
-Z katalogu głównego uruchom:
+Standardowe modele można pobrać z katalogu głównego:
 
 ```bash
 python tools/download_models.py
 ```
 
-Skrypt pobiera:
+Domyślna konfiguracja wykorzystuje:
 
-- `models/pose_landmarker_lite.task` — MediaPipe Pose Landmarker Lite;
-- `ppe.pt` — publiczny checkpoint demonstracyjny PPE.
+- `models/pose_landmarker_heavy.task` — MediaPipe Pose Landmarker Heavy;
+- `models/behavior/tcn_heavy_ch64/model.pt` — klasyfikator zachowania TCN;
+- `ppe.pt` — model PPE;
+- `yolo11n.pt` — detektor bazowy YOLO.
 
-Można pobrać tylko jeden model:
-
-```bash
-python tools/download_models.py pose
-python tools/download_models.py ppe
-```
-
-Brak modelu nie zatrzymuje całej aplikacji: odpowiedni moduł zostanie oznaczony
-jako niedostępny w `/api/modes` i `/api/readiness`. Do pilotażu produkcyjnego
-należy użyć modeli sprawdzonych lub dotrenowanych na docelowej budowie.
+Pliki modeli są lokalne i ignorowane przez Git. Brak opcjonalnego modelu nie
+zatrzymuje pozostałych modułów aplikacji.

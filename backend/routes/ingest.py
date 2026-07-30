@@ -23,6 +23,7 @@ from backend.posture_detector import (
     POSTURE_CONNECTIONS,
     POSTURE_DRAW_MIN_VISIBILITY,
     PostureAssessment,
+    transform_cached_landmarks,
 )
 from backend.models import (
     ActiveZoneOut,
@@ -220,6 +221,8 @@ POSTURE_SIGNAL_DESCRIPTIONS = {
     "sudden_balance_loss": "nagła utrata równowagi",
     "possible_fall": "możliwy upadek",
     "hand_to_mouth_pattern": "powtarzalny gest ręka–usta",
+    "ml_fall_down": "TCN: upadek",
+    "ml_lying_down": "TCN: pozycja leżąca",
 }
 
 
@@ -233,7 +236,11 @@ def _posture_record(
         POSTURE_SIGNAL_DESCRIPTIONS.get(signal, signal)
         for signal in assessment.signals
     ]
-    is_fall = "possible_fall" in assessment.signals
+    is_fall = (
+        "possible_fall" in assessment.signals
+        or "ml_fall_down" in assessment.signals
+    )
+    is_lying = "ml_lying_down" in assessment.signals
     coordination_signals = {
         "repeated_body_sway",
         "unstable_trajectory",
@@ -247,8 +254,12 @@ def _posture_record(
     )
     if is_fall:
         kind = "fall_detected"
-        rule_name = "possible_fall"
+        rule_name = "ml_fall_down" if "ml_fall_down" in assessment.signals else "possible_fall"
         desc = "Możliwy upadek lub osunięcie się pracownika"
+    elif is_lying:
+        kind = "posture_anomaly"
+        rule_name = "ml_lying_down"
+        desc = "Wykryto utrzymującą się pozycję leżącą — wymagana weryfikacja"
     elif is_hand_to_mouth:
         kind = "smoking_gesture"
         rule_name = "hand_to_mouth_pattern"
@@ -267,6 +278,12 @@ def _posture_record(
         "metrics": assessment.metrics,
         "pose_confidence": assessment.pose_confidence,
         "history_seconds": assessment.history_seconds,
+        "behavior_label": assessment.behavior_label,
+        "behavior_confidence": assessment.behavior_confidence,
+        "behavior_probabilities": assessment.behavior_probabilities,
+        "behavior_valid_ratio": assessment.behavior_valid_ratio,
+        "behavior_window_seconds": assessment.behavior_window_seconds,
+        "behavior_inference_ms": assessment.behavior_inference_ms,
         "person_confidence": assessment.person.confidence,
         "person_box": assessment.person.box,
         "interpretation": "requires_human_verification",
@@ -698,6 +715,15 @@ def _posture_to_out(
         metrics=dict(assessment.metrics),
         pose_confidence=round(assessment.pose_confidence, 3),
         history_seconds=round(assessment.history_seconds, 2),
+        behavior_label=assessment.behavior_label,
+        behavior_confidence=round(assessment.behavior_confidence, 4),
+        behavior_probabilities={
+            label: round(float(probability), 4)
+            for label, probability in assessment.behavior_probabilities.items()
+        },
+        behavior_valid_ratio=round(assessment.behavior_valid_ratio, 4),
+        behavior_window_seconds=round(assessment.behavior_window_seconds, 3),
+        behavior_inference_ms=round(assessment.behavior_inference_ms, 3),
         person=_det_to_out(assessment.person),
         pose_landmarks=pose_landmarks,
         timestamp=assessment.frame_timestamp,
@@ -746,12 +772,18 @@ def _annotate_posture(
             for point in points.values():
                 cv2.circle(out, point, 3, color, -1, cv2.LINE_AA)
 
+        behavior_suffix = ""
+        if assessment.behavior_label:
+            behavior_suffix = (
+                f" | {assessment.behavior_label} "
+                f"{assessment.behavior_confidence:.0%}"
+            )
         if assessment.status == "collecting_history":
-            label = f"POSTURE #{assessment.track_id}: kalibracja"
+            label = f"POSTURE #{assessment.track_id}: kalibracja{behavior_suffix}"
         else:
             label = (
                 f"POSTURE #{assessment.track_id}: "
-                f"{assessment.risk_score:.0%} {assessment.status}"
+                f"{assessment.risk_score:.0%} {assessment.status}{behavior_suffix}"
             )
         x1, y1, x2, _ = assessment.person.box
         text_y = max(18, y1 - 24)
@@ -1009,6 +1041,67 @@ def _annotate_ppe(frame: np.ndarray, detections: list[Detection],
     return out
 
 
+def _align_posture_to_current_people(
+    assessments: list[PostureAssessment],
+    persons: list[Detection],
+    *,
+    frame_width: int,
+    frame_height: int,
+    now: float,
+    source_timestamp: float,
+) -> list[PostureAssessment]:
+    """Move a completed background pose onto the freshest YOLO person box."""
+    if not assessments or not persons:
+        return []
+    remaining = list(persons)
+    aligned: list[PostureAssessment] = []
+    for assessment in assessments:
+        if not remaining:
+            break
+        old_box = assessment.person.box
+        old_cx = (old_box[0] + old_box[2]) / 2.0
+        old_cy = (old_box[1] + old_box[3]) / 2.0
+        best_index = min(
+            range(len(remaining)),
+            key=lambda index: (
+                ((remaining[index].box[0] + remaining[index].box[2]) / 2.0 - old_cx) ** 2
+                + ((remaining[index].box[1] + remaining[index].box[3]) / 2.0 - old_cy) ** 2
+            ),
+        )
+        person = remaining.pop(best_index)
+        landmarks = assessment.landmarks
+        if landmarks is not None:
+            landmarks = transform_cached_landmarks(
+                landmarks,
+                old_box,
+                person.box,
+                old_frame_width=assessment.frame_width or frame_width,
+                old_frame_height=assessment.frame_height or frame_height,
+                new_frame_width=frame_width,
+                new_frame_height=frame_height,
+            )
+        metrics = dict(assessment.metrics)
+        metrics["worker_result_age_ms"] = max(0.0, (now - source_timestamp) * 1000.0)
+        aligned.append(replace(
+            assessment,
+            person=person,
+            landmarks=landmarks,
+            frame_timestamp=now,
+            frame_width=frame_width,
+            frame_height=frame_height,
+            metrics=metrics,
+        ))
+    return aligned
+
+
+def _runtime_options(request: Request, camera_id: str):
+    store = getattr(request.app.state, "runtime_processing_store", None)
+    if store is None:
+        from backend.runtime_options import RuntimeProcessingOptions
+        return RuntimeProcessingOptions(updated_at=time.time())
+    return store.get(camera_id)
+
+
 def _handle_site(
     request: Request,
     frame: np.ndarray,
@@ -1031,29 +1124,18 @@ def _handle_site(
     worker_identifier = getattr(request.app.state, "worker_identifier", None)
     unidentified_monitor = getattr(request.app.state, "unidentified_worker_monitor", None)
     worker_store = getattr(request.app.state, "worker_store", None)
+    runtime = _runtime_options(request, camera_id)
 
-    detections = detector.detect(frame)
-
-    # Debug: inject a synthetic person into the detection list for N frames.
-    inj = request.app.state.debug_inject_person
-    if inj and inj.get("remaining", 0) > 0:
-        fh_i, fw_i = frame.shape[:2]
-        x1n, y1n, x2n, y2n = inj["box_norm"]
-        detections.append(Detection(
-            class_id=0,
-            class_name="person",
-            category="person",
-            box=(int(x1n * fw_i), int(y1n * fh_i),
-                 int(x2n * fw_i), int(y2n * fh_i)),
-            confidence=float(inj["confidence"]),
-        ))
-        inj["remaining"] -= 1
-        if inj["remaining"] <= 0:
-            request.app.state.debug_inject_person = None
+    detector_ran = runtime.requires_detector("site")
+    detections = detector.detect(frame) if detector_ran else []
 
     fh, fw = frame.shape[:2]
-    zones = zone_store.for_camera(camera_id)
-    markers = _scheduled_markers(request, frame, camera_id, zones)
+    needs_zone_geometry = runtime.zones or runtime.distances or runtime.markers
+    zones = zone_store.for_camera(camera_id) if needs_zone_geometry else []
+    markers = (
+        _scheduled_markers(request, frame, camera_id, zones)
+        if runtime.markers else []
+    )
     stored_calibration = calibration_store.get(camera_id)
     calibration = (
         stored_calibration
@@ -1064,39 +1146,51 @@ def _handle_site(
     persons = [d for d in detections if d.category == "person"]
 
     worker_identities: list[WorkerIdentity] = []
-    if worker_identifier is not None and worker_identifier.available:
+    if runtime.worker_id and worker_identifier is not None and worker_identifier.available:
         worker_identities = worker_identifier.process(
             camera_id, frame, persons, now,
         )
     worker_profiles = _worker_profiles(worker_store, worker_identities)
     unidentified_events = (
         unidentified_monitor.update(camera_id, "site", persons, worker_identities, now)
-        if unidentified_monitor is not None else []
+        if runtime.worker_id and unidentified_monitor is not None else []
     )
 
-    # Metric ground-plane proximity is used after ArUco calibration.  Before
-    # calibration the same two-stage logic remains available in pixel space.
-    raw_dangers = danger_detector.evaluate(
-        detections, now, calibration, frame_w=fw, frame_h=fh,
-    )
-    confirmed = temporal_filter.update(raw_dangers, now)
-    dynamic_safety_zones = danger_detector.dynamic_zones(
-        detections, fw, fh, calibration,
-    )
+    # Proximity and static-zone rules are independently switchable at runtime.
+    if runtime.distances:
+        raw_dangers = danger_detector.evaluate(
+            detections, now, calibration, frame_w=fw, frame_h=fh,
+        )
+        confirmed = temporal_filter.update(raw_dangers, now)
+        dynamic_safety_zones = danger_detector.dynamic_zones(
+            detections, fw, fh, calibration,
+        )
+    else:
+        raw_dangers = []
+        confirmed = []
+        dynamic_safety_zones = []
 
-    zones = _resolve_marker_zones(
-        zones, markers, camera_id,
-        request.app.state.marker_zone_cache,
-        now, fw, fh,
+    if runtime.markers:
+        zones = _resolve_marker_zones(
+            zones, markers, camera_id,
+            request.app.state.marker_zone_cache,
+            now, fw, fh,
+        )
+    if runtime.zones:
+        raw_zone_breaches = zone_detector.evaluate(
+            detections, zones, fw, fh, now, calibration,
+        )
+        confirmed_zone_breaches = zone_temporal_filter.update(raw_zone_breaches, now)
+    else:
+        raw_zone_breaches = []
+        confirmed_zone_breaches = []
+    person_distances = (
+        _person_distances(persons, zones, fw, fh, calibration)
+        if runtime.distances and zones else []
     )
-    raw_zone_breaches = zone_detector.evaluate(
-        detections, zones, fw, fh, now, calibration,
-    )
-    confirmed_zone_breaches = zone_temporal_filter.update(raw_zone_breaches, now)
-    person_distances = _person_distances(persons, zones, fw, fh, calibration)
 
     posture_assessments: list[PostureAssessment] = []
-    if posture_manager is not None and posture_manager.available:
+    if runtime.posture and posture_manager is not None and posture_manager.available:
         posture_worker = getattr(request.app.state, "posture_worker", None)
         if posture_worker is None:
             # Compatibility path for small embedded deployments and tests.
@@ -1109,7 +1203,14 @@ def _handle_site(
             posture_worker.submit_latest(camera_id, frame, persons, now)
             posture_snapshot = posture_worker.get_latest(camera_id)
             if posture_snapshot is not None and posture_snapshot.result is not None:
-                posture_assessments = posture_snapshot.result.assessments
+                posture_assessments = _align_posture_to_current_people(
+                    posture_snapshot.result.assessments,
+                    persons,
+                    frame_width=fw,
+                    frame_height=fh,
+                    now=now,
+                    source_timestamp=posture_snapshot.frame_timestamp,
+                )
 
                 # A completed background result can be reused over multiple
                 # YOLO frames. Persist its confirmed alert only once while
@@ -1135,18 +1236,32 @@ def _handle_site(
                 else:
                     seen[camera_id] = result_key
 
-    annotated = _annotate_zones(frame, zones, raw_zone_breaches)
-    annotated = _annotate_dynamic_safety_zones(annotated, dynamic_safety_zones)
-    annotated = _annotate_site(annotated, detections, raw_dangers, confirmed)
-    calibration_ids = (
-        set(stored_calibration.marker_ids) if stored_calibration else set()
+    annotated = frame.copy()
+    if runtime.zones:
+        annotated = _annotate_zones(annotated, zones, raw_zone_breaches)
+    if runtime.distances:
+        annotated = _annotate_dynamic_safety_zones(annotated, dynamic_safety_zones)
+    annotated = _annotate_site(
+        annotated,
+        detections if runtime.boxes else [],
+        raw_dangers if runtime.distances else [],
+        confirmed if runtime.distances else [],
     )
-    annotated = _annotate_markers(annotated, markers, calibration_ids)
-    annotated = _annotate_person_distances(annotated, person_distances)
-    annotated = _annotate_posture(annotated, posture_assessments)
-    annotated = _annotate_worker_ids(annotated, worker_identities)
-    annotated = _annotate_unidentified(annotated, unidentified_events)
-    if evidence_recorder is not None:
+    if runtime.markers:
+        calibration_ids = (
+            set(stored_calibration.marker_ids) if stored_calibration else set()
+        )
+        annotated = _annotate_markers(annotated, markers, calibration_ids)
+    if runtime.distances:
+        annotated = _annotate_person_distances(annotated, person_distances)
+    if runtime.posture:
+        annotated = _annotate_posture(annotated, posture_assessments)
+    if runtime.worker_id:
+        annotated = _annotate_worker_ids(annotated, worker_identities)
+        annotated = _annotate_unidentified(annotated, unidentified_events)
+    if evidence_recorder is not None and (
+        runtime.distances or runtime.zones or runtime.posture or runtime.worker_id
+    ):
         evidence_recorder.push(camera_id, annotated, now)
 
     alert_outs = []
@@ -1210,7 +1325,7 @@ def _handle_site(
             warning_distance_px=zone.warning_distance_px,
         )
         for zone in zones
-        if zone.active and zone.polygon and len(zone.polygon) >= 3
+        if runtime.zones and zone.active and zone.polygon and len(zone.polygon) >= 3
     ]
 
     processing_ms = (time.monotonic() - t0) * 1000
@@ -1221,12 +1336,15 @@ def _handle_site(
         timestamp=now,
         camera_id=camera_id,
         mode="site",
-        detections=[_det_to_out(detection) for detection in detections],
+        detections=[_det_to_out(detection) for detection in detections] if runtime.boxes else [],
         active_dangers=active_outs,
         confirmed_alerts=alert_outs,
         posture_assessments=posture_outs,
         confirmed_posture_alerts=confirmed_posture_outs,
-        posture_available=bool(posture_manager and posture_manager.available),
+        posture_available=bool(runtime.posture and posture_manager and posture_manager.available),
+        behavior_classifier_available=bool(
+            runtime.posture and posture_manager and getattr(posture_manager, "behavior_available", False)
+        ),
         active_zone_breaches=active_zone_outs,
         confirmed_zone_breaches=zone_breach_outs,
         markers=[_marker_to_out(marker) for marker in markers],
@@ -1235,7 +1353,7 @@ def _handle_site(
             for identity in worker_identities
         ],
         unidentified_workers=unidentified_outs,
-        worker_identification_available=bool(worker_identifier and worker_identifier.available),
+        worker_identification_available=bool(runtime.worker_id and worker_identifier and worker_identifier.available),
         dynamic_safety_zones=[
             _dynamic_zone_to_out(zone, fw, fh) for zone in dynamic_safety_zones
         ],
@@ -1244,6 +1362,8 @@ def _handle_site(
         calibration_active=calibration is not None,
         frame_jpeg_b64=preview_jpeg_b64,
         processing_ms=max(0.1, round(processing_ms, 1)),
+        runtime_options={key: bool(value) for key, value in runtime.to_dict().items() if key != "updated_at"},
+        detector_ran=detector_ran,
     )
 
 
@@ -1263,27 +1383,38 @@ def _handle_checkpoint(
     worker_identifier = getattr(request.app.state, "worker_identifier", None)
     unidentified_monitor = getattr(request.app.state, "unidentified_worker_monitor", None)
     worker_store = getattr(request.app.state, "worker_store", None)
+    runtime = _runtime_options(request, camera_id)
 
-    detections = detector.detect(frame)
+    detector_ran = runtime.requires_detector("checkpoint")
+    detections = detector.detect(frame) if detector_ran else []
     persons = [d for d in detections if d.category == "person"]
     worker_identities: list[WorkerIdentity] = []
-    if worker_identifier is not None and worker_identifier.available:
+    if runtime.worker_id and worker_identifier is not None and worker_identifier.available:
         worker_identities = worker_identifier.process(
             camera_id, frame, persons, now,
         )
     worker_profiles = _worker_profiles(worker_store, worker_identities)
     unidentified_events = (
         unidentified_monitor.update(camera_id, "checkpoint", persons, worker_identities, now)
-        if unidentified_monitor is not None else []
+        if runtime.worker_id and unidentified_monitor is not None else []
     )
 
-    events = checker.evaluate(detections, frame_h=frame.shape[0],
-                              frame_timestamp=now)
-    confirmed = checker.confirm(events, now)
-    annotated = _annotate_ppe(frame, detections, confirmed)
-    annotated = _annotate_worker_ids(annotated, worker_identities)
-    annotated = _annotate_unidentified(annotated, unidentified_events)
-    if evidence_recorder is not None:
+    if runtime.ppe:
+        events = checker.evaluate(detections, frame_h=frame.shape[0],
+                                  frame_timestamp=now)
+        confirmed = checker.confirm(events, now)
+    else:
+        events = []
+        confirmed = []
+    annotated = _annotate_ppe(
+        frame,
+        detections if runtime.boxes else [],
+        confirmed if runtime.ppe else [],
+    )
+    if runtime.worker_id:
+        annotated = _annotate_worker_ids(annotated, worker_identities)
+        annotated = _annotate_unidentified(annotated, unidentified_events)
+    if evidence_recorder is not None and (runtime.ppe or runtime.worker_id):
         evidence_recorder.push(camera_id, annotated, now)
 
     check_outs = []
@@ -1320,16 +1451,18 @@ def _handle_checkpoint(
         timestamp=now,
         camera_id=camera_id,
         mode="checkpoint",
-        detections=[_det_to_out(detection) for detection in detections],
+        detections=[_det_to_out(detection) for detection in detections] if runtime.boxes else [],
         ppe_checks=check_outs,
         worker_identifications=[
             _worker_to_out(identity, worker_profiles.get(identity.worker_id))
             for identity in worker_identities
         ],
         unidentified_workers=unidentified_outs,
-        worker_identification_available=bool(worker_identifier and worker_identifier.available),
+        worker_identification_available=bool(runtime.worker_id and worker_identifier and worker_identifier.available),
         frame_jpeg_b64=preview_jpeg_b64,
         processing_ms=max(0.1, round(processing_ms, 1)),
+        runtime_options={key: bool(value) for key, value in runtime.to_dict().items() if key != "updated_at"},
+        detector_ran=detector_ran,
     )
 
 
