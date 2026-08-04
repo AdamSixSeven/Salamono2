@@ -1,3 +1,4 @@
+
 import os
 import sys
 import threading
@@ -7,6 +8,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from backend.detector import Detection
+import backend.posture_detector as posture_module
 from backend.posture_detector import (
     PostureAnalyzer,
     PostureProcessResult,
@@ -78,6 +80,7 @@ def test_analyzer_uses_crop_of_largest_qualifying_person_and_maps_pose_back():
     # Stabilized square crop uses 24% margin and clips to the frame.
     assert estimator.calls[0][0] == (200, 268, 3)
     assert len(result.assessments) == 1
+
     assessment = result.assessments[0]
     assert assessment.person is largest
     assert assessment.frame_width == 300
@@ -106,7 +109,7 @@ def test_analyzer_limits_crop_inference_to_configured_largest_people():
     ]
 
 
-def test_cached_landmarks_are_private_and_follow_current_person_box():
+def test_cached_landmarks_are_private_and_translate_without_stretching():
     estimator = RecordingEstimator()
     analyzer = PostureAnalyzer(estimator, _config(sample_fps=5.0))
     frame = np.zeros((480, 640, 3), dtype=np.uint8)
@@ -122,10 +125,12 @@ def test_cached_landmarks_are_private_and_follow_current_person_box():
     assert new_landmarks is not None
     assert not np.shares_memory(old_landmarks, new_landmarks)
 
-    old_center = ((190 + 450) * 0.5, (80 + 470) * 0.5)
-    new_center = ((210 + 500) * 0.5, (90 + 470) * 0.5)
-    expected_x = old_landmarks[11, 0] + (new_center[0] - old_center[0]) / 640
-    expected_y = old_landmarks[11, 1] + (new_center[1] - old_center[1]) / 480
+    old_x_px = old_landmarks[11, 0] * 640
+    old_y_px = old_landmarks[11, 1] * 480
+    old_center = ((190 + 450) / 2, (80 + 470) / 2)
+    new_center = ((210 + 500) / 2, (90 + 470) / 2)
+    expected_x = (old_x_px + new_center[0] - old_center[0]) / 640
+    expected_y = (old_y_px + new_center[1] - old_center[1]) / 480
     assert np.isclose(new_landmarks[11, 0], expected_x)
     assert np.isclose(new_landmarks[11, 1], expected_y)
 
@@ -133,6 +138,89 @@ def test_cached_landmarks_are_private_and_follow_current_person_box():
     new_landmarks[11, 0] = 0.0
     assert np.array_equal(old_landmarks, preserved)
     assert cached.assessments[0].confirmed is False
+    assert sampled.timings_ms["mediapipe_ms"] > 0.0
+    assert sampled.timings_ms["optical_flow_ms"] == 0.0
+    assert cached.timings_ms["mediapipe_ms"] == 0.0
+    assert cached.timings_ms["optical_flow_ms"] > 0.0
+    assert cached.timings_ms["tcn_ms"] == 0.0
+
+
+def test_analyzer_skips_grayscale_when_no_person_is_posture_eligible(monkeypatch):
+    estimator = RecordingEstimator()
+    analyzer = PostureAnalyzer(
+        estimator,
+        _config(
+            min_person_height_frac=0.80,
+            min_person_long_side_frac=0.80,
+            min_person_area_frac=0.50,
+        ),
+    )
+    gray_calls = []
+    original = posture_module._scaled_optical_flow_gray
+
+    def recording_gray(frame, scale):
+        gray_calls.append((frame.shape, scale))
+        return original(frame, scale)
+
+    monkeypatch.setattr(posture_module, "_scaled_optical_flow_gray", recording_gray)
+    frame = np.zeros((200, 300, 3), dtype=np.uint8)
+
+    empty = analyzer.process(frame, [], 1.0)
+    too_small = analyzer.process(frame, [_person((10, 10, 30, 40))], 2.0)
+
+    assert empty.assessments == []
+    assert too_small.assessments == []
+    assert estimator.calls == []
+    assert gray_calls == []
+    assert analyzer._previous_gray is None
+
+
+def test_analyzer_skips_grayscale_when_cached_pose_no_longer_needs_propagation(
+    monkeypatch,
+):
+    estimator = RecordingEstimator()
+    analyzer = PostureAnalyzer(
+        estimator,
+        _config(sample_fps=5.0, cached_result_ttl_seconds=0.01),
+    )
+    gray_calls = []
+    original = posture_module._scaled_optical_flow_gray
+
+    def recording_gray(frame, scale):
+        gray_calls.append((frame.shape, scale))
+        return original(frame, scale)
+
+    monkeypatch.setattr(posture_module, "_scaled_optical_flow_gray", recording_gray)
+    frame = np.zeros((200, 300, 3), dtype=np.uint8)
+    person = _person((40, 10, 260, 195))
+
+    sampled = analyzer.process(frame, [person], 1.0)
+    expired_cache = analyzer.process(frame, [person], 1.05)
+
+    assert len(sampled.assessments) == 1
+    assert expired_cache.inference_ran is False
+    assert expired_cache.assessments == []
+    # Only the successful MediaPipe sample creates a future flow reference.
+    assert len(gray_calls) == 1
+    assert expired_cache.timings_ms["optical_flow_ms"] == 0.0
+
+
+def test_analyzer_builds_scaled_flow_reference_with_default_and_custom_scale():
+    frame = np.zeros((200, 300, 3), dtype=np.uint8)
+    person = _person((40, 10, 260, 195))
+
+    default_analyzer = PostureAnalyzer(RecordingEstimator(), _config())
+    default_analyzer.process(frame, [person], 1.0)
+    assert default_analyzer._previous_gray is not None
+    # PostureConfig intentionally has no required field yet: getattr fallback.
+    assert default_analyzer._previous_gray.shape == (100, 150)
+
+    custom_config = _config()
+    custom_config.optical_flow_scale = 0.25
+    custom_analyzer = PostureAnalyzer(RecordingEstimator(), custom_config)
+    custom_analyzer.process(frame, [person], 1.0)
+    assert custom_analyzer._previous_gray is not None
+    assert custom_analyzer._previous_gray.shape == (50, 75)
 
 
 class BlockingManager:
@@ -141,6 +229,7 @@ class BlockingManager:
         self.started = threading.Event()
         self.release = threading.Event()
         self.calls: list[tuple[float, np.ndarray, list[Detection]]] = []
+        self.reset_calls: list[str] = []
 
     def process(
         self,
@@ -155,8 +244,12 @@ class BlockingManager:
         self.calls.append((timestamp, frame.copy(), persons))
         return PostureProcessResult([], inference_ran=True)
 
+
     def close(self) -> None:
         pass
+
+    def reset_camera(self, camera_id: str) -> None:
+        self.reset_calls.append(camera_id)
 
 
 def test_posture_worker_has_one_pending_slot_and_replaces_it_with_latest():
@@ -198,6 +291,41 @@ def test_posture_worker_has_one_pending_slot_and_replaces_it_with_latest():
         worker.close()
 
 
+def test_posture_worker_reset_waits_and_drops_old_run_snapshot():
+    manager = BlockingManager()
+    worker = PostureWorker(manager)
+    reset_finished = threading.Event()
+    reset_result: list[bool] = []
+
+    try:
+        assert worker.submit_latest(
+            "demo",
+            np.zeros((8, 8, 3), dtype=np.uint8),
+            [_person((1, 1, 7, 7))],
+            1.0,
+        )
+        assert manager.started.wait(1.0)
+
+        def reset():
+            reset_result.append(worker.reset_camera("demo", timeout=1.0))
+            reset_finished.set()
+
+        reset_thread = threading.Thread(target=reset)
+        reset_thread.start()
+        assert not reset_finished.wait(0.05)
+        manager.release.set()
+        reset_thread.join(1.0)
+
+        assert reset_finished.is_set()
+        assert reset_result == [True]
+        assert manager.reset_calls == ["demo"]
+        assert worker.get_latest_result("demo") is None
+    finally:
+        manager.release.set()
+        worker.close()
+
+
+
 def test_optical_flow_tracks_visible_landmarks_between_pose_samples():
     from backend.posture_detector import track_pose_optical_flow
 
@@ -230,3 +358,38 @@ def test_optical_flow_tracks_visible_landmarks_between_pose_samples():
     assert count >= 8
     assert tracked[11, 0] > pose[11, 0]
     assert tracked[11, 1] > pose[11, 1]
+
+
+def test_optical_flow_maps_full_frame_bbox_and_landmarks_to_scaled_images():
+    import cv2
+    from backend.posture_detector import track_pose_optical_flow
+
+    full_width, full_height = 160, 120
+    flow_width, flow_height = 80, 60
+    previous = np.zeros((flow_height, flow_width), dtype=np.uint8)
+    current = np.zeros_like(previous)
+    pose = _pose()
+    for landmark in pose:
+        x = int(round(float(landmark[0]) * flow_width))
+        y = int(round(float(landmark[1]) * flow_height))
+        cv2.circle(previous, (x, y), 2, 255, -1)
+        cv2.circle(current, (x + 2, y + 1), 2, 255, -1)
+
+    tracked, count = track_pose_optical_flow(
+        previous,
+        current,
+        pose,
+        pose.copy(),
+        frame_width=full_width,
+        frame_height=full_height,
+        bbox=(20, 10, 140, 115),
+        min_visibility=0.5,
+        fb_threshold_px=2.0,
+        max_jump_frac=0.2,
+    )
+
+    assert count >= 8
+    # A two-pixel shift on the half-width image is still 0.025 normalized.
+    assert np.isclose(tracked[11, 0] - pose[11, 0], 2 / flow_width, atol=0.006)
+    assert np.isclose(tracked[11, 1] - pose[11, 1], 1 / flow_height, atol=0.006)
+    assert np.array_equal(tracked[:, 2:], pose[:, 2:])

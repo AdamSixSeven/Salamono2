@@ -42,6 +42,21 @@ def _worker_store(request: Request) -> WorkerStore:
     return store
 
 
+def _invalidate_worker_profile_cache(request: Request, worker_id: str) -> None:
+    """Keep profile and marker lookup caches coherent after successful CRUD."""
+    cache = getattr(request.app.state, "worker_profile_cache", None)
+    if cache is not None:
+        cache.invalidate(worker_id)
+    identifier = getattr(request.app.state, "worker_identifier", None)
+    invalidate_marker_index = getattr(
+        identifier,
+        "invalidate_marker_index",
+        None,
+    )
+    if callable(invalidate_marker_index):
+        invalidate_marker_index()
+
+
 def _clean_path_worker_id(worker_id: str) -> str:
     worker_id = worker_id.strip()
     if (
@@ -215,6 +230,7 @@ def create_worker(request: Request, payload: WorkerCreateIn):
         )
     except DuplicateWorkerError:
         raise HTTPException(409, "worker_id already exists")
+    _invalidate_worker_profile_cache(request, worker.worker_id)
     return _profile_out(worker)
 
 
@@ -241,6 +257,7 @@ def update_worker(request: Request, worker_id: str, payload: WorkerUpdateIn):
     )
     if worker is None:
         raise HTTPException(404, "worker not found")
+    _invalidate_worker_profile_cache(request, worker_id)
     return _profile_out(worker)
 
 
@@ -249,4 +266,5 @@ def delete_worker(request: Request, worker_id: str):
     worker_id = _clean_path_worker_id(worker_id)
     if not _worker_store(request).delete(worker_id):
         raise HTTPException(404, "worker not found")
+    _invalidate_worker_profile_cache(request, worker_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)

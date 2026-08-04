@@ -187,6 +187,16 @@ class TestZoneTemporalFilter:
         assert len(confirmed) == 2
         assert {c.zone.id for c in confirmed} == {"a", "b"}
 
+    def test_camera_scopes_are_independent_and_resettable(self):
+        tf = ZoneTemporalFilter(required=2, cooldown_sec=1.0)
+        tf.update([self._event(ts=1.0)], 1.0, "live")
+        tf.update([self._event(ts=1.0)], 1.0, "demo")
+
+        tf.reset_camera("demo")
+
+        assert len(tf.update([self._event(ts=2.0)], 2.0, "live")) == 1
+        assert tf.update([self._event(ts=2.0)], 2.0, "demo") == []
+
 
 def test_signed_distance_to_polygon_inside_and_outside():
     from backend.zone_rules import signed_distance_to_polygon

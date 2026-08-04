@@ -14,8 +14,8 @@ INTERPOLATION = INTERPOLATION_PATH.read_text(encoding="utf-8")
 
 
 def test_posture_interpolation_is_loaded_before_overlay_and_uses_short_raf():
-    interpolation_asset = "posture_interpolation.js?v=2.2.0"
-    overlay_asset = "zones.js?v=2.2.0"
+    interpolation_asset = "posture_interpolation.js?v=2.3.0"
+    overlay_asset = "zones.js?v=2.3.0"
 
     assert interpolation_asset in INDEX
     assert INDEX.index(interpolation_asset) < INDEX.index(overlay_asset)

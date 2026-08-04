@@ -7,8 +7,14 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from backend.detector import Detection
-from backend.posture_detector import PostureAnalyzer, PostureManager
+from backend.posture_detector import (
+    PostureAnalyzer,
+    PostureAssessment,
+    PostureManager,
+    _Track,
+)
 from config import PostureConfig
+from pose_event.state_machine import EventDecision
 
 
 class SequenceEstimator:
@@ -140,6 +146,51 @@ def test_sampling_returns_cached_score_without_duplicate_confirmation():
     assert cached.assessments[0].confirmed is False
 
 
+def test_cached_learned_confirmation_is_emitted_only_once():
+    analyzer = PostureAnalyzer(
+        SequenceEstimator([make_pose()]),
+        cfg(learned_events_enabled=True, heuristic_alerts_enabled=False),
+    )
+    track = _Track(track_id=7, last_box=person().box, last_seen=10.0)
+    track.behavior_prediction_version = 3
+    track.behavior_last_prediction_at = 10.0
+    track.learned_decision = EventDecision(
+        event_type="fall_detected",
+        severity="DANGER",
+        status="confirmed_direct_fall",
+        confirmed=True,
+        score=0.99,
+        reason="test confirmation",
+    )
+    assessment = PostureAssessment(
+        track_id=7,
+        person=person(),
+        risk_score=0.0,
+        severity="OK",
+        status="normal",
+        signals=[],
+        metrics={},
+        frame_timestamp=10.0,
+        pose_confidence=0.95,
+        history_seconds=2.0,
+    )
+
+    first = analyzer._merge_behavior_assessment(track, assessment, 10.0)
+    cached = analyzer._merge_behavior_assessment(track, assessment, 10.1)
+
+    assert first.confirmed is True
+    assert cached.confirmed is False
+    assert cached.learned_event_type == "fall_detected"
+    assert cached.severity == "DANGER"
+
+    # A genuinely new classifier decision gets its own single emission.
+    track.behavior_prediction_version += 1
+    new_prediction = analyzer._merge_behavior_assessment(track, assessment, 10.2)
+    replay = analyzer._merge_behavior_assessment(track, assessment, 10.3)
+    assert new_prediction.confirmed is True
+    assert replay.confirmed is False
+
+
 def test_manager_accepts_injected_estimator_without_mediapipe_model():
     estimator = SequenceEstimator([make_pose()])
     manager = PostureManager(
@@ -202,3 +253,41 @@ def test_repeated_hand_to_mouth_pattern_creates_verification_candidate():
     assert candidates[-1].status == "verification_required"
     assert candidates[-1].metrics["hand_to_mouth_fraction"] >= 0.55
     assert any(o.confirmed for o in candidates)
+
+
+class TrackAwareEstimator:
+    def __init__(self):
+        self.track_ids = []
+        self.closed = False
+
+    def estimate_for_track(self, frame_bgr, timestamp_ms, track_id):
+        self.track_ids.append(track_id)
+        return [make_pose()]
+
+    def estimate(self, frame_bgr, timestamp_ms):
+        raise AssertionError("multi-track posture path should be used")
+
+    def close(self):
+        self.closed = True
+
+
+def test_posture_analyzes_four_independent_person_boxes():
+    estimator = TrackAwareEstimator()
+    config = cfg(max_poses=4, sample_fps=15.0)
+    analyzer = PostureAnalyzer(estimator, config)
+    frame = np.zeros((1000, 3200, 3), dtype=np.uint8)
+    people = [
+        Detection(0, "person", "person", (400, 200, 620, 800), 0.95),
+        Detection(0, "person", "person", (1050, 200, 1270, 800), 0.95),
+        Detection(0, "person", "person", (1700, 200, 1920, 800), 0.95),
+        Detection(0, "person", "person", (2350, 200, 2570, 800), 0.95),
+        # Fifth person is deliberately smaller and must be skipped by max_poses.
+        Detection(0, "person", "person", (2850, 500, 2950, 800), 0.95),
+    ]
+
+    result = analyzer.process(frame, people, 0.0)
+
+    assert result.inference_ran is True
+    assert len(result.assessments) == 4
+    assert len(set(estimator.track_ids)) == 4
+    assert len(estimator.track_ids) == 4

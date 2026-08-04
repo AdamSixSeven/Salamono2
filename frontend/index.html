@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Perimetr — Panel kierownika</title>
-    <link rel="stylesheet" href="style.css?v=2.2.0">
+    <link rel="stylesheet" href="style.css?v=2.3.0">
     <script src="https://unpkg.com/lucide@latest" defer></script>
 </head>
 <body>
@@ -20,9 +20,19 @@
         </nav>
     </div>
     <div class="px-header-right">
-        <div class="px-segmented" id="modeSegmented">
-            <button type="button" data-mode="site" class="active">Plac</button>
-            <button type="button" data-mode="checkpoint">Bramka</button>
+        <div class="px-mode-tools">
+            <button class="px-ai-mode-btn" id="aiModeBtn" type="button"
+                    aria-label="Analiza AI i zapis filmu" title="Przetwórz cały film i zapisz MP4">
+                <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                    <path d="M9.5 4.5A3 3 0 0 0 5 7.1a3.2 3.2 0 0 0-1 5.9 3.5 3.5 0 0 0 4 5.5c.5 1 1.5 1.5 2.5 1.5V4.5Z"/>
+                    <path d="M14.5 4.5A3 3 0 0 1 19 7.1a3.2 3.2 0 0 1 1 5.9 3.5 3.5 0 0 1-4 5.5c-.5 1-1.5 1.5-2.5 1.5V4.5Z"/>
+                    <path d="M5 9.5h2.2M17 9.5h2M7.5 15c1.2 0 2-.8 2-2M16.5 15c-1.2 0-2-.8-2-2"/>
+                </svg>
+            </button>
+            <div class="px-segmented" id="modeSegmented">
+                <button type="button" data-mode="site" class="active">Plac</button>
+                <button type="button" data-mode="checkpoint">Bramka</button>
+            </div>
         </div>
         <div class="px-status" id="connectionStatus">
             <span class="px-status-dot"></span>
@@ -32,12 +42,27 @@
         <button class="px-btn" id="demoVideoBtn" type="button">
             <i data-lucide="file-video"></i>Wczytaj film
         </button>
-        <input id="demoVideoInput" type="file" accept="video/*" hidden>
+        <button class="px-btn px-btn--danger hidden" id="demoVideoStopBtn" type="button">
+            <i data-lucide="square"></i>Zatrzymaj
+        </button>
+        <button class="px-btn hidden" id="demoVideoChangeBtn" type="button">
+            <i data-lucide="folder-open"></i>Zmień film
+        </button>
+        <input id="demoVideoInput" type="file"
+               accept=".mp4,.avi,.mov,.mkv,video/mp4,video/quicktime,video/x-msvideo,video/x-matroska"
+               hidden>
         <button class="px-btn" id="pairPhoneBtn" type="button">
             <i data-lucide="qr-code"></i>Podłącz telefon
         </button>
     </div>
 </header>
+
+<div class="px-demo-job hidden" id="demoVideoStatusPanel" role="status" aria-live="polite">
+    <span class="px-demo-job-label">Film demonstracyjny</span>
+    <strong id="demoVideoStatusText">—</strong>
+    <span class="px-demo-job-meta" id="demoVideoStatusMeta"></span>
+    <progress class="px-demo-progress hidden" id="demoVideoProgress" max="100" value="0">0%</progress>
+</div>
 
 <div class="px-alarm-banner hidden" id="alarmBanner">
     <div>
@@ -159,7 +184,6 @@
             </div>
 
             <div class="px-zone-list" id="zoneList"></div>
-
 
             <div class="px-draw-panel hidden" id="zoneDrawPanel">
                 <input id="zoneName" type="text" placeholder="Nazwa (np. Wykop A)" maxlength="40">
@@ -311,9 +335,9 @@
     </div>
 </div>
 
-<script src="posture_interpolation.js?v=2.2.0"></script>
-<script src="app.js?v=2.2.0"></script>
-<script src="zones.js?v=2.2.0"></script>
+<script src="posture_interpolation.js?v=2.3.0"></script>
+<script src="app.js?v=2.3.0"></script>
+<script src="zones.js?v=2.3.0"></script>
 <script>
   document.addEventListener("DOMContentLoaded", () => {
     if (window.lucide) window.lucide.createIcons();

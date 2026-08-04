@@ -112,15 +112,6 @@
         .status-err { background: rgba(221, 33, 28, 0.15); color: #ff8480; }
         .status-idle { background: #1a1a1a; color: #6B6B6B; }
         #stats { font-size: 12px; color: #6B6B6B; margin-top: 8px; font-family: var(--font-mono, monospace); }
-        .camera-hint {
-            width: 100%;
-            max-width: 640px;
-            margin-top: 8px;
-            color: #888;
-            font-size: 12px;
-            line-height: 1.45;
-            text-align: center;
-        }
         .voice-toggle {
             display: flex;
             align-items: center;
@@ -272,7 +263,6 @@
         var depthCaptureBtn = document.getElementById("depthCaptureBtn");
         var depthBoardDownload = document.getElementById("depthBoardDownload");
         var depthCaptureStatus = document.getElementById("depthCaptureStatus");
-
         var voiceSupported = "speechSynthesis" in window;
         var voiceCooldownMs = 5000;
         var lastSpokenAt = {}; // message-key → epoch ms
@@ -296,7 +286,6 @@
             pickPolishVoice();
             speechSynthesis.onvoiceschanged = pickPolishVoice;
         }
-
         var COOLDOWN_MS = { shout: 2000, danger: 5000, warning: 5000 };
 
         function speak(text, key, priority) {
@@ -328,7 +317,6 @@
 
         function announceAlerts(data) {
             if (!voiceToggle.checked) return;
-
             (data.confirmed_zone_breaches || []).forEach(function(b) {
                 var isApproach = b.rule_name === "zone_approach";
                 var isDanger = b.severity === "DANGER" && !isApproach;
@@ -341,7 +329,6 @@
                 speak(text, "zone_" + b.zone_id + "_" + b.rule_name + "_" + b.severity,
                       isDanger ? "danger" : "warning");
             });
-
             (data.confirmed_alerts || []).forEach(function(a) {
                 var isOverlap = a.rule_name === "person_vehicle_overlap";
                 var isDanger = a.severity === "DANGER";
@@ -356,7 +343,6 @@
                 speak(text, "hazard_" + a.rule_name,
                       isDanger ? "danger" : "warning");
             });
-
             (data.confirmed_posture_alerts || []).forEach(function(p) {
                 var danger = p.severity === "DANGER";
                 var signals = p.signals || [];
@@ -381,7 +367,6 @@
             (data.unidentified_workers || []).forEach(function(u) {
                 speak("Uwaga: osoba bez rozpoznanego identyfikatora", "worker_id_missing", "warning");
             });
-
             (data.ppe_checks || []).forEach(function(c) {
                 if (c.severity !== "DANGER" || !c.missing || !c.missing.length) return;
                 var missing = c.missing.slice().sort();
@@ -510,7 +495,6 @@
             if (!preferred || preferred.deviceId === currentId || mainCameraScore(preferred) <= 0) {
                 return null;
             }
-
             var currentLabel = current ? current.label : "";
             var preferredIsExplicitMain = /main|primary|głów|glown/i.test(preferred.label || "");
             if (isAuxiliaryLens(currentLabel) || isFrontCamera(currentLabel) || preferredIsExplicitMain) {
@@ -800,6 +784,8 @@
 
         function sendOneFrame() {
             if (!running) return;
+            // Backpressure: jeśli poprzednia klatka jeszcze leci, poczekaj.
+            // Tempo wysyłania samo dostraja się do throughput backendu.
             if (inFlight) {
                 framesSkipped++;
                 scheduleNext(20);

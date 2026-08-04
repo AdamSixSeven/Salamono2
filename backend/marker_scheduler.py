@@ -137,6 +137,10 @@ class MarkerScheduler:
             self._states.move_to_end(str(camera_id))
             return _copy_detections(state.detections)
 
+    def reset_camera(self, camera_id: str) -> None:
+        with self._lock:
+            self._states.pop(str(camera_id), None)
+
     def process(
         self,
         camera_id: str,
@@ -146,6 +150,7 @@ class MarkerScheduler:
         calibration: bool = False,
         force: bool = False,
         now: float | None = None,
+        timing_callback: Callable[[float], None] | None = None,
     ) -> list[MarkerDetection]:
         """Return a fresh or cached detection list for ``camera_id``.
 
@@ -188,7 +193,11 @@ class MarkerScheduler:
             # MarkerDetector owns a reusable OpenCV detector.  Keeping the
             # call under the scheduler lock serializes concurrent preview and
             # ingest requests and makes the whole wrapper thread-safe.
+            detection_started = time.perf_counter()
             detected = self._detector.detect(frame)
+            detection_ms = (time.perf_counter() - detection_started) * 1000.0
+            if timing_callback is not None:
+                timing_callback(detection_ms)
             bounded = tuple(
                 _copy_detection(item)
                 for item in detected[: self._max_markers_per_camera]

@@ -280,11 +280,17 @@ class TemporalFilter:
         vc = center(event.hazard.box)
         return f"{event.rule_name}_{pc}_{vc}"
 
-    def update(self, events: list[DangerEvent], now: float) -> list[DangerEvent]:
+    def update(
+        self,
+        events: list[DangerEvent],
+        now: float,
+        camera_id: str | None = None,
+    ) -> list[DangerEvent]:
+        scope = f"{camera_id}:" if camera_id is not None else ""
         current_keys = set()
         confirmed = []
         for event in events:
-            key = self._pair_key(event)
+            key = scope + self._pair_key(event)
             current_keys.add(key)
             self._streak[key] += 1
             if self._streak[key] >= self.required:
@@ -294,7 +300,25 @@ class TemporalFilter:
                     confirmed.append(event)
                     self._last_alert_time[key] = now
 
-        dead = [key for key in self._streak if key not in current_keys]
+        # A frame may only retire streaks belonging to its own camera.  Demo
+        # playback and live cameras share this filter, so clearing every key
+        # here would make their temporal state interfere with one another.
+        dead = [
+            key for key in self._streak
+            if key.startswith(scope) and key not in current_keys
+        ] if scope else [
+            key for key in self._streak if key not in current_keys
+        ]
         for key in dead:
             del self._streak[key]
         return confirmed
+
+    def reset_camera(self, camera_id: str | None = None) -> None:
+        if camera_id is None:
+            self._streak.clear()
+            self._last_alert_time.clear()
+            return
+        prefix = f"{camera_id}:"
+        for mapping in (self._streak, self._last_alert_time):
+            for key in [key for key in mapping if key.startswith(prefix)]:
+                mapping.pop(key, None)

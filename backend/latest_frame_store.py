@@ -179,6 +179,10 @@ class LatestFrameStore:
             content_type=item.content_type,
         )
 
+    def remove(self, camera_id: str) -> None:
+        with self._lock:
+            self._frames.pop(str(camera_id), None)
+
     def __len__(self) -> int:
         with self._lock:
             return len(self._frames)

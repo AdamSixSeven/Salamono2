@@ -59,6 +59,13 @@ async def patch_runtime_options(
     if posture_worker is not None and "posture" in changes:
         posture_worker.set_camera_enabled(camera_id, bool(changes["posture"]))
 
+    worker_id_worker = getattr(request.app.state, "worker_id_worker", None)
+    if worker_id_worker is not None and "worker_id" in changes:
+        worker_id_worker.set_camera_enabled(
+            camera_id,
+            bool(changes["worker_id"]),
+        )
+
     return _payload(options, mode)
 
 
@@ -68,4 +75,7 @@ async def reset_runtime_options(camera_id: str, request: Request, mode: str = "s
     posture_worker = getattr(request.app.state, "posture_worker", None)
     if posture_worker is not None:
         posture_worker.set_camera_enabled(camera_id, options.posture)
+    worker_id_worker = getattr(request.app.state, "worker_id_worker", None)
+    if worker_id_worker is not None:
+        worker_id_worker.set_camera_enabled(camera_id, options.worker_id)
     return _payload(options, mode)

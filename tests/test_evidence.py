@@ -104,8 +104,35 @@ def test_close_flushes_completed_pre_and_post_clip(tmp_path):
     assert path.stat().st_size > 0
     capture = cv2.VideoCapture(str(path))
     try:
-        # Two pre-event and two post-event samples survive the asynchronous
-        # preliminary/final replacement.
+        # Two pre-event and two post-event samples survive one final encode.
         assert int(capture.get(cv2.CAP_PROP_FRAME_COUNT)) >= 4
     finally:
         capture.release()
+
+
+def test_post_event_trigger_defers_writer_and_encodes_once(tmp_path):
+    cfg = EvidenceConfig(
+        enabled=True,
+        clips_dir=str(tmp_path),
+        pre_seconds=1.0,
+        post_seconds=0.5,
+        sample_fps=4.0,
+    )
+    recorder = EvidenceRecorder(cfg)
+    writes = []
+    original = recorder._write_job
+
+    def counted(job):
+        writes.append(job)
+        original(job)
+
+    recorder._write_job = counted
+    recorder.push("cam", np.zeros((64, 96, 3), np.uint8), 10.0)
+    recorder.trigger("cam", "single", 10.0)
+    try:
+        assert len(recorder._write_jobs) == 0
+        assert writes == []
+        recorder.push("cam", np.ones((64, 96, 3), np.uint8), 10.5)
+    finally:
+        recorder.close()
+    assert len(writes) == 1

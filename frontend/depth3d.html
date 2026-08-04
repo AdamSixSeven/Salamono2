@@ -4,14 +4,17 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Perimetr — Głębia</title>
-    <link rel="stylesheet" href="style.css?v=2.2.0">
+    <link rel="stylesheet" href="style.css?v=2.3.0">
     <script src="https://unpkg.com/lucide@latest" defer></script>
     <style>
         .d3-wrap{width:min(1240px,calc(100% - 32px));margin:0 auto;padding:26px 0 50px;display:grid;gap:18px}
         .d3-hero{padding-bottom:18px;border-bottom:1px solid var(--rule)}
         .d3-hero h1{margin:0 0 8px;font-family:var(--font-display);font-size:clamp(30px,4vw,44px);font-weight:300;color:var(--ink)}
+        .d3-hero p{max-width:900px;margin:0;color:var(--ink-3);font-size:13px;line-height:1.55}
+        .d3-warning{padding:12px 14px;border:1px solid #C78300;background:#FFF7E6;color:#6E4900;font-size:12px;line-height:1.5}
         .d3-card{padding:18px;background:var(--surface);border:1px solid var(--rule);border-radius:3px}
         .d3-card h2{margin:0;color:var(--msbp-red);font-family:var(--font-display);font-size:18px;font-weight:400;letter-spacing:.06em;text-transform:uppercase}
+        
         .d3-row{display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end}
         .d3-field{display:flex;flex:1 1 145px;flex-direction:column;gap:5px;min-width:0}
         .d3-field label{color:var(--ink-3);font-size:10px;font-weight:650;letter-spacing:.12em;text-transform:uppercase}
@@ -65,10 +68,13 @@
 <main class="d3-wrap">
     <section class="d3-hero">
         <h1>Odległość osób z jednej kamery</h1>
+        <p>Depth Anything V2 Metric Indoor estymuje głębokość każdego piksela, a YOLO przypisuje odległość do wykrytych osób. Klasyczna szachownica służy wyłącznie do kalibracji obiektywu i korekcji dystorsji; pomiar głębi może działać także przed kalibracją.</p>
     </section>
 
+    <div class="d3-warning"><strong>Ograniczenie:</strong> wynik jest estymacją monokularną, nie bezpośrednim pomiarem stereo, ToF ani LiDAR. Wartość należy zweryfikować na rzeczywistych dystansach i stosować margines bezpieczeństwa.</div>
+
     <section class="d3-card">
-        <h2>Kalibracja obiektywu</h2>
+        <h2>1 · Kalibracja obiektywu — zwykła szachownica</h2>
         <div class="d3-profile-bar">
             <div class="d3-field"><label>Profil kalibracji</label><select id="profileSelect"><option value="">Ładowanie…</option></select></div>
             <button class="px-btn" id="newProfile">Nowy profil</button>
@@ -91,13 +97,14 @@
             <button class="px-btn px-btn--solid" id="calibrateBtn">Oblicz kalibrację</button>
         </div>
         <div class="d3-progress"><span id="captureProgress"></span></div>
-        <div class="d3-status" id="calibrationStatus">Brak aktywnej kamery.</div>
+        <div class="d3-status" id="calibrationStatus">Ładowanie stanu…</div>
         <div class="d3-views-head"><strong>Zapisane widoki</strong><span id="viewsSummary" class="d3-tip" style="margin:0">0 widoków</span></div>
         <div class="d3-views" id="viewsList"><div class="d3-empty-views">Brak zapisanych widoków w tym profilu.</div></div>
+        <div class="d3-tip">Po kalibracji nie zmieniaj obiektywu, orientacji telefonu, rozdzielczości ani cropu. Usunięcie pojedynczego widoku unieważnia wynik profilu — kliknij wtedy ponownie „Oblicz kalibrację”.</div>
     </section>
 
     <section class="d3-card">
-        <h2>Głębia i odległość od kamery</h2>
+        <h2>2 · Głębia na GPU i odległość od kamery</h2>
         <div class="d3-actions">
             <button class="px-btn px-btn--solid" id="startDepth">Uruchom na żywo</button>
             <button class="px-btn" id="singleDepth">Jedna inferencja</button>
@@ -117,14 +124,14 @@
             <div><span>YOLO osoby</span><strong id="personMeta">—</strong></div>
             <div><span>Backend łącznie</span><strong id="pipelineMeta">—</strong></div>
         </div>
-        <div class="d3-measure" id="peopleResult">Brak wyników.</div>
-        <div class="d3-measure" id="measureResult">Brak pomiaru.</div>
-        <div class="d3-status" id="depthStatus">Gotowy.</div>
+        <div class="d3-measure" id="peopleResult">Automatyczne odległości osób pojawią się po pierwszej inferencji.</div>
+        <div class="d3-measure" id="measureResult">Kliknij wybrany obiekt. Zostanie pokazana estymowana głębokość Z względem kamery.</div>
+        <div class="d3-status" id="depthStatus">Moduł oczekuje.</div>
     </section>
 
 
     <section class="d3-card">
-        <h2>Korekcja metryczna</h2>
+        <h2>3 · Korekcja metryczna z punktów kontrolnych</h2>
         <div class="d3-row">
             <div class="d3-field"><label>Etykieta punktu</label><input id="metricPointLabel" type="text" placeholder="Etykieta"></div>
             <div class="d3-field" style="max-width:220px"><label>Rzeczywista odległość [m]</label><input id="metricDistance" type="number" min="0.05" max="200" step="0.01" value="3.00"></div>
@@ -141,6 +148,6 @@
     </section>
 
 </main>
-<script src="depth3d.js?v=2.2.0"></script>
+<script src="depth3d.js?v=2.3.0"></script>
 </body>
 </html>

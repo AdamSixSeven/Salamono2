@@ -13,7 +13,10 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import logging
 import os
+import shutil
+import subprocess
 import threading
+import time
 import uuid
 
 import cv2
@@ -90,19 +93,41 @@ class EvidenceRecorder:
         )
         return bytes(buf) if ok else None
 
-    def push(self, camera_id: str, frame: np.ndarray, timestamp: float) -> None:
-        if not self.enabled or frame is None or frame.size == 0:
-            return
+    def should_sample(self, camera_id: str, timestamp: float) -> bool:
+        """Return whether the next frame would enter the evidence ring.
+
+        This cheap preflight lets the caller postpone expensive backend
+        annotation until the recorder's own (usually much lower) sample rate.
+        :meth:`push` still repeats the check under the same lock, so this is an
+        optimization hint rather than a correctness requirement.
+        """
+
+        if not self.enabled:
+            return False
         interval = 1.0 / max(float(self.cfg.sample_fps), 0.1)
         with self._lock:
             if self._closed:
-                return
+                return False
+            last = self._last_sample.get(camera_id, float("-inf"))
+            return timestamp - last >= interval
+
+    def push(self, camera_id: str, frame: np.ndarray, timestamp: float) -> float:
+        """Sample a frame and return the synchronous JPEG encode time in ms."""
+
+        if not self.enabled or frame is None or frame.size == 0:
+            return 0.0
+        interval = 1.0 / max(float(self.cfg.sample_fps), 0.1)
+        with self._lock:
+            if self._closed:
+                return 0.0
             last = self._last_sample.get(camera_id, float("-inf"))
             if timestamp - last < interval:
-                return
+                return 0.0
+            encode_started = time.perf_counter()
             encoded = self._encode(frame)
+            encode_ms = (time.perf_counter() - encode_started) * 1000.0
             if encoded is None:
-                return
+                return encode_ms
             item = _EncodedFrame(timestamp=timestamp, jpeg=encoded)
             self._last_sample[camera_id] = timestamp
             self._buffers[camera_id].append(item)
@@ -118,6 +143,7 @@ class EvidenceRecorder:
                     finished.append(key)
             for key in finished:
                 self._pending.pop(key, None)
+            return encode_ms
 
     def trigger(self, camera_id: str, alert_id: str, timestamp: float) -> str | None:
         if not self.enabled:
@@ -139,18 +165,26 @@ class EvidenceRecorder:
                 url=url,
                 frames=list(frames),
             )
-            # Queue a pre-event snapshot immediately so evidence is still
-            # produced if the camera disconnects after the alert.  A later
-            # final snapshot atomically replaces it with the full pre/post
-            # sequence.  Enqueuing only copies the small list of JPEG objects;
-            # no MP4 work is performed in this request.
-            self._enqueue_write(
-                pending,
-                final=float(self.cfg.post_seconds) <= 0,
-            )
+            # Encode once after the post-event window. Previously an immediate
+            # preliminary H.264 job and a second final job competed with live
+            # YOLO/MediaPipe work. reset_camera()/close() still finalize the
+            # frames collected so far if the stream ends before this window.
             if self.cfg.post_seconds > 0:
                 self._pending[alert_id] = pending
+            else:
+                self._enqueue_write(pending, final=True)
             return url
+
+    def reset_camera(self, camera_id: str) -> None:
+        """Drop pre-event history while safely finalizing pending clips."""
+        with self._lock:
+            self._buffers.pop(camera_id, None)
+            self._last_sample.pop(camera_id, None)
+            for key, pending in list(self._pending.items()):
+                if pending.camera_id != camera_id:
+                    continue
+                self._enqueue_write(pending, final=True)
+                self._pending.pop(key, None)
 
     def _enqueue_write(self, pending: _PendingClip, *, final: bool) -> bool:
         if not pending.frames:
@@ -241,25 +275,40 @@ class EvidenceRecorder:
             f"{job.filepath}.{threading.get_ident()}."
             f"{uuid.uuid4().hex}.tmp.mp4"
         )
-        writer = cv2.VideoWriter(
-            temp_path,
-            cv2.VideoWriter_fourcc(*"mp4v"),
-            max(1.0, float(self.cfg.sample_fps)),
-            (width, height),
-        )
-        if not writer.isOpened():
-            try:
-                os.remove(temp_path)
-            except FileNotFoundError:
-                pass
+        ffmpeg = self.cfg.ffmpeg_binary or shutil.which("ffmpeg")
+        if not ffmpeg:
+            logger.error("Evidence clip not created: FFmpeg is unavailable (PATH/EVIDENCE_FFMPEG_BINARY)")
             return
+        command = [
+            ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+            "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{width}x{height}",
+            "-r", str(max(1.0, float(self.cfg.sample_fps))), "-i", "-",
+            "-an", "-c:v", "libx264", "-preset", "ultrafast", "-threads", "1",
+            "-pix_fmt", "yuv420p",
+            "-movflags", "+faststart", temp_path,
+        ]
         try:
+            process = subprocess.Popen(
+                command,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                creationflags=getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0),
+            )
+            assert process.stdin is not None
             for frame in decoded:
                 if frame.shape[1] != width or frame.shape[0] != height:
                     frame = cv2.resize(frame, (width, height), interpolation=cv2.INTER_AREA)
-                writer.write(frame)
-        finally:
-            writer.release()
+                process.stdin.write(np.ascontiguousarray(frame).tobytes())
+            process.stdin.close()
+            stderr = process.stderr.read().decode("utf-8", errors="replace") if process.stderr else ""
+            returncode = process.wait()
+            if returncode != 0:
+                logger.error("Evidence H.264 encoding failed: %s", stderr.strip())
+                return
+        except (OSError, BrokenPipeError) as exc:
+            logger.error("Evidence H.264 encoding failed: %s", exc)
+            return
 
         try:
             if os.path.getsize(temp_path) > 0:

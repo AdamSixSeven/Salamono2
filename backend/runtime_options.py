@@ -19,7 +19,7 @@ class RuntimeProcessingOptions:
 
     def requires_detector(self, mode: str) -> bool:
         if str(mode).lower() == "checkpoint":
-            return bool(self.ppe or self.worker_id)
+            return bool(self.boxes or self.ppe or self.worker_id)
         return bool(
             self.boxes
             or self.posture

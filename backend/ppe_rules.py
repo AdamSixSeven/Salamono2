@@ -46,7 +46,7 @@ class PPEChecker:
 
     def __init__(self, config: PPEConfig | None = None):
         self.cfg = config or CONFIG.ppe
-        self._last_check_ts: float = 0.0
+        self._last_check_ts: dict[str, float] = {}
 
     def evaluate(
         self,
@@ -92,15 +92,28 @@ class PPEChecker:
             ))
         return events
 
-    def confirm(self, events: list[PPEEvent], now: float) -> list[PPEEvent]:
+    def confirm(
+        self,
+        events: list[PPEEvent],
+        now: float,
+        camera_id: str | None = None,
+    ) -> list[PPEEvent]:
         """Apply an entry cooldown so we don't alarm every frame for the same worker."""
         if not events:
             return []
-        if now - self._last_check_ts < self.cfg.entry_cooldown_sec:
+        scope = str(camera_id or "")
+        last_check = self._last_check_ts.get(scope, 0.0)
+        if now - last_check < self.cfg.entry_cooldown_sec:
             return []
-        self._last_check_ts = now
+        self._last_check_ts[scope] = now
         confirmed = []
         for e in events:
             e.confirmed = True
             confirmed.append(e)
         return confirmed
+
+    def reset_camera(self, camera_id: str | None = None) -> None:
+        if camera_id is None:
+            self._last_check_ts.clear()
+        else:
+            self._last_check_ts.pop(str(camera_id), None)

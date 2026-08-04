@@ -204,6 +204,7 @@ def test_frame_stream_and_alert_snapshot_include_registered_profile(tmp_path):
         category="person",
         box=(150, 150, 250, 350),
         confidence=0.90,
+        track_id=17,
     )
     vehicle = Detection(
         class_id=7,
@@ -220,15 +221,37 @@ def test_frame_stream_and_alert_snapshot_include_registered_profile(tmp_path):
 
         @staticmethod
         def process(camera_id, frame, persons, timestamp):
+            raise AssertionError("async Worker ID path must be used")
+
+    class FakeWorkerIDWorker:
+        class Stats:
+            thread_alive = True
+
+        @staticmethod
+        def submit_latest(camera_id, frame, persons, timestamp):
+            return persons
+
+        @staticmethod
+        def current_identities(camera_id, persons, timestamp):
             return [
                 WorkerIdentity(
                     worker_id="W-001",
                     person=persons[0],
-                    source="qr",
+                    source="cache",
                     tag_polygon=[],
                     frame_timestamp=timestamp,
+                    cached=True,
+                    track_id=persons[0].track_id,
                 )
             ]
+
+        @staticmethod
+        def scanned_track_ids(camera_id):
+            return {17}
+
+        @staticmethod
+        def stats():
+            return FakeWorkerIDWorker.Stats()
 
     class DisabledPosture:
         available = False
@@ -237,6 +260,7 @@ def test_frame_stream_and_alert_snapshot_include_registered_profile(tmp_path):
     store.create(**_profile())
     api.state.worker_store = store
     api.state.worker_identifier = FakeWorkerIdentifier()
+    api.state.worker_id_worker = FakeWorkerIDWorker()
     api.state.unidentified_worker_monitor = None
     api.state.detector = detector
     api.state.danger_detector = DangerDetector()
@@ -250,6 +274,7 @@ def test_frame_stream_and_alert_snapshot_include_registered_profile(tmp_path):
     api.state.marker_detector = MarkerDetector()
     api.state.calibration_store = CalibrationStore(str(tmp_path / "calibration.json"))
     api.state.marker_zone_cache = {}
+    api.state.debug_inject_person = None
     api.state.posture_manager = DisabledPosture()
     api.state.evidence_recorder = None
     api.state.frame_counter = 0
@@ -266,6 +291,9 @@ def test_frame_stream_and_alert_snapshot_include_registered_profile(tmp_path):
     assert response.status_code == 200
     identification = response.json()["worker_identifications"][0]
     assert identification["worker_id"] == "W-001"
+    assert identification["track_id"] == 17
+    assert identification["person_box"] == [150, 150, 250, 350]
+    assert identification["cached"] is True
     assert identification["registered"] is True
     assert identification["full_name"] == "Jan Kowalski"
     assert identification["position"] == "Operator koparki"

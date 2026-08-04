@@ -1,4 +1,8 @@
 services:
+  # ──────────────────────────────────────────────
+  # Option A: CPU-only (demo / small pilot)
+  # Run with: docker compose up
+  # ──────────────────────────────────────────────
   backend:
     build: .
     ports:
@@ -8,6 +12,11 @@ services:
       - perimetr_data:/app/data
     restart: unless-stopped
 
+  # ──────────────────────────────────────────────
+  # Option B: GPU (production / multi-camera)
+  # Run with: docker compose --profile gpu up
+  # Requires: nvidia-docker runtime installed
+  # ──────────────────────────────────────────────
   backend-gpu:
     build:
       context: .
@@ -28,6 +37,11 @@ services:
     profiles:
       - gpu
 
+  # ──────────────────────────────────────────────
+  # Nginx reverse proxy with HTTPS
+  # Run with: docker compose --profile https up
+  # Requires: SSL certs in ./nginx/certs/
+  # ──────────────────────────────────────────────
   nginx:
     image: nginx:alpine
     ports:

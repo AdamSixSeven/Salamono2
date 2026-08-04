@@ -31,6 +31,8 @@
     var lightboxClose = document.getElementById("lightboxClose");
     var lightboxImg = document.getElementById("lightboxImg");
     var lightboxVideo = document.getElementById("lightboxVideo");
+    var lightboxVideoSource = document.getElementById("lightboxVideoSource");
+    var lightboxVideoStatus = document.getElementById("lightboxVideoStatus");
     var lightboxTitle = document.getElementById("lightboxTitle");
     var lightboxTime = document.getElementById("lightboxTime");
     var lightboxMode = document.getElementById("lightboxMode");
@@ -38,6 +40,11 @@
     var lightboxRule = document.getElementById("lightboxRule");
     var lightboxSeverity = document.getElementById("lightboxSeverity");
     var lightboxWorker = document.getElementById("lightboxWorker");
+    var lightboxTrack = document.getElementById("lightboxTrack");
+    var lightboxAction = document.getElementById("lightboxAction");
+    var lightboxSafety = document.getElementById("lightboxSafety");
+    var lightboxConfidence = document.getElementById("lightboxConfidence");
+    var lightboxMarker = document.getElementById("lightboxMarker");
     var lightboxReviewStatus = document.getElementById("lightboxReviewStatus");
     var lightboxDetails = document.getElementById("lightboxDetails");
     var reviewedBy = document.getElementById("reviewedBy");
@@ -78,6 +85,22 @@
             details.worker_position,
             details.worker_department,
         ].filter(Boolean).join(" · ");
+    }
+
+    function formatHistoryWorker(rec) {
+        if (rec.worker) {
+            var name = [rec.worker.first_name, rec.worker.last_name].filter(Boolean).join(" ");
+            return name + " (ID " + rec.worker.worker_id + ")";
+        }
+        return formatWorker(rec.details) || "pracownik niezidentyfikowany";
+    }
+
+    function resetVideo() {
+        lightboxVideo.pause();
+        lightboxVideoSource.removeAttribute("src");
+        lightboxVideo.load();
+        lightboxVideo.classList.add("hidden");
+        lightboxVideoStatus.textContent = "";
     }
 
     function localDatetimeToTs(v) {
@@ -216,14 +239,15 @@
 
     function openLightbox(rec) {
         activeRecord = rec;
-        lightboxImg.src = rec.thumbnail_url || "";
-        if (rec.clip_url) {
-            lightboxVideo.src = rec.clip_url;
+        lightboxImg.src = rec.snapshot_url || rec.thumbnail_url || "";
+        resetVideo();
+        if (rec.clip_available && rec.clip_url) {
+            lightboxVideoSource.src = rec.clip_url;
             lightboxVideo.classList.remove("hidden");
+            lightboxVideoStatus.textContent = "Ładowanie metadanych klipu…";
+            lightboxVideo.load();
         } else {
-            lightboxVideo.pause();
-            lightboxVideo.removeAttribute("src");
-            lightboxVideo.classList.add("hidden");
+            lightboxVideoStatus.textContent = "Brak klipu powiązanego z tym zdarzeniem";
         }
         lightboxTitle.textContent = rec.description;
         lightboxTime.textContent = formatTime(rec.timestamp);
@@ -232,7 +256,13 @@
         lightboxRule.textContent = rec.rule_name;
         lightboxSeverity.textContent = rec.severity;
         lightboxSeverity.className = "meta-val";
-        lightboxWorker.textContent = formatWorker(rec.details) || "niezidentyfikowany";
+        lightboxWorker.textContent = formatHistoryWorker(rec);
+        lightboxTrack.textContent = rec.details.track_id ?? "—";
+        lightboxAction.textContent = rec.details.action || rec.details.behavior_action || "—";
+        lightboxSafety.textContent = rec.details.safety_state || rec.details.state || "—";
+        var confidence = rec.details.confidence ?? rec.details.score;
+        lightboxConfidence.textContent = confidence == null ? "—" : Number(confidence).toFixed(3);
+        lightboxMarker.textContent = rec.details.marker_id ?? "—";
         lightboxReviewStatus.textContent = REVIEW_LABEL[rec.review_status || "new"] || rec.review_status;
         reviewedBy.value = rec.reviewed_by || "";
         reviewNote.value = rec.review_note || "";
@@ -244,8 +274,7 @@
     function closeLightbox() {
         lightbox.classList.add("hidden");
         lightboxImg.src = "";
-        lightboxVideo.pause();
-        lightboxVideo.removeAttribute("src");
+        resetVideo();
         activeRecord = null;
     }
 
@@ -356,6 +385,13 @@
         });
     });
     lightboxClose.onclick = closeLightbox;
+    lightboxVideo.addEventListener("loadedmetadata", function () { lightboxVideoStatus.textContent = ""; });
+    lightboxVideo.addEventListener("canplay", function () { lightboxVideoStatus.textContent = ""; });
+    lightboxVideo.addEventListener("error", function () {
+        var code = lightboxVideo.error ? lightboxVideo.error.code : "?";
+        lightboxVideoStatus.textContent = "Klip istnieje, ale jego format lub kodek nie jest obsługiwany przez przeglądarkę" +
+            (window.REVIEW_VIDEO_DIAGNOSTICS ? " (MediaError " + code + ", " + (lightboxVideoSource.getAttribute("src") || "") + ")" : "");
+    });
     lightbox.onclick = function (e) {
         if (e.target === lightbox) closeLightbox();
     };

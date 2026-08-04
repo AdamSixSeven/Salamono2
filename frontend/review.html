@@ -4,8 +4,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Perimetr — Historia zdarzeń</title>
-    <link rel="stylesheet" href="style.css?v=2.2.0">
-    <link rel="stylesheet" href="review.css?v=2.2.0">
+    <link rel="stylesheet" href="style.css">
+    <link rel="stylesheet" href="review.css?v=2.3.0">
     <script src="https://unpkg.com/lucide@latest" defer></script>
 </head>
 <body class="review-body">
@@ -129,14 +129,20 @@
     <div id="reviewGrid" class="review-grid"></div>
     <div id="reviewEmpty" class="review-empty hidden">
         <p>Brak zdarzeń do wyświetlenia</p>
+        <p class="hint">Zmień filtry lub uruchom kamerę aby wygenerować zdarzenia.</p>
     </div>
 </main>
 
 <div id="lightbox" class="lightbox hidden">
     <button id="lightboxClose" class="lightbox-close" aria-label="Zamknij">×</button>
     <div class="lightbox-inner">
-        <img id="lightboxImg" alt="">
-        <video id="lightboxVideo" class="hidden" controls playsinline></video>
+        <div class="lightbox-media">
+            <img id="lightboxImg" alt="Snapshot zdarzenia">
+            <video id="lightboxVideo" class="hidden" controls preload="metadata" playsinline>
+                <source id="lightboxVideoSource" src="" type="video/mp4">
+            </video>
+            <p id="lightboxVideoStatus" class="media-status"></p>
+        </div>
         <div class="lightbox-info">
             <h2 id="lightboxTitle">—</h2>
             <div class="lightbox-meta">
@@ -146,6 +152,11 @@
                 <div class="meta-row"><span class="meta-key">Reguła</span><span class="meta-val" id="lightboxRule">—</span></div>
                 <div class="meta-row"><span class="meta-key">Poziom</span><span class="meta-val" id="lightboxSeverity">—</span></div>
                 <div class="meta-row"><span class="meta-key">Pracownik</span><span class="meta-val" id="lightboxWorker">—</span></div>
+                <div class="meta-row"><span class="meta-key">Track ID</span><span class="meta-val" id="lightboxTrack">—</span></div>
+                <div class="meta-row"><span class="meta-key">Akcja</span><span class="meta-val" id="lightboxAction">—</span></div>
+                <div class="meta-row"><span class="meta-key">Safety</span><span class="meta-val" id="lightboxSafety">—</span></div>
+                <div class="meta-row"><span class="meta-key">Confidence</span><span class="meta-val" id="lightboxConfidence">—</span></div>
+                <div class="meta-row"><span class="meta-key">Marker ID</span><span class="meta-val" id="lightboxMarker">—</span></div>
                 <div class="meta-row"><span class="meta-key">Weryfikacja</span><span class="meta-val" id="lightboxReviewStatus">—</span></div>
             </div>
             <div class="review-actions">
@@ -167,7 +178,7 @@
     </div>
 </div>
 
-<script src="review.js?v=2.2.0"></script>
+<script src="review.js?v=2.3.0"></script>
 <script>
 document.addEventListener("DOMContentLoaded", () => {
     if (window.lucide) window.lucide.createIcons();

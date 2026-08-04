@@ -20,17 +20,18 @@ class _FakeModel:
 
 
 @pytest.mark.parametrize(
-    ("device", "expected_half"),
+    ("device", "precision", "expected_quantize"),
     [
-        ("0", True),
-        ("cuda:0", True),
-        ("cpu", False),
-        ("mps", False),
-        ("mps:0", False),
+        ("0", "fp16", 16),
+        ("cuda:0", "fp16", 16),
+        ("0", "fp32", 32),
+        ("cpu", "fp16", 32),
+        ("mps", "fp16", 32),
+        ("mps:0", "fp16", 32),
     ],
 )
-def test_detector_enables_half_only_for_cuda_or_accelerator_devices(
-    monkeypatch, device, expected_half
+def test_detector_uses_current_quantize_api_and_safe_precision(
+    monkeypatch, device, precision, expected_quantize
 ):
     model = _FakeModel()
     fake_ultralytics = types.SimpleNamespace(YOLO=lambda _name: model)
@@ -39,6 +40,7 @@ def test_detector_enables_half_only_for_cuda_or_accelerator_devices(
         config=YOLOConfig(
             model_name="fake.pt",
             device=device,
+            precision=precision,
             img_size=512,
             person_class_ids=[0],
             hazard_class_ids=[],
@@ -48,5 +50,6 @@ def test_detector_enables_half_only_for_cuda_or_accelerator_devices(
 
     assert detector.detect(np.zeros((16, 16, 3), dtype=np.uint8)) == []
     kwargs = model.calls[0][1]
-    assert kwargs["half"] is expected_half
+    assert kwargs["quantize"] == expected_quantize
+    assert "half" not in kwargs
     assert kwargs["imgsz"] == 512

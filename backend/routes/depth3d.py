@@ -482,7 +482,14 @@ def _run_inference(request: Request, camera_id: str):
         warning = "Brak kalibracji intrinsics — mapa głębi działa na surowym obrazie."
 
     depth_started = time.perf_counter()
-    raw_depth = request.app.state.depth3d_estimator.infer(frame)
+    # Depth Anything and live YOLO share the same CUDA device on the pilot
+    # machine. Serializing the two large models prevents VRAM spikes and
+    # unpredictable implicit stream synchronization. The endpoint already runs
+    # in ``asyncio.to_thread``, so waiting here never blocks the event loop.
+    analysis_lock = getattr(request.app.state, "analysis_lock", None)
+    lock_context = analysis_lock if analysis_lock is not None else nullcontext()
+    with lock_context:
+        raw_depth = request.app.state.depth3d_estimator.infer(frame)
     processing_ms = (time.perf_counter() - depth_started) * 1000.0
     raw_depth[(raw_depth < CONFIG.depth3d.min_depth_m) | (raw_depth > CONFIG.depth3d.max_depth_m)] = np.nan
 
@@ -493,6 +500,7 @@ def _run_inference(request: Request, camera_id: str):
     depth[(depth < CONFIG.depth3d.min_depth_m) | (depth > CONFIG.depth3d.max_depth_m)] = np.nan
 
     person_depths = []
+    persons = []
     person_detection_ms = 0.0
     person_detection_warning = None
     if CONFIG.depth3d.person_distance_enabled:
@@ -502,10 +510,27 @@ def _run_inference(request: Request, camera_id: str):
         else:
             try:
                 detection_started = time.perf_counter()
-                analysis_lock = getattr(request.app.state, "analysis_lock", None)
-                lock_context = analysis_lock if analysis_lock is not None else nullcontext()
-                with lock_context:
-                    detections = detector.detect(frame)
+                detection_store = getattr(
+                    request.app.state,
+                    "latest_detection_store",
+                    None,
+                )
+                cached = (
+                    detection_store.get_exact(
+                        camera_id,
+                        item.timestamp,
+                        item.width,
+                        item.height,
+                    )
+                    if detection_store is not None else None
+                )
+                if cached is not None:
+                    detections = list(cached.detections)
+                else:
+                    analysis_lock = getattr(request.app.state, "analysis_lock", None)
+                    lock_context = analysis_lock if analysis_lock is not None else nullcontext()
+                    with lock_context:
+                        detections = detector.detect(frame)
                 person_detection_ms = (time.perf_counter() - detection_started) * 1000.0
                 persons = [detection for detection in detections if detection.category == "person"]
                 persons.sort(key=lambda detection: (detection.box[0], detection.box[1]))
@@ -524,6 +549,22 @@ def _run_inference(request: Request, camera_id: str):
                 person_detection_warning = (
                     f"Pomiar osób niedostępny: {type(exc).__name__}: {exc}"
                 )
+
+    performance_profiler = getattr(
+        request.app.state,
+        "performance_profiler",
+        None,
+    )
+    if performance_profiler is not None:
+        performance_profiler.observe(
+            "depth_ms",
+            processing_ms,
+            has_person=(
+                bool(persons)
+                if CONFIG.depth3d.person_distance_enabled else None
+            ),
+            source="depth3d",
+        )
 
     result = Depth3DResult(
         camera_id=camera_id,

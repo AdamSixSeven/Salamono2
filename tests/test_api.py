@@ -58,6 +58,7 @@ def init_app_state(tmp_path):
     app.state.marker_detector = MarkerDetector()
     app.state.calibration_store = CalibrationStore(str(tmp_path / "calibration.json"))
     app.state.marker_zone_cache = {}
+    app.state.debug_inject_person = None
     app.state.ppe_detector = None
     app.state.ppe_checker = None
     app.state.frame_counter = 0
@@ -86,11 +87,11 @@ async def test_frontend_assets_revalidate_and_use_matching_versions():
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         page = await client.get("/")
-        stylesheet = await client.get("/style.css?v=2.2.0")
+        stylesheet = await client.get("/style.css?v=2.3.0")
 
     assert page.status_code == 200
     assert stylesheet.status_code == 200
-    assert 'style.css?v=2.2.0' in page.text
+    assert 'style.css?v=2.3.0' in page.text
     assert page.headers["cache-control"] == "no-cache, must-revalidate"
     assert stylesheet.headers["cache-control"] == "no-cache, must-revalidate"
 
@@ -100,8 +101,8 @@ async def test_frontend_layers_have_independent_client_renderers():
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         page = await client.get("/")
-        app_asset = await client.get("/app.js?v=2.2.0")
-        overlay_asset = await client.get("/zones.js?v=2.2.0")
+        app_asset = await client.get("/app.js?v=2.3.0")
+        overlay_asset = await client.get("/zones.js?v=2.3.0")
 
     assert page.status_code == 200
     assert app_asset.status_code == 200
@@ -589,6 +590,19 @@ async def test_readiness_reports_demo_components(tmp_path):
         assert data["components"]["browser_video_demo"] is True
         assert data["components"]["operator_review"] is True
         assert "ready_for_metric_demo" in data
+        assert set(data["demo_video_metrics"]) == {
+            "demo_upload_ms",
+            "demo_upload_size_bytes",
+            "demo_probe_ms",
+            "demo_decode_ms",
+            "demo_processing_ms",
+            "demo_source_fps",
+            "demo_processing_fps",
+            "demo_dropped_frames",
+            "demo_job_queue_age_ms",
+            "demo_active_jobs",
+        }
+        assert data["demo_active_jobs"] == 0
     app.state.evidence_recorder.close()
 
 

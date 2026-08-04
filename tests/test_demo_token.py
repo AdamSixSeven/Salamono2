@@ -46,6 +46,7 @@ def enable_auth_and_reload(tmp_path, monkeypatch):
     app.state.marker_detector = MarkerDetector()
     app.state.calibration_store = CalibrationStore(str(tmp_path / "calibration.json"))
     app.state.marker_zone_cache = {}
+    app.state.debug_inject_person = None
     app.state.ppe_detector = None
     app.state.ppe_checker = None
     app.state.frame_counter = 0
@@ -141,6 +142,7 @@ async def test_no_demo_token_env_means_no_bypass(monkeypatch, tmp_path):
     app.state.marker_detector = MarkerDetector()
     app.state.calibration_store = CalibrationStore(str(tmp_path / "calibration.json"))
     app.state.marker_zone_cache = {}
+    app.state.debug_inject_person = None
     app.state.ppe_detector = None
     app.state.ppe_checker = None
     app.state.frame_counter = 0

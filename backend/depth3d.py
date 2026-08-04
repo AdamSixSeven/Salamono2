@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import base64
 import io
-import logging
 import json
 import math
 import os
@@ -22,8 +21,6 @@ from typing import Any
 import cv2
 import numpy as np
 
-
-logger = logging.getLogger(__name__)
 
 DEFAULT_DICTIONARY_NAME = "DICT_4X4_50"
 ASPECT_TOLERANCE = 0.01
@@ -285,7 +282,7 @@ class Depth3DCalibrationStore:
                 calibration = Depth3DCalibration(**record)
                 self._items[calibration.camera_id] = calibration
         except Exception as exc:
-            logger.warning("Depth calibration store could not be loaded: %s", exc)
+            print(f"[depth3d] failed to load calibration store: {exc}")
 
     def _save_locked(self) -> None:
         os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)

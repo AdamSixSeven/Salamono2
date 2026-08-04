@@ -1,3 +1,8 @@
+/* ============================================================
+   Perimetr — Strefy niebezpieczne
+   Rysowanie polygonów + strefy z markerów ArUco
+   Kolory MSBP: DANGER = czerwony, WARNING = ambar (#FFB020 na wideo)
+   ============================================================ */
 (function () {
     "use strict";
 
@@ -40,13 +45,19 @@
     let postureAssessments = [];
     let workerIdentifications = [];
     const workerOverlayTracks = new Map();
+    // Low-latency worker overlay. A fixed 150 ms transition was visually
+    // smooth, but at ~10-12 camera FPS it permanently placed the label one or
+    // two frames behind the person. The duration is now derived from the real
+    // frame cadence and most of the transition is applied immediately.
     const WORKER_OVERLAY_MIN_INTERPOLATION_MS = 12;
     const WORKER_OVERLAY_MAX_INTERPOLATION_MS = 32;
     const WORKER_OVERLAY_INTERPOLATION_RATIO = 0.28;
     const WORKER_OVERLAY_TRANSITION_HEADSTART = 0.60;
     const WORKER_OVERLAY_FADE_IN_MS = 45;
-    const WORKER_OVERLAY_HOLD_MS = 1500;
-    const WORKER_OVERLAY_FADE_MS = 450;
+    // Missing tracks fade immediately after a short frame-jitter allowance.
+    // A long hold would pin the last bbox to the image after the person left.
+    const WORKER_OVERLAY_HOLD_MS = 120;
+    const WORKER_OVERLAY_FADE_MS = 240;
     const WORKER_OVERLAY_RENDER_INTERVAL_MS = 1000 / 60;
     let workerOverlayLastFrameKey = "";
     let workerOverlayAnimationFrame = null;
@@ -54,6 +65,7 @@
     let workerOverlayLastInputAt = 0;
     let pendingSpatialFrame = null;
     let pendingSpatialFallbackTimer = null;
+    let lastSpatialFrameKey = "";
     const postureInterpolator = window.PerimetrPostureInterpolation
         ? new window.PerimetrPostureInterpolation.TrackInterpolator({
             durationMs: 45,
@@ -78,6 +90,7 @@
     let drawing = false;
     let draftPoly = [];          // [[x_norm, y_norm], ...]
 
+    // ---------- Kolory MSBP na wideo ---------------------
 
     const COLOR = {
         dangerStroke: "#DD211C",
@@ -138,8 +151,7 @@
     }
 
     function blendPolygon(previous, next, alpha) {
-        if (!validPolygon(next)) return validPolygon(previous)
-            ? previous.map(point => point.slice()) : [];
+        if (!validPolygon(next)) return [];
         if (!validPolygon(previous) || previous.length !== next.length) {
             return next.map(point => [Number(point[0]), Number(point[1])]);
         }
@@ -176,6 +188,9 @@
             Math.abs(newH - oldH) / oldH
         );
 
+        // A large discontinuity usually means a track switch, camera change or
+        // missed frames. Snapping is safer than visibly travelling through an
+        // incorrect intermediate position.
         if (motionRatio > 0.22 || sizeRatio > 0.28) return 1;
 
         const cadence = Number.isFinite(Number(inputDeltaMs))
@@ -199,6 +214,25 @@
         };
     }
 
+    function workerOverlayTrackKey(identity) {
+        if (identity && identity.track_id !== null &&
+            identity.track_id !== undefined) {
+            return "track:" + String(identity.track_id);
+        }
+        return "worker:" + String(identity && identity.worker_id || "");
+    }
+
+    function currentWorkerTagPolygon(identity) {
+        if (!identity || identity.cached === true ||
+            !validPolygon(identity.tag_polygon)) {
+            return [];
+        }
+        return identity.tag_polygon.map(point => [
+            Number(point[0]),
+            Number(point[1]),
+        ]);
+    }
+
     function updateWorkerOverlayTracks(rawIdentities, frameKey) {
         const now = workerOverlayNow();
         if (frameKey && frameKey === workerOverlayLastFrameKey) return;
@@ -207,22 +241,24 @@
             ? Math.max(1, now - workerOverlayLastInputAt)
             : 33;
         workerOverlayLastInputAt = now;
+        const seenKeys = new Set();
 
         (rawIdentities || []).forEach(identity => {
             if (!identity || !identity.worker_id || !validBox(identity.person_box)) return;
-            const key = String(identity.worker_id);
-            const previous = workerOverlayTracks.get(key);
+            const key = workerOverlayTrackKey(identity);
+            seenKeys.add(key);
+            const existing = workerOverlayTracks.get(key);
+            const previous = existing &&
+                existing.identity.worker_id === identity.worker_id
+                ? existing
+                : null;
             const sampled = previous
                 ? sampleWorkerTrack(previous, now)
                 : {
                     box: identity.person_box.map(Number),
-                    polygon: validPolygon(identity.tag_polygon)
-                        ? identity.tag_polygon.map(point => [Number(point[0]), Number(point[1])])
-                        : [],
+                    polygon: currentWorkerTagPolygon(identity),
                 };
-            const nextPolygon = validPolygon(identity.tag_polygon)
-                ? identity.tag_polygon.map(point => [Number(point[0]), Number(point[1])])
-                : sampled.polygon;
+            const nextPolygon = currentWorkerTagPolygon(identity);
             const liveRead = !identity.cached;
 
             const targetBox = identity.person_box.map(Number);
@@ -235,6 +271,9 @@
                 targetBox: targetBox,
                 startPolygon: sampled.polygon,
                 targetPolygon: nextPolygon,
+                // Apply most of the correction on the first draw of the new
+                // decoded frame. The small remaining part hides bbox jitter
+                // without leaving the overlay visibly behind the video.
                 transitionStartedAt: now - transitionDurationMs * WORKER_OVERLAY_TRANSITION_HEADSTART,
                 transitionDurationMs: transitionDurationMs,
                 createdAt: previous ? previous.createdAt : now,
@@ -247,6 +286,13 @@
 
         const maxAge = WORKER_OVERLAY_HOLD_MS + WORKER_OVERLAY_FADE_MS;
         workerOverlayTracks.forEach((track, key) => {
+            // Marker corners describe one decoded camera frame only. Clear
+            // them on the very next frame if this track has no fresh marker
+            // read; the worker label may still complete its short fade.
+            if (!seenKeys.has(key)) {
+                track.startPolygon = [];
+                track.targetPolygon = [];
+            }
             if (now - track.lastSeenAt > maxAge) workerOverlayTracks.delete(key);
         });
         scheduleWorkerOverlayAnimation();
@@ -327,6 +373,7 @@
         });
     }
 
+    // ---------- API zon ---------------------
 
     async function fetchZones() {
         try {
@@ -337,6 +384,7 @@
             renderZoneList();
             drawOverlay();
         } catch (e) {
+            console.error("Failed to load zones:", e);
         }
     }
 
@@ -382,6 +430,7 @@
         }
     }
 
+    // ---------- Lista stref w bocznym panelu ---------------------
 
     function renderZoneList() {
         zoneList.innerHTML = "";
@@ -443,6 +492,7 @@
         });
     }
 
+    // ---------- Rysowanie polygonu na overlay ---------------------
 
     function polygonFor(z) {
         if (livePolygons[z.id]) return livePolygons[z.id];
@@ -450,6 +500,10 @@
     }
 
     function zonesForOverlay() {
+        // `active_zones` is resolved by the backend for the exact current
+        // frame.  Prefer it after the first WS message so remote edits,
+        // disabled zones and marker-zone expiry cannot leave a stale polygon
+        // from the separately fetched configuration on a raw preview.
         return hasLiveZoneState ? liveActiveZones : zones;
     }
 
@@ -502,6 +556,8 @@
 
     function drawMarkers() {
         if (!layers.markers) return;
+        // liveMarkers przychodzą z WS w pixel space bieżącej klatki.
+        // canvas ma taki sam pixel size jak klatka (renderFrame w app.js ustawia).
         liveMarkers.forEach(m => {
             const c = m.corners;
             if (!Array.isArray(c) || c.length < 3) return;
@@ -514,6 +570,7 @@
             for (let i = 1; i < c.length; i++) zoneCtx.lineTo(c[i][0], c[i][1]);
             zoneCtx.closePath();
             zoneCtx.stroke();
+            // ID pod środkiem markera
             const cx = m.center[0], cy = m.center[1];
             const label = String(m.marker_id);
             zoneCtx.font = "500 11px 'JetBrains Mono', ui-monospace, monospace";
@@ -531,6 +588,9 @@
             zoneCtx.restore();
         });
 
+        // Znacznik identyfikatora pracownika jest markerem obrazu. Jego
+        // obrys znika razem z warstwą „Markery”, natomiast sam profil nadal
+        // działa w logice detekcji i na karcie pracownika.
         workerIdentifications.forEach(identity => {
             const poly = identity.tag_polygon || [];
             if (poly.length < 3) return;
@@ -646,6 +706,7 @@
     function drawDistances() {
         if (!layers.distances) return;
 
+        // Odległość osoby od wykrytej maszyny/pojazdu.
         liveDangers.forEach(danger => {
             const personBox = danger.person && danger.person.box;
             const hazardBox = danger.hazard && danger.hazard.box;
@@ -677,6 +738,7 @@
             );
         });
 
+        // Najbliższa granica skonfigurowanej strefy dla każdej osoby.
         personDistances.forEach(distance => {
             const box = distance.person_box;
             if (!validBox(box)) return;
@@ -816,6 +878,9 @@
                 drawPolygon(poly, colorsFor(z.severity), { label: label });
             });
 
+            // Dynamic zones are attached to the current machine detection.
+            // The backend supplies a projected metric polygon after ground-plane
+            // calibration, or a cheap image-space fallback before calibration.
             dynamicSafetyZones
                 .slice()
                 .sort((a, b) => (a.severity === "DANGER") - (b.severity === "DANGER"))
@@ -828,7 +893,7 @@
                     } else if (z.threshold_px !== null && z.threshold_px !== undefined) {
                         limit = Math.round(z.threshold_px) + " px";
                     }
-                    const mode = z.calibrated ? "metryczna" : "pikselowa";
+                    const mode = z.calibrated ? "metryczna" : "demo 2D";
                     drawPolygon(poly, colorsFor(z.severity), {
                         label: "MASZYNA · " + z.severity + " · " + limit + " · " + mode,
                         lineWidth: z.severity === "DANGER" ? 3 : 2,
@@ -849,6 +914,7 @@
         }
     }
 
+    // ---------- Interakcje: rysowanie polygonu ---------------------
 
     function startDrawing() {
         drawing = true;
@@ -949,6 +1015,7 @@
     cancelBtn.addEventListener("click", cancelDrawing);
     saveBtn.addEventListener("click", commitDrawing);
 
+    // ---------- Interakcje: strefa z markerów ---------------------
 
     function openMarkerPanel() {
         markerPanel.classList.remove("hidden");
@@ -993,9 +1060,8 @@
     if (markerCancelBtn) markerCancelBtn.addEventListener("click", closeMarkerPanel);
     if (markerSaveBtn) markerSaveBtn.addEventListener("click", commitMarkerZone);
 
+    // ---------- Redraw loop + WS listener ---------------------
 
-    const observer = new MutationObserver(() => drawOverlay());
-    observer.observe(liveCanvas, { attributes: true, attributeFilter: ["width", "height"] });
     window.addEventListener("resize", () => drawOverlay());
 
     function consumeFrame(d) {
@@ -1024,35 +1090,136 @@
         scheduleWorkerOverlayAnimation();
     }
 
+    function spatialFrameKey(data) {
+        const d = data || {};
+        const sourceCamera = d.camera_id || cameraId;
+        if (d.job_id !== undefined) {
+            return JSON.stringify([
+                "demo",
+                sourceCamera,
+                d.job_id,
+                d.run_id === undefined ? null : d.run_id,
+                d.frame_index === undefined ? null : d.frame_index,
+            ]);
+        }
+        if (d.frame_id !== undefined || d.timestamp !== undefined) {
+            return JSON.stringify([
+                "live",
+                sourceCamera,
+                d.frame_id === undefined ? null : d.frame_id,
+                d.timestamp === undefined ? null : d.timestamp,
+            ]);
+        }
+        return "";
+    }
+
+    function needsMetadataOnlyFallback(data) {
+        const d = data || {};
+        if (d.frame_transport === "metadata-only") return true;
+        if (
+            d.frame_transport === "binary-jpeg" ||
+            d.frame_transport === "base64-jpeg" ||
+            d.frame_jpeg_b64
+        ) {
+            return false;
+        }
+        // Compatibility with old metadata-only publishers which did not yet
+        // set frame_transport explicitly.
+        return true;
+    }
+
+    function renderSpatialFrame(data, source) {
+        const d = data || {};
+        const key = spatialFrameKey(d);
+        if (key && key === lastSpatialFrameKey) return false;
+
+        const startedAt = performance.now();
+        consumeFrame(d);
+        drawOverlay();
+        const overlayMs = Math.max(0, performance.now() - startedAt);
+        if (key) lastSpatialFrameKey = key;
+
+        if (
+            window.Perimetr &&
+            typeof window.Perimetr.reportOverlayMetric === "function"
+        ) {
+            window.Perimetr.reportOverlayMetric({
+                overlay_ms: overlayMs,
+                source: source,
+                camera_id: d.camera_id || cameraId,
+                job_id: d.job_id === undefined ? null : d.job_id,
+                run_id: d.run_id === undefined ? null : d.run_id,
+                frame_index: d.frame_index === undefined ? null : d.frame_index,
+                frame_id: d.frame_id === undefined ? null : d.frame_id,
+                timestamp: d.timestamp === undefined ? null : d.timestamp,
+            });
+        }
+        return true;
+    }
+
+    // Metadata can arrive before the matching JPEG has finished decoding.
+    // Keep it pending so spatial overlays are updated only when that exact
+    // camera frame is already visible. This removes the one-frame phase error
+    // that otherwise looks like overlay latency or flicker.
     document.addEventListener("perimetr-frame", (evt) => {
-        pendingSpatialFrame = evt.detail || {};
+        const data = evt.detail || {};
+        pendingSpatialFrame = {
+            data: data,
+            key: spatialFrameKey(data),
+        };
         if (pendingSpatialFallbackTimer !== null) {
             window.clearTimeout(pendingSpatialFallbackTimer);
+            pendingSpatialFallbackTimer = null;
         }
+        if (!needsMetadataOnlyFallback(data)) return;
+
+        // Metadata-only publishers intentionally do not emit a rendered event.
+        // Capture this exact frame so a newer job/run/frame cannot be consumed
+        // by an older fallback timer.
+        const fallbackKey = pendingSpatialFrame.key;
         pendingSpatialFallbackTimer = window.setTimeout(() => {
             pendingSpatialFallbackTimer = null;
             if (!pendingSpatialFrame) return;
-            const data = pendingSpatialFrame;
+            if (pendingSpatialFrame.key !== fallbackKey) return;
+            const fallbackData = pendingSpatialFrame.data;
             pendingSpatialFrame = null;
-            consumeFrame(data);
-            drawOverlay();
+            renderSpatialFrame(fallbackData, "metadata-only");
         }, 180);
     });
 
+    // app.js fires this after the raw image has decoded and both canvases have
+    // the exact current-frame dimensions. Spatial results are consumed here,
+    // keeping the worker tag, bbox and posture on the same source frame.
     document.addEventListener("perimetr-frame-rendered", (evt) => {
+        const data = evt.detail || {};
+        const renderedKey = spatialFrameKey(data);
+        if (
+            pendingSpatialFrame &&
+            pendingSpatialFrame.key &&
+            renderedKey &&
+            pendingSpatialFrame.key !== renderedKey
+        ) {
+            return;
+        }
         if (pendingSpatialFallbackTimer !== null) {
             window.clearTimeout(pendingSpatialFallbackTimer);
             pendingSpatialFallbackTimer = null;
         }
-        const data = evt.detail || pendingSpatialFrame || {};
         pendingSpatialFrame = null;
-        consumeFrame(data);
-        drawOverlay();
+        renderSpatialFrame(data, "rendered");
     });
 
-    document.addEventListener("perimetr-camera-changed", (evt) => {
-        cameraId = evt.detail || "cam_default";
-        zones = [];
+    function clearPendingSpatialResult() {
+        if (pendingSpatialFallbackTimer !== null) {
+            window.clearTimeout(pendingSpatialFallbackTimer);
+            pendingSpatialFallbackTimer = null;
+        }
+        pendingSpatialFrame = null;
+    }
+
+    function clearLiveOverlayState() {
+        clearPendingSpatialResult();
+        lastSpatialFrameKey = "";
         livePolygons = {};
         liveActiveZones = [];
         hasLiveZoneState = false;
@@ -1062,11 +1229,25 @@
         liveDangers = [];
         personDistances = [];
         postureAssessments = [];
+    }
+
+    document.addEventListener("perimetr-camera-changed", (evt) => {
+        cameraId = evt.detail || "cam_default";
+        zones = [];
+        clearLiveOverlayState();
         postureInterpolator.clear();
         cancelPostureAnimation();
         clearWorkerOverlayTracks();
         drawOverlay();
         fetchZones();
+    });
+
+    document.addEventListener("perimetr-demo-run-changed", () => {
+        clearLiveOverlayState();
+        postureInterpolator.clear();
+        cancelPostureAnimation();
+        clearWorkerOverlayTracks();
+        drawOverlay();
     });
 
     document.addEventListener("perimetr-layers", (evt) => {

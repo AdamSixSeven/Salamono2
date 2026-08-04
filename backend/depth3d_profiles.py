@@ -1,7 +1,6 @@
 """Persistent calibration profiles and checkerboard captures for Depth3D."""
 from __future__ import annotations
 
-import logging
 import json
 import os
 import re
@@ -22,8 +21,6 @@ import numpy as np
 from backend.depth3d import Depth3DCalibration, IntrinsicCalibrationError
 from backend.depth3d_checkerboard import CheckerboardObservation, CheckerboardSpec
 
-
-logger = logging.getLogger(__name__)
 
 def _safe(value: str, fallback: str = "item") -> str:
     cleaned = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value or "")).strip("._")
@@ -503,7 +500,7 @@ class Depth3DProfileStore:
                 profile = self.create_profile(calibration.camera_id, "Importowana kalibracja", CheckerboardSpec(), profile_id="legacy", activate=True)
                 self.save_calibration(calibration.camera_id, profile["profile_id"], calibration)
         except Exception as exc:
-            logger.warning("Legacy depth calibration migration skipped: %s", exc)
+            print(f"[depth3d] legacy calibration migration skipped: {exc}")
 
 
 class CaptureStoreAdapter:

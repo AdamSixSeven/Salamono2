@@ -191,11 +191,17 @@ class ZoneTemporalFilter:
         cell = ((x1 + x2) // 96, (y1 + y2) // 96)
         return f"{event.zone.id}_{event.rule_name}_{cell}"
 
-    def update(self, events: list[ZoneBreachEvent], now: float) -> list[ZoneBreachEvent]:
+    def update(
+        self,
+        events: list[ZoneBreachEvent],
+        now: float,
+        camera_id: str | None = None,
+    ) -> list[ZoneBreachEvent]:
+        scope = f"{camera_id}:" if camera_id is not None else ""
         current_keys = set()
         confirmed: list[ZoneBreachEvent] = []
         for event in events:
-            key = self._key(event)
+            key = scope + self._key(event)
             current_keys.add(key)
             self._streak[key] += 1
             if self._streak[key] >= self.required:
@@ -204,7 +210,22 @@ class ZoneTemporalFilter:
                     event.confirmed = True
                     confirmed.append(event)
                     self._last_alert_time[key] = now
-        dead = [key for key in self._streak if key not in current_keys]
+        dead = [
+            key for key in self._streak
+            if key.startswith(scope) and key not in current_keys
+        ] if scope else [
+            key for key in self._streak if key not in current_keys
+        ]
         for key in dead:
             del self._streak[key]
         return confirmed
+
+    def reset_camera(self, camera_id: str | None = None) -> None:
+        if camera_id is None:
+            self._streak.clear()
+            self._last_alert_time.clear()
+            return
+        prefix = f"{camera_id}:"
+        for mapping in (self._streak, self._last_alert_time):
+            for key in [key for key in mapping if key.startswith(prefix)]:
+                mapping.pop(key, None)

@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Perimetr — Kalibracja kamery</title>
-    <link rel="stylesheet" href="style.css?v=2.2.0">
+    <link rel="stylesheet" href="style.css?v=2.3.0">
     <script src="https://unpkg.com/lucide@latest" defer></script>
     <style>
         .calib-wrap {
@@ -553,17 +553,12 @@
                 </button>
             </div>
         </div>
-
-        <div class="calib-grid">
-            <div>
-                <div class="marker-layout" aria-label="Układ markerów widziany przez kamerę">
+        <div class="marker-layout" aria-label="Układ markerów widziany przez kamerę">
                     <div class="marker-corner"><span>lewy górny · TL</span><b>10</b></div>
                     <div class="marker-corner"><span>prawy górny · TR</span><b>20</b></div>
                     <div class="marker-corner"><span>prawy dolny · BR</span><b>30</b></div>
                     <div class="marker-corner"><span>lewy dolny · BL</span><b>40</b></div>
                 </div>
-            </div>
-        </div>
 
         <div class="marker-sheet" id="markerPrintArea">
             <article class="marker-card">
@@ -842,6 +837,8 @@
                 source: "first-online",
             };
         }
+        // This is a display fallback only. It must not enter localStorage or
+        // block a real stream that appears during a later registry refresh.
         return {
             cameraId: "cam_default",
             locked: false,
@@ -947,12 +944,12 @@
             State.measuring = false;
             setBoxStatus(
                 dom.calibrationStatus,
-                "Brak kalibracji dla wybranej kamery.",
+                "Sprawdź markery i stan kalibracji wybranej kamery.",
                 "idle"
             );
             setBoxStatus(
                 dom.measureStatus,
-                "Brak aktywnej kalibracji.",
+                "Najpierw odczytaj lub wykonaj poprawną kalibrację tej kamery.",
                 "idle"
             );
             renderPreview();
@@ -1593,6 +1590,8 @@
             if (!response.ok) throw await responseError(response);
             const analysis = await response.json();
             if (requestedCamera !== State.cameraId) return;
+            // Preview is metadata-only. The visible canvas intentionally
+            // remains sourced exclusively from /ws/live.
             State.previewAnalysis = analysis;
             if (analysis.mode) State.cameraMode = analysis.mode;
             if (analysis.received_at || analysis.last_seen) {
@@ -1690,7 +1689,7 @@
         ) {
             renderCalibration(null);
             dom.currentCalibration.textContent =
-                "Brak aktywnej kamery.";
+                "Oczekiwanie na aktywną kamerę — cam_default jest tylko nazwą zastępczą.";
             return;
         }
         try {
@@ -1913,7 +1912,7 @@
         setBoxStatus(
             dom.measureStatus,
             State.calibration
-                ? "Gotowy do pomiaru."
+                ? "Kliknij „Wybierz 2 punkty”, aby rozpocząć nowy test."
                 : "Brak aktywnej kalibracji.",
             "idle"
         );

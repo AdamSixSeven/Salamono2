@@ -5,8 +5,13 @@ trajectory instability, irregular stepping, sudden balance loss).  It does not
 infer intoxication, a medical condition, or a cause of the movement.
 
 Pipeline:
-    existing YOLO person boxes -> MediaPipe Pose Landmarker Lite ->
-    lightweight track matching -> 2-4 s temporal features -> risk score
+    existing YOLO person boxes -> MediaPipe Pose Landmarker Heavy ->
+    per-person tracking -> 4 s pose history -> learned TCN+GRU action/safety
+    heads -> quality-aware temporal event controller
+
+Legacy geometry is retained as telemetry and an explicit fallback mode.  The
+pilot .env disables heuristic alerts so missing or jittery landmarks cannot be
+turned into an incident without learned evidence.
 
 MediaPipe is imported lazily so the rest of Perimetr can still start when the
 optional dependency or model bundle is unavailable.
@@ -27,6 +32,7 @@ import cv2
 import numpy as np
 
 from backend.detector import Detection
+from backend.learned_event_controller import EventDecision, LearnedEventController
 from config import CONFIG, PostureConfig
 
 if TYPE_CHECKING:
@@ -85,18 +91,20 @@ class PoseEstimator(Protocol):
     """Provider interface used by the analyzer and by deterministic tests."""
 
     def estimate(self, frame_bgr: np.ndarray, timestamp_ms: int) -> list[np.ndarray]:
-        """Return zero or more arrays shaped (33, 4): x, y, z, visibility."""
+        """Return arrays shaped (33, 5): x, y, z, visibility, presence."""
 
     def close(self) -> None:
         """Release native resources."""
 
 
 class MediaPipePoseEstimator:
-    """MediaPipe Tasks Pose Landmarker running in VIDEO mode.
+    """MediaPipe Tasks Pose Landmarker running in VIDEO mode per person track.
 
-    One estimator instance is kept per camera.  VIDEO mode lets MediaPipe reuse
-    tracking state between samples and avoid a full detector pass on every
-    frame, which is important for the CPU-oriented MVP.
+    Feeding crops from several people through one VIDEO-mode landmarker leaks
+    temporal tracking state between workers.  This wrapper therefore keeps a
+    small lazy pool of independent landmarker instances, keyed by posture track
+    ID.  ``PostureConfig.max_poses`` bounds the pool, so enabling four person
+    boxes creates at most four native MediaPipe trackers per camera.
     """
 
     def __init__(self, config: PostureConfig):
@@ -108,27 +116,54 @@ class MediaPipePoseEstimator:
 
         import mediapipe as mp  # lazy optional import
 
-        options = mp.tasks.vision.PoseLandmarkerOptions(
-            base_options=mp.tasks.BaseOptions(model_asset_path=config.model_path),
-            running_mode=mp.tasks.vision.RunningMode.VIDEO,
-            # PostureAnalyzer feeds one YOLO person crop at a time.  Keeping
-            # this at one avoids asking MediaPipe to search a crop for poses
-            # that cannot be used; ``config.max_poses`` limits the number of
-            # largest person crops analyzed per sample.
+        self._mp = mp
+        self._config = config
+        self._max_streams = max(1, int(config.max_poses))
+        self._landmarkers: OrderedDict[object, object] = OrderedDict()
+        self._last_timestamp_ms: dict[object, int] = {}
+
+    def _create_landmarker(self):
+        options = self._mp.tasks.vision.PoseLandmarkerOptions(
+            base_options=self._mp.tasks.BaseOptions(
+                model_asset_path=self._config.model_path,
+            ),
+            running_mode=self._mp.tasks.vision.RunningMode.VIDEO,
             num_poses=1,
-            min_pose_detection_confidence=config.min_pose_detection_confidence,
-            min_pose_presence_confidence=config.min_pose_presence_confidence,
-            min_tracking_confidence=config.min_tracking_confidence,
+            min_pose_detection_confidence=(
+                self._config.min_pose_detection_confidence
+            ),
+            min_pose_presence_confidence=(
+                self._config.min_pose_presence_confidence
+            ),
+            min_tracking_confidence=self._config.min_tracking_confidence,
             output_segmentation_masks=False,
         )
-        self._mp = mp
-        self._landmarker = mp.tasks.vision.PoseLandmarker.create_from_options(options)
-        self._last_timestamp_ms = -1
+        return self._mp.tasks.vision.PoseLandmarker.create_from_options(options)
 
-    def estimate(self, frame_bgr: np.ndarray, timestamp_ms: int) -> list[np.ndarray]:
-        # MediaPipe VIDEO mode requires strictly increasing timestamps.
-        timestamp_ms = max(int(timestamp_ms), self._last_timestamp_ms + 1)
-        self._last_timestamp_ms = timestamp_ms
+    def _landmarker_for(self, stream_id: object):
+        key = stream_id if stream_id is not None else "__default__"
+        landmarker = self._landmarkers.pop(key, None)
+        if landmarker is None:
+            while len(self._landmarkers) >= self._max_streams:
+                old_key, old_landmarker = self._landmarkers.popitem(last=False)
+                self._last_timestamp_ms.pop(old_key, None)
+                old_landmarker.close()
+            landmarker = self._create_landmarker()
+        self._landmarkers[key] = landmarker
+        return key, landmarker
+
+    def estimate_for_track(
+        self,
+        frame_bgr: np.ndarray,
+        timestamp_ms: int,
+        track_id: object,
+    ) -> list[np.ndarray]:
+        key, landmarker = self._landmarker_for(track_id)
+        timestamp_ms = max(
+            int(timestamp_ms),
+            self._last_timestamp_ms.get(key, -1) + 1,
+        )
+        self._last_timestamp_ms[key] = timestamp_ms
 
         frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
         frame_rgb = np.ascontiguousarray(frame_rgb)
@@ -136,20 +171,41 @@ class MediaPipePoseEstimator:
             image_format=self._mp.ImageFormat.SRGB,
             data=frame_rgb,
         )
-        result = self._landmarker.detect_for_video(mp_image, timestamp_ms)
+        result = landmarker.detect_for_video(mp_image, timestamp_ms)
 
         poses: list[np.ndarray] = []
         for pose in result.pose_landmarks:
             arr = np.asarray(
-                [[p.x, p.y, p.z, getattr(p, "visibility", 1.0)] for p in pose],
+                [
+                    [
+                        point.x,
+                        point.y,
+                        point.z,
+                        getattr(point, "visibility", 1.0),
+                        getattr(point, "presence", 1.0),
+                    ]
+                    for point in pose
+                ],
                 dtype=np.float32,
             )
-            if arr.shape == (33, 4):
+            if arr.shape == (33, 5):
                 poses.append(arr)
         return poses
 
+    def estimate(self, frame_bgr: np.ndarray, timestamp_ms: int) -> list[np.ndarray]:
+        return self.estimate_for_track(frame_bgr, timestamp_ms, "__default__")
+
+    def release_track(self, track_id: object) -> None:
+        landmarker = self._landmarkers.pop(track_id, None)
+        self._last_timestamp_ms.pop(track_id, None)
+        if landmarker is not None:
+            landmarker.close()
+
     def close(self) -> None:
-        self._landmarker.close()
+        for landmarker in self._landmarkers.values():
+            landmarker.close()
+        self._landmarkers.clear()
+        self._last_timestamp_ms.clear()
 
 
 @dataclass
@@ -192,6 +248,15 @@ class PostureAssessment:
     behavior_valid_ratio: float = 0.0
     behavior_window_seconds: float = 0.0
     behavior_inference_ms: float = 0.0
+    safety_label: str | None = None
+    safety_confidence: float = 0.0
+    safety_probabilities: dict[str, float] = field(default_factory=dict)
+    torso_quality: float = 0.0
+    upper_body_quality: float = 0.0
+    lower_body_quality: float = 0.0
+    visible_ratio: float = 0.0
+    learned_event_type: str | None = None
+    learned_event_reason: str = ""
 
 
 @dataclass
@@ -216,6 +281,7 @@ class _Track:
     behavior_probability_history: deque[dict[str, float]] = field(default_factory=deque)
     behavior_samples_since_inference: int = 0
     behavior_prediction_version: int = 0
+    behavior_confirmation_emitted_version: int = -1
     behavior_streak_version: int = 0
     behavior_fall_streak: int = 0
     behavior_lying_streak: int = 0
@@ -226,12 +292,22 @@ class _Track:
     behavior_valid_ratio: float = 0.0
     behavior_window_seconds: float = 0.0
     behavior_inference_ms: float = 0.0
+    behavior_last_prediction_at: float = float("-inf")
+    safety_label: str | None = None
+    safety_confidence: float = 0.0
+    safety_probabilities: dict[str, float] = field(default_factory=dict)
+    torso_quality: float = 0.0
+    upper_body_quality: float = 0.0
+    lower_body_quality: float = 0.0
+    visible_ratio: float = 0.0
+    learned_decision: EventDecision | None = None
 
 
 @dataclass
 class PostureProcessResult:
     assessments: list[PostureAssessment]
     inference_ran: bool
+    timings_ms: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -284,6 +360,40 @@ def _smooth(values: np.ndarray) -> np.ndarray:
     out = values.copy()
     out[1:-1] = (values[:-2] + values[1:-1] + values[2:]) / 3.0
     return out
+
+
+def _person_is_posture_eligible(
+    box: tuple[int, int, int, int],
+    frame_width: int,
+    frame_height: int,
+    config: PostureConfig,
+) -> bool:
+    """Return whether a person box is large enough for pose inference.
+
+    A height-only gate rejects the exact posture that matters for fall
+    detection: after a fall the person's box becomes wide and short. Keep the
+    legacy vertical threshold, but also accept boxes whose orientation-neutral
+    long side and area remain large enough. All values are normalized, so the
+    rule behaves consistently for 720p, 1080p and larger source videos.
+    """
+    x1, y1, x2, y2 = box
+    width = max(0.0, float(x2 - x1))
+    height = max(0.0, float(y2 - y1))
+    safe_width = max(1.0, float(frame_width))
+    safe_height = max(1.0, float(frame_height))
+
+    height_frac = height / safe_height
+    width_frac = width / safe_width
+    long_side_frac = max(width_frac, height_frac)
+    area_frac = (width * height) / (safe_width * safe_height)
+
+    return bool(
+        height_frac >= config.min_person_height_frac
+        or (
+            long_side_frac >= config.min_person_long_side_frac
+            and area_frac >= config.min_person_area_frac
+        )
+    )
 
 
 def _pose_bbox(pose: np.ndarray, min_visibility: float) -> tuple[float, float, float, float] | None:
@@ -454,6 +564,39 @@ def constrain_display_bone_lengths(
     return out, len(reverted)
 
 
+def _scaled_optical_flow_gray(frame: np.ndarray, scale: float) -> np.ndarray:
+    """Return a grayscale optical-flow frame without allocating full-size gray.
+
+    Resize the BGR input first: converting a full-resolution frame to grayscale
+    and only then shrinking it retains most of the original preprocessing cost.
+    The returned image keeps the source aspect ratio apart from unavoidable
+    integer rounding.
+    """
+    try:
+        safe_scale = float(scale)
+    except (TypeError, ValueError):
+        safe_scale = 0.5
+    if not math.isfinite(safe_scale) or safe_scale <= 0.0:
+        safe_scale = 0.5
+    safe_scale = min(1.0, max(0.05, safe_scale))
+
+    frame_height, frame_width = frame.shape[:2]
+    target_width = max(1, int(round(frame_width * safe_scale)))
+    target_height = max(1, int(round(frame_height * safe_scale)))
+    scaled = frame
+    if target_width != frame_width or target_height != frame_height:
+        scaled = cv2.resize(
+            frame,
+            (target_width, target_height),
+            interpolation=cv2.INTER_AREA,
+        )
+    if scaled.ndim == 2:
+        return np.ascontiguousarray(scaled)
+    if scaled.shape[2] == 4:
+        return cv2.cvtColor(scaled, cv2.COLOR_BGRA2GRAY)
+    return cv2.cvtColor(scaled, cv2.COLOR_BGR2GRAY)
+
+
 def track_pose_optical_flow(
     previous_gray: np.ndarray,
     current_gray: np.ndarray,
@@ -469,7 +612,13 @@ def track_pose_optical_flow(
     fb_threshold_px: float = 1.5,
     max_jump_frac: float = 0.18,
 ) -> tuple[np.ndarray, int]:
-    """Track visible pose landmarks one frame forward using LK flow."""
+    """Track visible normalized landmarks on equal-size grayscale frames.
+
+    ``frame_width``/``frame_height`` and ``bbox`` describe the full source
+    frame.  The grayscale inputs may be downscaled; landmark points, bbox
+    thresholds and LK parameters are mapped to that working resolution while
+    returned landmark coordinates remain normalized to the full frame.
+    """
     if (
         previous_gray.shape != current_gray.shape
         or landmarks.ndim != 2
@@ -494,11 +643,15 @@ def track_pose_optical_flow(
     indexes = np.flatnonzero(visible)
     if indexes.size < 6:
         return np.array(fallback, copy=True), 0
+    flow_height, flow_width = current_gray.shape[:2]
+    scale_x = flow_width / float(frame_width)
+    scale_y = flow_height / float(frame_height)
+    flow_scale = max(0.01, min(scale_x, scale_y))
     points = np.column_stack([
-        landmarks[indexes, 0] * frame_width,
-        landmarks[indexes, 1] * frame_height,
+        landmarks[indexes, 0] * flow_width,
+        landmarks[indexes, 1] * flow_height,
     ]).astype(np.float32).reshape(-1, 1, 2)
-    win = max(5, int(win_size))
+    win = max(5, int(round(float(win_size) * flow_scale)))
     if win % 2 == 0:
         win += 1
     criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 20, 0.01)
@@ -520,24 +673,34 @@ def track_pose_optical_flow(
     original = points.reshape(-1, 2)
     fb_error = np.linalg.norm(backward - original, axis=1)
     jump = np.linalg.norm(forward - original, axis=1)
-    box_diag = max(1.0, math.hypot(bbox[2] - bbox[0], bbox[3] - bbox[1]))
+    box_diag = max(
+        0.5,
+        math.hypot(
+            (bbox[2] - bbox[0]) * scale_x,
+            (bbox[3] - bbox[1]) * scale_y,
+        ),
+    )
+    fb_limit = max(
+        0.1,
+        float(fb_threshold_px) * max(scale_x, scale_y),
+    )
     good = (
         (status_forward.reshape(-1) > 0)
         & (status_back.reshape(-1) > 0)
         & np.isfinite(forward).all(axis=1)
-        & (fb_error <= max(0.1, float(fb_threshold_px)))
-        & (jump <= max(1.0, float(max_jump_frac) * box_diag))
+        & (fb_error <= fb_limit)
+        & (jump <= max(0.5, float(max_jump_frac) * box_diag))
         & (forward[:, 0] >= 0.0)
-        & (forward[:, 0] < frame_width)
+        & (forward[:, 0] < flow_width)
         & (forward[:, 1] >= 0.0)
-        & (forward[:, 1] < frame_height)
+        & (forward[:, 1] < flow_height)
     )
     tracked = np.array(fallback, dtype=np.float32, copy=True)
     good_indexes = indexes[good]
     good_points = forward[good]
     if good_indexes.size:
-        tracked[good_indexes, 0] = good_points[:, 0] / frame_width
-        tracked[good_indexes, 1] = good_points[:, 1] / frame_height
+        tracked[good_indexes, 0] = good_points[:, 0] / flow_width
+        tracked[good_indexes, 1] = good_points[:, 1] / flow_height
     tracked, reverted = constrain_display_bone_lengths(
         landmarks,
         tracked,
@@ -627,7 +790,15 @@ def transform_cached_landmarks(
     new_frame_width: int,
     new_frame_height: int,
 ) -> np.ndarray:
-    """Translate cached landmarks by the tracked bounding-box displacement."""
+    """Translate cached landmarks with the tracked person without rescaling them.
+
+    The previous V2.4 implementation preserved every point's relative position
+    inside the YOLO box.  A harmless change in bbox width/height therefore
+    stretched the entire cached skeleton, even though a person's bones had not
+    changed length.  This function now uses only the bbox-centre displacement.
+    Landmark geometry and Z remain untouched until a real MediaPipe inference
+    or per-landmark optical flow provides new coordinates.
+    """
 
     transformed = np.array(landmarks, dtype=np.float32, copy=True)
     if transformed.ndim != 2 or transformed.shape[1] < 2:
@@ -673,6 +844,22 @@ class PostureAnalyzer:
         self.estimator = estimator
         self.behavior_classifier = behavior_classifier
         self.behavior_error: str | None = None
+        self.learned_events = LearnedEventController(
+            unstable_threshold=self.cfg.unstable_threshold,
+            unstable_confirm_seconds=self.cfg.unstable_confirm_seconds,
+            fall_threshold=self.cfg.learned_fall_threshold,
+            ground_threshold=self.cfg.ground_threshold,
+            direct_fall_threshold=self.cfg.direct_fall_threshold,
+            direct_fall_action_threshold=self.cfg.direct_fall_action_threshold,
+            direct_fall_confirm_seconds=self.cfg.direct_fall_confirm_seconds,
+            fall_followup_seconds=self.cfg.fall_followup_seconds,
+            ground_confirm_seconds=self.cfg.ground_confirm_seconds,
+            cooldown_seconds=self.cfg.cooldown_seconds,
+            min_torso_quality_for_fall=self.cfg.min_torso_quality_for_fall,
+            min_lower_body_quality_for_unstable=(
+                self.cfg.min_lower_body_quality_for_unstable
+            ),
+        )
         self._tracks: dict[int, _Track] = {}
         self._next_track_id = 1
         self._last_inference_at = float("-inf")
@@ -680,36 +867,36 @@ class PostureAnalyzer:
         self._previous_frame_size: tuple[int, int] | None = None
 
     def close(self) -> None:
+        self.learned_events.reset()
         self.estimator.close()
 
     def process(self, frame: np.ndarray, persons: list[Detection],
                 timestamp: float) -> PostureProcessResult:
         persons = [p for p in persons if p.category == "person"]
+        timings_ms = {
+            "tracking_ms": 0.0,
+            "posture_crop_ms": 0.0,
+            "mediapipe_ms": 0.0,
+            "optical_flow_ms": 0.0,
+            "tcn_ms": 0.0,
+        }
+        tracking_started = time.perf_counter()
         self._expire_tracks(timestamp)
         assignments = self._assign_tracks(persons, timestamp)
+        timings_ms["tracking_ms"] += (
+            time.perf_counter() - tracking_started
+        ) * 1000.0
         frame_h, frame_w = frame.shape[:2]
-        current_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-
-        sample_interval = 1.0 / max(self.cfg.sample_fps, 0.1)
-        if timestamp - self._last_inference_at < sample_interval:
-            cached = self._cached_assessments(
-                assignments,
-                timestamp,
-                frame_width=frame_w,
-                frame_height=frame_h,
-                previous_gray=self._previous_gray,
-                current_gray=current_gray,
-            )
-            self._previous_gray = current_gray
-            self._previous_frame_size = (frame_w, frame_h)
-            return PostureProcessResult(cached, inference_ran=False)
-        self._last_inference_at = timestamp
 
         eligible_items = [
             (idx, person, track)
             for idx, (person, track) in assignments.items()
-            if (person.box[3] - person.box[1]) / max(frame_h, 1)
-            >= self.cfg.min_person_height_frac
+            if _person_is_posture_eligible(
+                person.box,
+                frame_width=frame_w,
+                frame_height=frame_h,
+                config=self.cfg,
+            )
         ]
         # Pose work grows roughly linearly with the number of crops.  Analyze
         # only the configured number of largest qualifying people; insertion
@@ -726,13 +913,69 @@ class PostureAnalyzer:
             idx: (person, track)
             for idx, person, track in eligible_items[:max_people]
         }
+        optical_flow_enabled = bool(getattr(self.cfg, "optical_flow_enabled", False))
+        if not optical_flow_enabled:
+            # Avoid accidentally reusing an old reference if this runtime
+            # option is enabled again later.
+            self._previous_gray = None
+            self._previous_frame_size = None
+
+        sample_interval = 1.0 / max(self.cfg.sample_fps, 0.1)
+        if timestamp - self._last_inference_at < sample_interval:
+            flow_track_ids = {
+                track.track_id
+                for _person, track in eligible.values()
+                if (
+                    track.latest is not None
+                    and timestamp - track.latest.frame_timestamp
+                    <= self.cfg.cached_result_ttl_seconds
+                    and (
+                        track.display_landmarks is not None
+                        or track.latest.landmarks is not None
+                    )
+                )
+            }
+            current_gray = None
+            if optical_flow_enabled and flow_track_ids:
+                current_gray = _scaled_optical_flow_gray(
+                    frame,
+                    getattr(self.cfg, "optical_flow_scale", 0.5),
+                )
+            previous_gray = (
+                self._previous_gray
+                if self._previous_frame_size == (frame_w, frame_h)
+                else None
+            )
+            cached = self._cached_assessments(
+                assignments,
+                timestamp,
+                frame_width=frame_w,
+                frame_height=frame_h,
+                previous_gray=previous_gray,
+                current_gray=current_gray,
+                flow_track_ids=flow_track_ids,
+                timings_ms=timings_ms,
+            )
+            if current_gray is not None:
+                self._previous_gray = current_gray
+                self._previous_frame_size = (frame_w, frame_h)
+            return PostureProcessResult(
+                cached,
+                inference_ran=False,
+                timings_ms=timings_ms,
+            )
+        self._last_inference_at = timestamp
+
         if not eligible:
-            self._previous_gray = current_gray
-            self._previous_frame_size = (frame_w, frame_h)
-            return PostureProcessResult([], inference_ran=True)
+            return PostureProcessResult(
+                [],
+                inference_ran=True,
+                timings_ms=timings_ms,
+            )
 
         assessments: list[PostureAssessment] = []
         for person_idx, (person, track) in eligible.items():
+            crop_started = time.perf_counter()
             crop_box = stabilized_square_crop_box(
                 person.box,
                 frame_w,
@@ -743,23 +986,49 @@ class PostureAnalyzer:
                 size_follow=self.cfg.crop_size_follow,
             )
             cropped = crop_from_box(frame, crop_box)
+            timings_ms["posture_crop_ms"] += (
+                time.perf_counter() - crop_started
+            ) * 1000.0
             if cropped is None:
                 continue
             crop, crop_box = cropped
             track.roi_box = crop_box
-            crop_poses = self.estimator.estimate(crop, int(timestamp * 1000))
+            mediapipe_started = time.perf_counter()
+            estimate_for_track = getattr(
+                self.estimator,
+                "estimate_for_track",
+                None,
+            )
+            if callable(estimate_for_track):
+                crop_poses = estimate_for_track(
+                    crop,
+                    int(timestamp * 1000),
+                    track.track_id,
+                )
+            else:
+                crop_poses = self.estimator.estimate(
+                    crop,
+                    int(timestamp * 1000),
+                )
+            timings_ms["mediapipe_ms"] += (
+                time.perf_counter() - mediapipe_started
+            ) * 1000.0
             mapped_poses = [
                 map_pose_from_crop(pose, crop_box, frame_w, frame_h)
                 for pose in crop_poses
             ]
             # A crop normally contains one pose, but matching still prevents a
             # background bystander at its edge from being attached blindly.
+            tracking_started = time.perf_counter()
             pose = self._match_poses_to_persons(
                 mapped_poses,
                 {person_idx: person},
                 frame_w,
                 frame_h,
             ).get(person_idx)
+            timings_ms["tracking_ms"] += (
+                time.perf_counter() - tracking_started
+            ) * 1000.0
             if pose is None:
                 continue
             sample = self._sample_from_pose(pose, person.box, frame_w, frame_h, timestamp)
@@ -767,7 +1036,11 @@ class PostureAnalyzer:
                 continue
             track.history.append(sample)
             self._trim_history(track, timestamp)
-            self._update_behavior(track, pose, timestamp)
+            timings_ms["tcn_ms"] += self._update_behavior(
+                track,
+                pose,
+                timestamp,
+            )
             assessment = self._evaluate_track(
                 track,
                 person,
@@ -785,15 +1058,29 @@ class PostureAnalyzer:
             track.display_frame_height = frame_h
             assessments.append(assessment)
 
-        self._previous_gray = current_gray
-        self._previous_frame_size = (frame_w, frame_h)
-        return PostureProcessResult(assessments, inference_ran=True)
+        if optical_flow_enabled and any(
+            assessment.landmarks is not None for assessment in assessments
+        ):
+            self._previous_gray = _scaled_optical_flow_gray(
+                frame,
+                getattr(self.cfg, "optical_flow_scale", 0.5),
+            )
+            self._previous_frame_size = (frame_w, frame_h)
+        return PostureProcessResult(
+            assessments,
+            inference_ran=True,
+            timings_ms=timings_ms,
+        )
 
     def _expire_tracks(self, now: float) -> None:
         stale = [tid for tid, t in self._tracks.items()
                  if now - t.last_seen > self.cfg.track_ttl_seconds]
+        release_track = getattr(self.estimator, "release_track", None)
         for tid in stale:
             del self._tracks[tid]
+            self.learned_events.reset(tid)
+            if callable(release_track):
+                release_track(tid)
 
     def _assign_tracks(self, persons: list[Detection], now: float
                        ) -> dict[int, tuple[Detection, _Track]]:
@@ -956,12 +1243,14 @@ class PostureAnalyzer:
         track: _Track,
         pose: np.ndarray,
         timestamp: float,
-    ) -> None:
+    ) -> float:
         classifier = self.behavior_classifier
         if classifier is None or not self.cfg.behavior_enabled:
-            return
+            return 0.0
 
-        track.behavior_history.append((float(timestamp), np.asarray(pose, dtype=np.float32).copy()))
+        track.behavior_history.append(
+            (float(timestamp), np.asarray(pose, dtype=np.float32).copy())
+        )
         keep_seconds = max(
             2.0,
             classifier.target_window_seconds
@@ -973,42 +1262,74 @@ class PostureAnalyzer:
             track.behavior_history.popleft()
 
         track.behavior_samples_since_inference += 1
-        if track.behavior_samples_since_inference < self.cfg.behavior_inference_stride_samples:
-            return
+        if (
+            track.behavior_samples_since_inference
+            < self.cfg.behavior_inference_stride_samples
+        ):
+            return 0.0
         track.behavior_samples_since_inference = 0
 
+        tcn_started = time.perf_counter()
         try:
             prediction = classifier.predict_history(list(track.behavior_history))
         except Exception as exc:
-            # Keep the existing heuristic detector alive if a runtime model or
-            # device error occurs. The manager exposes the startup error, while
-            # this field protects against per-frame failures.
+            # Disable only the learned classifier.  With heuristic alerts
+            # disabled the result becomes insufficient_pose rather than a
+            # geometry-derived alarm.
             self.behavior_error = str(exc)
             self.behavior_classifier = None
-            return
+            return (time.perf_counter() - tcn_started) * 1000.0
         if prediction is None:
-            return
+            return (time.perf_counter() - tcn_started) * 1000.0
 
+        # Smooth the detailed action label for display.  Safety probabilities
+        # stay calibrated and unsmoothed; the dedicated event controller does
+        # its own temporal confirmation in seconds.
         track.behavior_probability_history.append(dict(prediction.probabilities))
-        while len(track.behavior_probability_history) > self.cfg.behavior_smoothing_windows:
+        while (
+            len(track.behavior_probability_history)
+            > self.cfg.behavior_smoothing_windows
+        ):
             track.behavior_probability_history.popleft()
 
         labels = list(prediction.probabilities)
         smoothed = {
-            label: float(np.mean([
-                probabilities.get(label, 0.0)
-                for probabilities in track.behavior_probability_history
-            ]))
+            label: float(
+                np.mean(
+                    [
+                        probabilities.get(label, 0.0)
+                        for probabilities in track.behavior_probability_history
+                    ]
+                )
+            )
             for label in labels
         }
         label = max(smoothed, key=smoothed.get)
         track.behavior_label = label
         track.behavior_confidence = smoothed[label]
         track.behavior_probabilities = smoothed
-        track.behavior_valid_ratio = prediction.valid_ratio
-        track.behavior_window_seconds = prediction.window_seconds
-        track.behavior_inference_ms = prediction.inference_ms
+        track.behavior_valid_ratio = float(prediction.valid_ratio)
+        track.behavior_window_seconds = float(prediction.window_seconds)
+        track.behavior_inference_ms = float(prediction.inference_ms)
+        track.behavior_last_prediction_at = float(timestamp)
+
+        track.safety_label = str(prediction.safety_label)
+        track.safety_confidence = float(prediction.safety_confidence)
+        track.safety_probabilities = dict(prediction.safety_probabilities)
+        track.torso_quality = float(prediction.torso_quality)
+        track.upper_body_quality = float(prediction.upper_body_quality)
+        track.lower_body_quality = float(prediction.lower_body_quality)
+        track.visible_ratio = float(prediction.visible_ratio)
         track.behavior_prediction_version += 1
+
+        if self.cfg.learned_events_enabled:
+            track.learned_decision = self.learned_events.update(
+                track.track_id,
+                timestamp,
+                prediction,
+            )
+
+        return (time.perf_counter() - tcn_started) * 1000.0
 
     def _merge_behavior_assessment(
         self,
@@ -1016,97 +1337,128 @@ class PostureAnalyzer:
         assessment: PostureAssessment,
         timestamp: float,
     ) -> PostureAssessment:
-        if not track.behavior_probabilities:
-            return assessment
-
-        probabilities = dict(track.behavior_probabilities)
-        fall_probability = float(probabilities.get("fall_down", 0.0))
-        lying_probability = float(probabilities.get("lying_down", 0.0))
-        fall_detected = fall_probability >= self.cfg.behavior_fall_threshold
-        lying_detected = lying_probability >= self.cfg.behavior_lying_threshold
-
         metrics = dict(assessment.metrics)
-        metrics["behavior_valid_ratio"] = round(track.behavior_valid_ratio, 4)
-        metrics["behavior_window_seconds"] = round(track.behavior_window_seconds, 4)
-        metrics["behavior_inference_ms"] = round(track.behavior_inference_ms, 3)
-        for label, probability in probabilities.items():
-            metrics[f"behavior_probability_{label}"] = round(float(probability), 4)
+        for name, value in (
+            ("behavior_valid_ratio", track.behavior_valid_ratio),
+            ("behavior_window_seconds", track.behavior_window_seconds),
+            ("behavior_inference_ms", track.behavior_inference_ms),
+            ("learned_safety_confidence", track.safety_confidence),
+            ("pose_torso_quality", track.torso_quality),
+            ("pose_upper_body_quality", track.upper_body_quality),
+            ("pose_lower_body_quality", track.lower_body_quality),
+            ("pose_visible_ratio", track.visible_ratio),
+        ):
+            metrics[name] = round(float(value), 4)
+        for label, probability in track.behavior_probabilities.items():
+            metrics[f"behavior_probability_{label}"] = round(
+                float(probability), 4
+            )
+        for label, probability in track.safety_probabilities.items():
+            metrics[f"learned_{label}"] = round(float(probability), 4)
 
-        signals = list(assessment.signals)
-        risk = assessment.risk_score
-        severity = assessment.severity
-        status = assessment.status
-        confirmed = assessment.confirmed
+        if self.cfg.heuristic_alerts_enabled:
+            risk = assessment.risk_score
+            severity = assessment.severity
+            status = assessment.status
+            signals = list(assessment.signals)
+            confirmed = assessment.confirmed
+        else:
+            # Model-only mode: geometry is telemetry, never an alert source.
+            risk = 0.0
+            severity = "OK"
+            status = (
+                "collecting_history"
+                if assessment.status == "collecting_history"
+                else "insufficient_pose"
+            )
+            signals = []
+            confirmed = False
 
-        if fall_detected:
-            if "ml_fall_down" not in signals:
+        decision = track.learned_decision
+        decision_fresh = (
+            decision is not None
+            and timestamp - track.behavior_last_prediction_at
+            <= max(1.0, self.cfg.cached_result_ttl_seconds + 0.4)
+        )
+
+        learned_event_type: str | None = None
+        learned_event_reason = ""
+        if self.cfg.learned_events_enabled and decision_fresh:
+            learned_event_type = decision.event_type
+            learned_event_reason = decision.reason
+            risk = max(risk, float(decision.score))
+            severity = decision.severity if decision.severity in {
+                "OK", "WARNING", "DANGER"
+            } else "OK"
+            status = decision.status
+            # A learned confirmation is an edge-triggered event.  The latest
+            # decision remains cached between classifier runs so its telemetry
+            # can still be displayed, but persisting that cached True on every
+            # pose cycle would create duplicate alerts for one event.
+            confirmed = bool(
+                decision.confirmed
+                and track.behavior_confirmation_emitted_version
+                != track.behavior_prediction_version
+            )
+            if confirmed:
+                track.behavior_confirmation_emitted_version = (
+                    track.behavior_prediction_version
+                )
+
+            if decision.event_type:
+                if decision.event_type not in signals:
+                    signals.append(decision.event_type)
+                # Compatibility aliases keep the existing evidence and UI
+                # paths operational while the new explicit names are exposed.
+                if decision.event_type in {"fall_detected", "fall_suspected"}:
+                    if "ml_fall_down" not in signals:
+                        signals.append("ml_fall_down")
+                elif decision.event_type == "person_on_ground":
+                    if "ml_lying_down" not in signals:
+                        signals.append("ml_lying_down")
+
+        elif not self.cfg.learned_events_enabled and track.behavior_probabilities:
+            # Explicit legacy mode for older deployments/tests.
+            fall_probability = float(
+                track.behavior_probabilities.get("fall_down", 0.0)
+            )
+            lying_probability = float(
+                track.behavior_probabilities.get("lying_down", 0.0)
+            )
+            if fall_probability >= self.cfg.behavior_fall_threshold:
                 signals.append("ml_fall_down")
-            risk = max(risk, fall_probability, self.cfg.danger_score)
-            severity = "DANGER"
-            status = "high_risk"
-        elif lying_detected:
-            if "ml_lying_down" not in signals:
+                risk = max(risk, fall_probability, self.cfg.danger_score)
+                severity = "DANGER"
+                status = "high_risk"
+            elif lying_probability >= self.cfg.behavior_lying_threshold:
                 signals.append("ml_lying_down")
-            risk = max(risk, self.cfg.warning_score, 0.90 * lying_probability)
-            if severity != "DANGER":
+                risk = max(risk, lying_probability, self.cfg.warning_score)
                 severity = "WARNING"
                 status = "verification_required"
-
-        new_prediction = track.behavior_prediction_version > track.behavior_streak_version
-        if new_prediction:
-            track.behavior_streak_version = track.behavior_prediction_version
-            if fall_detected:
-                track.behavior_fall_streak += 1
-                track.behavior_lying_streak = 0
-            elif lying_detected:
-                track.behavior_lying_streak += 1
-                track.behavior_fall_streak = 0
-            else:
-                track.behavior_fall_streak = 0
-                track.behavior_lying_streak = 0
-
-        enough_fall = (
-            fall_detected
-            and track.behavior_fall_streak
-            >= self.cfg.behavior_fall_consecutive_windows
-        )
-        enough_lying = (
-            lying_detected
-            and track.behavior_lying_streak
-            >= self.cfg.behavior_lying_consecutive_windows
-        )
-
-        # Escalate sustained lying after temporal confirmation.
-        if enough_lying:
-            if "ml_lying_down_confirmed" not in signals:
-                signals.append("ml_lying_down_confirmed")
-            risk = max(risk, lying_probability, self.cfg.danger_score)
-            severity = "DANGER"
-            status = "high_risk"
-
-        if (
-            new_prediction
-            and self.cfg.behavior_alerts_enabled
-            and (enough_fall or enough_lying)
-            and timestamp - track.behavior_last_alert_time >= self.cfg.cooldown_seconds
-        ):
-            confirmed = True
-            track.behavior_last_alert_time = timestamp
 
         return replace(
             assessment,
             risk_score=_clip01(risk),
             severity=severity,
             status=status,
-            signals=signals,
+            signals=list(dict.fromkeys(signals)),
             metrics=metrics,
             confirmed=confirmed,
             behavior_label=track.behavior_label,
             behavior_confidence=track.behavior_confidence,
-            behavior_probabilities=probabilities,
+            behavior_probabilities=dict(track.behavior_probabilities),
             behavior_valid_ratio=track.behavior_valid_ratio,
             behavior_window_seconds=track.behavior_window_seconds,
             behavior_inference_ms=track.behavior_inference_ms,
+            safety_label=track.safety_label,
+            safety_confidence=track.safety_confidence,
+            safety_probabilities=dict(track.safety_probabilities),
+            torso_quality=track.torso_quality,
+            upper_body_quality=track.upper_body_quality,
+            lower_body_quality=track.lower_body_quality,
+            visible_ratio=track.visible_ratio,
+            learned_event_type=learned_event_type,
+            learned_event_reason=learned_event_reason,
         )
 
     def _evaluate_track(
@@ -1368,6 +1720,8 @@ class PostureAnalyzer:
         frame_height: int,
         previous_gray: np.ndarray | None = None,
         current_gray: np.ndarray | None = None,
+        flow_track_ids: set[int] | None = None,
+        timings_ms: dict[str, float] | None = None,
     ) -> list[PostureAssessment]:
         out: list[PostureAssessment] = []
         for person, track in assignments.values():
@@ -1396,11 +1750,16 @@ class PostureAnalyzer:
                 landmarks is not None
                 and source_landmarks is not None
                 and self.cfg.optical_flow_enabled
+                and (
+                    flow_track_ids is None
+                    or track.track_id in flow_track_ids
+                )
                 and previous_gray is not None
                 and current_gray is not None
                 and old_frame_width == frame_width
                 and old_frame_height == frame_height
             ):
+                flow_started = time.perf_counter()
                 landmarks, flow_points = track_pose_optical_flow(
                     previous_gray,
                     current_gray,
@@ -1415,6 +1774,11 @@ class PostureAnalyzer:
                     fb_threshold_px=self.cfg.optical_flow_fb_threshold_px,
                     max_jump_frac=self.cfg.optical_flow_max_jump_frac,
                 )
+                if timings_ms is not None:
+                    timings_ms["optical_flow_ms"] = (
+                        timings_ms.get("optical_flow_ms", 0.0)
+                        + (time.perf_counter() - flow_started) * 1000.0
+                    )
             if landmarks is not None:
                 track.display_landmarks = landmarks.copy()
                 track.display_box = person.box
@@ -1446,6 +1810,7 @@ class PostureManager:
         config: PostureConfig | None = None,
         estimator_factory: Callable[[PostureConfig], PoseEstimator] | None = None,
         behavior_classifier: "BehaviorClassifier | None" = None,
+        performance_profiler=None,
     ):
         self.cfg = config or CONFIG.posture
         self._factory = estimator_factory or MediaPipePoseEstimator
@@ -1453,6 +1818,7 @@ class PostureManager:
         self._last_used: dict[str, float] = {}
         self.available, self.unavailable_reason = self._check_available()
         self.behavior_classifier = behavior_classifier
+        self.performance_profiler = performance_profiler
         self.behavior_available = behavior_classifier is not None
         self.behavior_unavailable_reason: str | None = None
         # Custom estimator factories are predominantly used by deterministic
@@ -1505,7 +1871,20 @@ class PostureManager:
                 return PostureProcessResult([], inference_ran=False)
             self._analyzers[camera_id] = analyzer
         self._last_used[camera_id] = time.monotonic()
-        return analyzer.process(frame, persons, timestamp)
+        result = analyzer.process(frame, persons, timestamp)
+        if self.performance_profiler is not None:
+            has_person = any(person.category == "person" for person in persons)
+            for stage, elapsed_ms in result.timings_ms.items():
+                # Zero means that an optional stage was not invoked; excluding
+                # it keeps latency distributions distinct from skip counts.
+                if elapsed_ms > 0.0:
+                    self.performance_profiler.observe(
+                        stage,
+                        elapsed_ms,
+                        has_person=has_person,
+                        source="posture_worker",
+                    )
+        return result
 
     def _evict_if_needed(self) -> None:
         if len(self._analyzers) < self.cfg.max_camera_instances:
@@ -1533,6 +1912,7 @@ class _PostureWorkerJob:
     frame: np.ndarray
     persons: tuple[Detection, ...]
     timestamp: float
+    generation: int
 
 
 class PostureWorker:
@@ -1568,12 +1948,16 @@ class PostureWorker:
 
         self._condition = threading.Condition()
         self._manager_close_lock = threading.Lock()
+        self._manager_operation_lock = threading.Lock()
         self._pending: _PostureWorkerJob | None = None
         self._results: OrderedDict[str, PostureWorkerSnapshot] = OrderedDict()
         self._active = False
+        self._active_camera_id: str | None = None
         self._closed = False
         self._manager_closed = False
         self._disabled_cameras: set[str] = set()
+        self._resetting_cameras: set[str] = set()
+        self._camera_generations: dict[str, int] = {}
         self._thread: threading.Thread | None = None
         if autostart:
             self.start()
@@ -1599,6 +1983,8 @@ class PostureWorker:
         frame: np.ndarray,
         persons: list[Detection],
         timestamp: float,
+        *,
+        _copy_frame: bool = True,
     ) -> bool:
         """Submit a safe private snapshot, replacing any pending older job.
 
@@ -1607,20 +1993,54 @@ class PostureWorker:
 
         if not camera_id:
             raise ValueError("camera_id must not be empty")
-        frame_copy = np.array(frame, copy=True)
+        with self._condition:
+            if (
+                self._closed
+                or camera_id in self._disabled_cameras
+                or camera_id in self._resetting_cameras
+            ):
+                return False
+            generation = self._camera_generations.get(camera_id, 0)
+        frame_copy = (
+            np.array(frame, copy=True)
+            if _copy_frame else frame
+        )
         people_copy = tuple(replace(person) for person in persons)
         job = _PostureWorkerJob(
             camera_id=camera_id,
             frame=frame_copy,
             persons=people_copy,
             timestamp=float(timestamp),
+            generation=generation,
         )
         with self._condition:
-            if self._closed or camera_id in self._disabled_cameras:
+            if (
+                self._closed
+                or camera_id in self._disabled_cameras
+                or camera_id in self._resetting_cameras
+                or generation != self._camera_generations.get(camera_id, 0)
+            ):
                 return False
             self._pending = job
             self._condition.notify()
             return True
+
+    def submit_borrowed_latest(
+        self,
+        camera_id: str,
+        frame: np.ndarray,
+        persons: list[Detection],
+        timestamp: float,
+    ) -> bool:
+        """Internal zero-copy submission for an immutable decoded FrameJob."""
+
+        return self.submit_latest(
+            camera_id,
+            frame,
+            persons,
+            timestamp,
+            _copy_frame=False,
+        )
 
     def set_camera_enabled(self, camera_id: str, enabled: bool) -> None:
         """Enable/disable submissions and discard stale results dynamically."""
@@ -1629,10 +2049,64 @@ class PostureWorker:
                 self._disabled_cameras.discard(camera_id)
             else:
                 self._disabled_cameras.add(camera_id)
+                self._camera_generations[camera_id] = (
+                    self._camera_generations.get(camera_id, 0) + 1
+                )
                 if self._pending is not None and self._pending.camera_id == camera_id:
                     self._pending = None
                 self._results.pop(camera_id, None)
             self._condition.notify_all()
+
+    def reset_camera(
+        self,
+        camera_id: str,
+        *,
+        timeout: float | None = 5.0,
+    ) -> bool:
+        """Invalidate stale work, wait for a native call, then clear history."""
+        deadline = (
+            None if timeout is None
+            else time.monotonic() + max(0.0, float(timeout))
+        )
+        with self._condition:
+            self._resetting_cameras.add(camera_id)
+            self._camera_generations[camera_id] = (
+                self._camera_generations.get(camera_id, 0) + 1
+            )
+            if self._pending is not None and self._pending.camera_id == camera_id:
+                self._pending = None
+            self._results.pop(camera_id, None)
+            self._condition.notify_all()
+            while self._active_camera_id == camera_id:
+                remaining = (
+                    None if deadline is None else deadline - time.monotonic()
+                )
+                if remaining is not None and remaining <= 0.0:
+                    self._resetting_cameras.discard(camera_id)
+                    self._condition.notify_all()
+                    return False
+                self._condition.wait(remaining)
+        remaining = (
+            None if deadline is None else max(0.0, deadline - time.monotonic())
+        )
+        acquired = (
+            self._manager_operation_lock.acquire()
+            if remaining is None
+            else self._manager_operation_lock.acquire(timeout=remaining)
+        )
+        if not acquired:
+            with self._condition:
+                self._resetting_cameras.discard(camera_id)
+                self._condition.notify_all()
+            return False
+        try:
+            self.manager.reset_camera(camera_id)
+        finally:
+            self._manager_operation_lock.release()
+            with self._condition:
+                self._resetting_cameras.discard(camera_id)
+                self._condition.notify_all()
+        return True
 
     @property
     def pending_count(self) -> int:
@@ -1713,17 +2187,19 @@ class PostureWorker:
                     job = self._pending
                     self._pending = None
                     self._active = True
+                    self._active_camera_id = job.camera_id
 
                 assert job is not None
                 result: PostureProcessResult | None = None
                 error: str | None = None
                 try:
-                    result = self.manager.process(
-                        job.camera_id,
-                        job.frame,
-                        list(job.persons),
-                        job.timestamp,
-                    )
+                    with self._manager_operation_lock:
+                        result = self.manager.process(
+                            job.camera_id,
+                            job.frame,
+                            list(job.persons),
+                            job.timestamp,
+                        )
                 except Exception as exc:  # keep the long-lived worker alive
                     error = f"{type(exc).__name__}: {exc}"
 
@@ -1735,12 +2211,18 @@ class PostureWorker:
                     error=error,
                 )
                 with self._condition:
-                    if job.camera_id not in self._disabled_cameras:
+                    if (
+                        job.camera_id not in self._disabled_cameras
+                        and job.camera_id not in self._resetting_cameras
+                        and job.generation
+                        == self._camera_generations.get(job.camera_id, 0)
+                    ):
                         self._results[job.camera_id] = snapshot
                         self._results.move_to_end(job.camera_id)
                         while len(self._results) > self.max_result_cameras:
                             self._results.popitem(last=False)
                     self._active = False
+                    self._active_camera_id = None
                     self._condition.notify_all()
         finally:
             if self.close_manager:

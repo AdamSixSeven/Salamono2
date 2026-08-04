@@ -1,3 +1,4 @@
+/* Smooth, bounded MediaPipe landmark interpolation for the live overlay. */
 (function (root, factory) {
     "use strict";
 
@@ -122,6 +123,8 @@
                 const existing = this.tracks.get(trackId);
                 seen.add(trackId);
 
+                // app.js emits the same payload before and after image decode.
+                // Do not reset a running transition for that duplicate event.
                 if (existing && token !== null && existing.token === token &&
                     sameLandmarks(existing.current, target)) {
                     return;

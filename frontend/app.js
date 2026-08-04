@@ -4,7 +4,14 @@
 
     const State = {
         wsStatus: "connecting",
-        stats: { fps: 0, detectionMs: 0, frameCount: 0 },
+        stats: {
+            fps: 0,
+            detectionMs: 0,
+            frameCount: 0,
+            overlayMs: 0,
+            overlayAverageMs: 0,
+            overlaySamples: 0,
+        },
         mode: "site",           // "site" | "checkpoint"
         layers: loadLayers(),   // { boxes, posture, zones, markers, distances }
         activeAlarm: null,      // { title, meta, ts, source }
@@ -82,8 +89,15 @@
     const pairPhoneBtn = document.getElementById("pairPhoneBtn");
     const addCameraBtn = document.getElementById("addCameraBtn");
     const demoVideoBtn = document.getElementById("demoVideoBtn");
+    const demoVideoStopBtn = document.getElementById("demoVideoStopBtn");
+    const demoVideoChangeBtn = document.getElementById("demoVideoChangeBtn");
     const demoVideoInput = document.getElementById("demoVideoInput");
+    const demoVideoStatusPanel = document.getElementById("demoVideoStatusPanel");
+    const demoVideoStatusText = document.getElementById("demoVideoStatusText");
+    const demoVideoStatusMeta = document.getElementById("demoVideoStatusMeta");
+    const demoVideoProgress = document.getElementById("demoVideoProgress");
     const modeSegmented = document.getElementById("modeSegmented");
+    const aiModeBtn = document.getElementById("aiModeBtn");
     const ppeBadge = document.getElementById("ppeBadge");
     const ppeHeadline = document.getElementById("ppeHeadline");
     const ppeHardhat = document.getElementById("ppeHardhat");
@@ -125,7 +139,65 @@
     window.Perimetr.getLayers = () => ({ ...State.layers });
 
     let runtimeSyncTimer = null;
-    let runtimeSyncSequence = 0;
+    let runtimeSyncDesiredRevision = 0;
+    let runtimeSyncReadyRevision = 0;
+    let runtimeSyncCompletedRevision = 0;
+    let runtimeSyncRunning = false;
+    const runtimeLayerKeys = [
+        "boxes",
+        "posture",
+        "zones",
+        "markers",
+        "distances",
+        "worker_id",
+    ];
+    const runtimeSyncDebug = {
+        status: "idle",
+        requested_revision: 0,
+        completed_revision: 0,
+        camera_id: State.cameraId,
+        mode: State.mode,
+        detector_required: null,
+        last_error: null,
+        recovered: false,
+    };
+    let overlayDebug = {
+        overlay_ms: 0,
+        source: null,
+        camera_id: State.cameraId,
+        job_id: null,
+        run_id: null,
+        frame_index: null,
+        frame_id: null,
+        timestamp: null,
+    };
+
+    window.Perimetr.getDebugState = () => ({
+        cameraId: State.cameraId,
+        mode: State.mode,
+        wsStatus: State.wsStatus,
+        stats: { ...State.stats },
+        overlay: { ...overlayDebug },
+        runtimeSync: { ...runtimeSyncDebug },
+    });
+    window.Perimetr.reportOverlayMetric = metric => {
+        const overlayMs = Number(metric && metric.overlay_ms);
+        if (!Number.isFinite(overlayMs) || overlayMs < 0) return;
+        const rounded = Math.round(overlayMs * 1000) / 1000;
+        State.stats.overlayMs = rounded;
+        State.stats.overlaySamples += 1;
+        const alpha = 0.15;
+        State.stats.overlayAverageMs = State.stats.overlaySamples === 1
+            ? rounded
+            : State.stats.overlayAverageMs * (1 - alpha) + rounded * alpha;
+        overlayDebug = {
+            ...overlayDebug,
+            ...(metric || {}),
+            overlay_ms: rounded,
+        };
+        fpsLine.dataset.overlayMs = rounded.toFixed(3);
+        fpsLine.title = "Overlay ostatniej klatki: " + rounded.toFixed(2) + " ms";
+    };
 
     function runtimeLayerPayload() {
         return {
@@ -138,33 +210,199 @@
         };
     }
 
+    function runtimeContext() {
+        return {
+            cameraId: State.cameraId,
+            mode: State.mode,
+        };
+    }
+
+    function runtimeContextMatches(context) {
+        return context.cameraId === State.cameraId && context.mode === State.mode;
+    }
+
+    function runtimeUrl(context) {
+        return "/api/runtime/" + encodeURIComponent(context.cameraId) +
+            "?mode=" + encodeURIComponent(context.mode);
+    }
+
+    function runtimeErrorMessage(error) {
+        if (error && error.message) return String(error.message);
+        return String(error || "Nieznany błąd synchronizacji");
+    }
+
+    function setRuntimeSyncStatus(status, details) {
+        const info = details || {};
+        const detectorRequired = typeof info.detectorRequired === "boolean"
+            ? info.detectorRequired
+            : runtimeSyncDebug.detector_required;
+        const errorMessage = info.error ? runtimeErrorMessage(info.error) : null;
+        Object.assign(runtimeSyncDebug, {
+            status: status,
+            requested_revision: runtimeSyncDesiredRevision,
+            completed_revision: runtimeSyncCompletedRevision,
+            camera_id: State.cameraId,
+            mode: State.mode,
+            detector_required: detectorRequired,
+            last_error: errorMessage || info.lastError || null,
+            recovered: !!info.recovered,
+        });
+
+        let suffix = "Ustawienia lokalne";
+        if (status === "pending") suffix = "Oczekiwanie na zapis ustawień…";
+        else if (status === "syncing") suffix = "Zapisywanie ustawień…";
+        else if (status === "error") suffix = "Błąd synchronizacji: " + errorMessage;
+        else if (typeof detectorRequired === "boolean") {
+            suffix = detectorRequired ? "YOLO aktywne" : "YOLO zatrzymane";
+            if (info.recovered) suffix += " · stan odczytany ponownie z serwera";
+        }
+
+        layerTags.forEach(tag => {
+            if (tag.dataset.baseTitle === undefined) {
+                tag.dataset.baseTitle = tag.title || "";
+            }
+            tag.dataset.runtimeSync = status;
+            tag.setAttribute(
+                "aria-busy",
+                status === "pending" || status === "syncing" ? "true" : "false",
+            );
+            if (status === "error") {
+                tag.setAttribute("aria-invalid", "true");
+                tag.style.boxShadow = "0 0 0 2px var(--msbp-red)";
+            } else {
+                tag.removeAttribute("aria-invalid");
+                tag.style.boxShadow = "";
+            }
+            tag.title = (tag.dataset.baseTitle ? tag.dataset.baseTitle + " · " : "") + suffix;
+        });
+    }
+
+    function applyRuntimeOptions(options) {
+        if (!options || typeof options !== "object") {
+            throw new Error("Serwer nie zwrócił ustawień modułów");
+        }
+        const next = { ...State.layers };
+        runtimeLayerKeys.forEach(key => {
+            if (typeof options[key] !== "boolean") {
+                throw new Error("Niepełna odpowiedź ustawień modułów: " + key);
+            }
+            next[key] = options[key];
+        });
+        const changed = runtimeLayerKeys.some(key => next[key] !== State.layers[key]);
+        if (!changed) return;
+        State.layers = next;
+        saveLayers();
+        syncLayerButtons();
+        document.dispatchEvent(new CustomEvent("perimetr-layers", { detail: State.layers }));
+    }
+
+    async function requestRuntimeState(context, method, options) {
+        const requestOptions = {
+            method: method,
+            credentials: "same-origin",
+        };
+        if (method === "PATCH") {
+            requestOptions.headers = { "Content-Type": "application/json" };
+            requestOptions.body = JSON.stringify(options);
+        }
+        const response = await fetch(runtimeUrl(context), requestOptions);
+        if (!response.ok) throw new Error("HTTP " + response.status);
+        return response.json();
+    }
+
+    async function reconcileRuntimeState(context, revision, writeError) {
+        try {
+            const payload = await requestRuntimeState(context, "GET");
+            if (
+                revision === runtimeSyncDesiredRevision &&
+                runtimeContextMatches(context)
+            ) {
+                applyRuntimeOptions(payload.options);
+                setRuntimeSyncStatus("synced", {
+                    detectorRequired: !!payload.detector_required,
+                    lastError: runtimeErrorMessage(writeError),
+                    recovered: true,
+                });
+            }
+        } catch (readError) {
+            if (
+                revision === runtimeSyncDesiredRevision &&
+                runtimeContextMatches(context)
+            ) {
+                setRuntimeSyncStatus("error", {
+                    error: new Error(
+                        runtimeErrorMessage(writeError) +
+                        "; odczyt stanu serwera również się nie udał: " +
+                        runtimeErrorMessage(readError),
+                    ),
+                });
+            }
+        }
+    }
+
+    async function flushRuntimeProcessing() {
+        if (runtimeSyncRunning) return;
+        runtimeSyncRunning = true;
+        try {
+            while (runtimeSyncCompletedRevision < runtimeSyncReadyRevision) {
+                const revision = runtimeSyncReadyRevision;
+                const context = runtimeContext();
+                const requestedOptions = runtimeLayerPayload();
+                if (
+                    revision === runtimeSyncDesiredRevision &&
+                    runtimeContextMatches(context)
+                ) {
+                    setRuntimeSyncStatus("syncing");
+                }
+                try {
+                    const payload = await requestRuntimeState(
+                        context,
+                        "PATCH",
+                        requestedOptions,
+                    );
+                    runtimeSyncCompletedRevision = Math.max(
+                        runtimeSyncCompletedRevision,
+                        revision,
+                    );
+                    if (
+                        revision === runtimeSyncDesiredRevision &&
+                        runtimeContextMatches(context)
+                    ) {
+                        applyRuntimeOptions(payload.options);
+                        setRuntimeSyncStatus("synced", {
+                            detectorRequired: !!payload.detector_required,
+                        });
+                    }
+                } catch (error) {
+                    runtimeSyncCompletedRevision = Math.max(
+                        runtimeSyncCompletedRevision,
+                        revision,
+                    );
+                    console.error("Nie udało się zapisać ustawień modułów.", error);
+                    if (
+                        revision === runtimeSyncDesiredRevision &&
+                        runtimeContextMatches(context)
+                    ) {
+                        await reconcileRuntimeState(context, revision, error);
+                    }
+                }
+            }
+        } finally {
+            runtimeSyncRunning = false;
+            if (runtimeSyncCompletedRevision < runtimeSyncReadyRevision) {
+                void flushRuntimeProcessing();
+            }
+        }
+    }
+
     function syncRuntimeProcessing(delayMs) {
         clearTimeout(runtimeSyncTimer);
-        const sequence = ++runtimeSyncSequence;
-        runtimeSyncTimer = setTimeout(async () => {
-            try {
-                const response = await fetch(
-                    "/api/runtime/" + encodeURIComponent(State.cameraId) +
-                    "?mode=" + encodeURIComponent(State.mode),
-                    {
-                        method: "PATCH",
-                        headers: { "Content-Type": "application/json" },
-                        credentials: "same-origin",
-                        body: JSON.stringify(runtimeLayerPayload()),
-                    },
-                );
-                if (!response.ok) throw new Error("HTTP " + response.status);
-                if (sequence !== runtimeSyncSequence) return;
-                const payload = await response.json();
-                const detector = payload.detector_required ? "YOLO aktywne" : "YOLO zatrzymane";
-                layerTags.forEach(tag => {
-                    if (tag.dataset.baseTitle === undefined) {
-                        tag.dataset.baseTitle = tag.title || "";
-                    }
-                    tag.title = (tag.dataset.baseTitle ? tag.dataset.baseTitle + " · " : "") + detector;
-                });
-            } catch (_) {
-            }
+        const revision = ++runtimeSyncDesiredRevision;
+        setRuntimeSyncStatus("pending");
+        runtimeSyncTimer = setTimeout(() => {
+            runtimeSyncTimer = null;
+            runtimeSyncReadyRevision = Math.max(runtimeSyncReadyRevision, revision);
+            void flushRuntimeProcessing();
         }, Math.max(0, Number(delayMs) || 0));
     }
 
@@ -195,6 +433,8 @@
     });
     syncLayerButtons();
 
+
+    aiModeBtn.addEventListener("click", () => void requestDemoExport());
 
     modeSegmented.querySelectorAll("button").forEach(btn => {
         btn.addEventListener("click", () => {
@@ -296,88 +536,593 @@
     });
 
 
+    let demoState = "idle";
+    let demoJob = null;
+    let demoJobId = null;
+    let demoCameraId = null;
+    let demoRunId = null;
+    let demoLastFrameIndex = -1;
+    let demoGeneration = 0;
+    let demoUploadXhr = null;
+    let demoPollTimer = null;
+    let demoStatusController = null;
+    let demoControlController = null;
+    let demoLoadingTimer = null;
+    let demoActionPending = false;
+    let demoPollFailures = 0;
+    let demoReturnCameraId = null;
+    let demoDownloadedOutputUrl = null;
 
-    let demoVideoAbort = false;
-    let demoVideoRunning = false;
+    const DEMO_CAMERA_ID = "demo_upload";
+    const DEMO_STATUS_POLL_MS = 600;
+    const DEMO_PREPARE_TIMEOUT_MS = 45_000;
+    const DEMO_UPLOAD_TIMEOUT_MS = 30 * 60 * 1000;
+    const DEMO_BACKEND_STATES = new Set([
+        "uploaded", "loading", "ready", "playing", "paused", "finished",
+        "stopped", "failed", "deleted",
+    ]);
 
-    const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
-
-    async function postDemoFrame(canvasEl, timestamp) {
-        const blob = await new Promise(resolve => canvasEl.toBlob(resolve, "image/jpeg", 0.78));
-        if (!blob) return;
-        const form = new FormData();
-        form.append("image", blob, "demo-frame.jpg");
-        form.append("camera_id", State.cameraId);
-        form.append("timestamp", String(timestamp));
-        form.append("mode", State.mode);
-        const response = await fetch("/api/frame", {
-            method: "POST",
-            body: form,
-            credentials: "same-origin",
-        });
-        if (!response.ok) throw new Error("HTTP " + response.status);
+    function demoControlPresentation(state) {
+        const primaryLabels = {
+            idle: "Wybierz film",
+            uploading: "Wysyłanie…",
+            uploaded: "Przygotowywanie…",
+            loading: "Przygotowywanie…",
+            ready: "Odtwórz",
+            playing: "Pauza",
+            paused: "Wznów",
+            finished: "Odtwórz ponownie",
+            stopped: "Odtwórz",
+            failed: "Wybierz film",
+            deleted: "Wybierz film",
+        };
+        return {
+            primaryLabel: primaryLabels[state] || "Wybierz film",
+            primaryDisabled: ["uploading", "uploaded", "loading"].includes(state),
+            showStop: !!demoJobId && ["loading", "ready", "playing", "paused"].includes(state),
+            showChange: state !== "idle" && state !== "deleted",
+        };
     }
 
-    async function runDemoVideo(file) {
-        if (!file || demoVideoRunning) return;
-        demoVideoRunning = true;
-        demoVideoAbort = false;
-        const oldLabel = demoVideoBtn.textContent;
-        demoVideoBtn.textContent = "Zatrzymaj film";
-        demoVideoBtn.classList.add("px-btn--solid");
+    function formatDemoBytes(value) {
+        const bytes = Number(value);
+        if (!Number.isFinite(bytes) || bytes < 0) return "";
+        if (bytes < 1024) return bytes + " B";
+        if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB";
+        return (bytes / (1024 * 1024)).toFixed(1) + " MB";
+    }
 
-        const demoCamera = "demo_upload";
-        selectCamera(demoCamera);
-        cameraSelect.value = demoCamera;
+    function formatDemoTime(value) {
+        const seconds = Number(value);
+        if (!Number.isFinite(seconds) || seconds < 0) return "";
+        const whole = Math.floor(seconds);
+        const minutes = Math.floor(whole / 60);
+        const rest = String(whole % 60).padStart(2, "0");
+        return minutes + ":" + rest;
+    }
 
-        const video = document.createElement("video");
-        video.muted = true;
-        video.playsInline = true;
-        video.preload = "auto";
-        const objectUrl = URL.createObjectURL(file);
-        video.src = objectUrl;
-        const capture = document.createElement("canvas");
-        const cctx = capture.getContext("2d");
+    function demoStatusMessage(state, job) {
+        if (job && job.export_status === "processing") {
+            return "Pełna analiza AI i zapis filmu…";
+        }
+        if (job && job.export_status === "ready") {
+            return "Film z analizą AI zapisany";
+        }
+        const messages = {
+            idle: "Wybierz plik MP4, AVI, MOV lub MKV",
+            uploading: "Wysyłanie: " + Math.round(Number(job.upload_percent) || 0) + "%",
+            uploaded: "Zapisywanie pliku…",
+            loading: "Odczytywanie informacji o filmie…",
+            ready: "Gotowy",
+            playing: "Odtwarzanie",
+            paused: "Pauza",
+            finished: "Zakończono",
+            stopped: "Zatrzymano",
+            failed: "Błąd: " + (job.error || "Nie udało się przygotować filmu"),
+            deleted: "Usunięto",
+        };
+        return messages[state] || messages.failed;
+    }
 
+    function demoStatusMeta(job) {
+        const parts = [];
+        if (job.filename) parts.push(job.filename);
+        const size = formatDemoBytes(job.size_bytes);
+        if (size) parts.push(size);
+        const current = formatDemoTime(job.current_time_sec ?? job.source_time_sec);
+        const duration = formatDemoTime(job.duration_sec);
+        if (current || duration) parts.push((current || "0:00") + (duration ? " / " + duration : ""));
+        const processingFps = Number(job.processing_fps);
+        if (Number.isFinite(processingFps) && processingFps > 0) {
+            parts.push(processingFps.toFixed(1) + " kl/s");
+        }
+        return parts.join(" · ");
+    }
+
+    function updateDemoControls(state, job) {
+        demoState = state;
+        demoJob = job || demoJob || {};
+        const presentation = demoControlPresentation(state);
+
+        demoVideoBtn.textContent = presentation.primaryLabel;
+        demoVideoBtn.disabled = presentation.primaryDisabled || demoActionPending;
+        demoVideoBtn.classList.toggle(
+            "px-btn--solid",
+            ["ready", "playing", "paused", "finished", "stopped"].includes(state),
+        );
+        demoVideoStopBtn.classList.toggle("hidden", !presentation.showStop);
+        demoVideoStopBtn.disabled = demoActionPending;
+        demoVideoChangeBtn.classList.toggle("hidden", !presentation.showChange);
+        demoVideoChangeBtn.disabled = false;
+        const exportRunning = job && job.export_status === "processing";
+        aiModeBtn.disabled = demoActionPending || exportRunning || !demoJobId ||
+            ["uploading", "uploaded", "loading", "playing", "paused"].includes(state);
+        aiModeBtn.classList.toggle("is-processing", !!exportRunning);
+        aiModeBtn.title = exportRunning
+            ? "Trwa pełna analiza AI i zapis filmu"
+            : "Przetwórz cały film i zapisz MP4";
+
+        demoVideoStatusPanel.classList.toggle("hidden", state === "idle");
+        demoVideoStatusPanel.classList.toggle("is-error", state === "failed");
+        demoVideoStatusText.textContent = demoStatusMessage(state, demoJob);
+        demoVideoStatusMeta.textContent = demoStatusMeta(demoJob);
+        demoVideoProgress.classList.toggle("hidden", state !== "uploading");
+        demoVideoProgress.value = Math.max(
+            0,
+            Math.min(100, Number(demoJob.upload_percent) || 0),
+        );
+        demoVideoProgress.textContent = Math.round(demoVideoProgress.value) + "%";
+    }
+
+    function clearDemoPreparationWatchdog() {
+        if (demoLoadingTimer !== null) {
+            clearTimeout(demoLoadingTimer);
+            demoLoadingTimer = null;
+        }
+    }
+
+    function clearDemoPollTimer() {
+        if (demoPollTimer !== null) {
+            clearTimeout(demoPollTimer);
+            demoPollTimer = null;
+        }
+    }
+
+    function abortDemoController(controller) {
+        if (!controller) return;
+        try { controller.abort(); } catch (_) {}
+    }
+
+    function cancelDemoRequests() {
+        clearDemoPollTimer();
+        clearDemoPreparationWatchdog();
+        abortDemoController(demoStatusController);
+        abortDemoController(demoControlController);
+        demoStatusController = null;
+        demoControlController = null;
+        if (demoUploadXhr) {
+            try { demoUploadXhr.abort(); } catch (_) {}
+            demoUploadXhr = null;
+        }
+        demoActionPending = false;
+    }
+
+    function resetDemoFrameAcceptance() {
+        demoRunId = null;
+        demoLastFrameIndex = -1;
+        lastRenderedTs = 0;
+        frameRenderSequence += 1;
+        pendingBinaryFrames.length = 0;
+        document.dispatchEvent(new CustomEvent("perimetr-demo-run-changed", {
+            detail: { job_id: demoJobId, run_id: null },
+        }));
+    }
+
+    function activateDemoRun(runId, reconnect, force) {
+        const nextRunId = runId === null || runId === undefined ? null : String(runId);
+        if (!force && nextRunId === demoRunId) return false;
+        demoRunId = nextRunId;
+        demoLastFrameIndex = -1;
+        lastRenderedTs = 0;
+        frameRenderSequence += 1;
+        pendingBinaryFrames.length = 0;
+        document.dispatchEvent(new CustomEvent("perimetr-demo-run-changed", {
+            detail: { job_id: demoJobId, run_id: demoRunId },
+        }));
+        if (reconnect && demoCameraId && State.cameraId === demoCameraId) {
+            connectWebSocket();
+        }
+        return true;
+    }
+
+    function markDemoFailed(message, generation) {
+        if (generation !== undefined && generation !== demoGeneration) return;
+        clearDemoPollTimer();
+        clearDemoPreparationWatchdog();
+        demoActionPending = false;
+        demoJob = Object.assign({}, demoJob || {}, {
+            job_id: demoJobId,
+            status: "failed",
+            error: String(message || "Nieznany błąd"),
+        });
+        updateDemoControls("failed", demoJob);
+    }
+
+    function startDemoPreparationWatchdog(generation) {
+        if (demoLoadingTimer !== null) return;
+        demoLoadingTimer = setTimeout(() => {
+            demoLoadingTimer = null;
+            if (generation !== demoGeneration) return;
+            if (!["uploaded", "loading"].includes(demoState)) return;
+            markDemoFailed(
+                "Backend nie przygotował filmu w ciągu " +
+                    Math.round(DEMO_PREPARE_TIMEOUT_MS / 1000) + " s.",
+                generation,
+            );
+        }, DEMO_PREPARE_TIMEOUT_MS);
+    }
+
+    function normalizeDemoBackendState(value) {
+        const state = String(value || "").toLowerCase();
+        return DEMO_BACKEND_STATES.has(state) ? state : "failed";
+    }
+
+    function shouldPollDemoStatus(state) {
+        return ["uploaded", "loading", "playing"].includes(state);
+    }
+
+    function applyDemoSnapshot(snapshot, generation, options) {
+        if (generation !== demoGeneration || !snapshot) return false;
+        if (snapshot.job_id && demoJobId && String(snapshot.job_id) !== demoJobId) return false;
+
+        const nextState = normalizeDemoBackendState(snapshot.status);
+        demoJob = Object.assign({}, demoJob || {}, snapshot, { status: nextState });
+        if (snapshot.camera_id) demoCameraId = String(snapshot.camera_id);
+
+        const reconnectOnRunChange = !(options && options.reconnectOnRunChange === false);
+        if (snapshot.run_id !== undefined && snapshot.run_id !== null) {
+            activateDemoRun(snapshot.run_id, reconnectOnRunChange);
+        }
+
+        if (["uploaded", "loading"].includes(nextState)) {
+            startDemoPreparationWatchdog(generation);
+        } else {
+            clearDemoPreparationWatchdog();
+        }
+        updateDemoControls(nextState, demoJob);
+        if (
+            snapshot.export_status === "ready" && snapshot.output_url &&
+            demoDownloadedOutputUrl !== snapshot.output_url
+        ) {
+            demoDownloadedOutputUrl = snapshot.output_url;
+            const download = document.createElement("a");
+            download.href = snapshot.output_url;
+            download.download = snapshot.output_filename || "perimetr_ai.mp4";
+            document.body.appendChild(download);
+            download.click();
+            download.remove();
+        }
+        return true;
+    }
+
+    async function requestDemoExport() {
+        if (!demoJobId) {
+            openDemoFilePicker();
+            return;
+        }
+        if (!["ready", "finished", "stopped"].includes(demoState)) return;
+        demoActionPending = true;
+        demoDownloadedOutputUrl = null;
+        updateDemoControls(demoState, demoJob);
         try {
-            await new Promise((resolve, reject) => {
-                video.onloadedmetadata = resolve;
-                video.onerror = () => reject(new Error("Nie można odczytać filmu"));
-            });
-            const scale = Math.min(1, 1280 / Math.max(1, video.videoWidth));
-            capture.width = Math.max(2, Math.round(video.videoWidth * scale));
-            capture.height = Math.max(2, Math.round(video.videoHeight * scale));
-            await video.play();
+            const response = await fetch(
+                "/api/demo-videos/" + encodeURIComponent(demoJobId) + "/export",
+                { method: "POST", credentials: "same-origin" },
+            );
+            if (!response.ok) {
+                const raw = await response.text();
+                throw new Error(demoResponseError(raw, "Nie udało się uruchomić eksportu AI"));
+            }
+            const snapshot = await response.json();
+            applyDemoSnapshot(snapshot, demoGeneration);
+            scheduleDemoStatusPoll(0, demoGeneration);
+        } catch (err) {
+            markDemoFailed("Eksport AI: " + (err.message || err), demoGeneration);
+        } finally {
+            demoActionPending = false;
+            updateDemoControls(demoState, demoJob);
+        }
+    }
 
-            const sampleIntervalMs = 200;
-            while (!video.ended && !demoVideoAbort) {
-                const started = performance.now();
-                cctx.drawImage(video, 0, 0, capture.width, capture.height);
-                await postDemoFrame(capture, Date.now() / 1000);
-                const remaining = sampleIntervalMs - (performance.now() - started);
-                if (remaining > 0) await sleep(remaining);
+    function demoResponseError(raw, fallback) {
+        try {
+            const parsed = JSON.parse(raw || "{}");
+            return parsed.detail || parsed.error || fallback;
+        } catch (_) {
+            return fallback;
+        }
+    }
+
+    function scheduleDemoStatusPoll(delayMs, generation) {
+        clearDemoPollTimer();
+        if (!demoJobId || generation !== demoGeneration) return;
+        demoPollTimer = setTimeout(() => {
+            demoPollTimer = null;
+            void pollDemoStatus(generation);
+        }, Math.max(0, Number(delayMs) || 0));
+    }
+
+    async function pollDemoStatus(generation) {
+        if (!demoJobId || generation !== demoGeneration) return;
+        const jobId = demoJobId;
+        const controller = new AbortController();
+        demoStatusController = controller;
+        try {
+            const response = await fetch(
+                "/api/demo-videos/" + encodeURIComponent(jobId),
+                { credentials: "same-origin", signal: controller.signal },
+            );
+            if (!response.ok) {
+                const raw = await response.text();
+                throw new Error(demoResponseError(raw, "HTTP " + response.status));
+            }
+            const snapshot = await response.json();
+            if (!applyDemoSnapshot(snapshot, generation)) return;
+            demoPollFailures = 0;
+        } catch (err) {
+            if (err && err.name === "AbortError") return;
+            if (generation !== demoGeneration) return;
+            demoPollFailures += 1;
+            if (!["uploaded", "loading"].includes(demoState) && demoPollFailures >= 3) {
+                markDemoFailed("Nie można odczytać stanu filmu: " + (err.message || err), generation);
+            }
+        } finally {
+            if (demoStatusController === controller) demoStatusController = null;
+            if (
+                generation === demoGeneration &&
+                demoJobId === jobId &&
+                shouldPollDemoStatus(demoState)
+            ) {
+                scheduleDemoStatusPoll(DEMO_STATUS_POLL_MS, generation);
+            }
+        }
+    }
+
+    function deleteDemoJobBestEffort(jobId) {
+        if (!jobId) return;
+        void fetch("/api/demo-videos/" + encodeURIComponent(jobId), {
+            method: "DELETE",
+            credentials: "same-origin",
+            keepalive: true,
+        }).catch(() => {});
+    }
+
+    function returnFromDemoCamera(cameraId, returnCameraId) {
+        if (!cameraId || State.cameraId !== cameraId) return;
+        const target = returnCameraId && returnCameraId !== cameraId
+            ? returnCameraId
+            : "cam_default";
+        selectCamera(target);
+        cameraSelect.value = target;
+    }
+
+    function resetDemoClient(options) {
+        const oldCameraId = demoCameraId;
+        const returnCameraId = demoReturnCameraId;
+        demoGeneration += 1;
+        cancelDemoRequests();
+        resetDemoFrameAcceptance();
+        demoJob = null;
+        demoJobId = null;
+        demoCameraId = null;
+        demoPollFailures = 0;
+        demoReturnCameraId = null;
+        updateDemoControls("idle", {});
+        if (options && options.returnToCamera) {
+            returnFromDemoCamera(oldCameraId, returnCameraId);
+        }
+    }
+
+    function openDemoFilePicker() {
+        demoVideoInput.value = "";
+        demoVideoInput.click();
+    }
+
+    function changeDemoVideo() {
+        const oldJobId = demoJobId;
+        resetDemoClient({ returnToCamera: true });
+        deleteDemoJobBestEffort(oldJobId);
+        openDemoFilePicker();
+    }
+
+    function startDemoUpload(file) {
+        if (!file) return;
+
+        const oldJobId = demoJobId;
+        const oldCameraId = demoCameraId;
+        const oldReturnCameraId = demoReturnCameraId;
+        demoGeneration += 1;
+        const generation = demoGeneration;
+        cancelDemoRequests();
+        resetDemoFrameAcceptance();
+        deleteDemoJobBestEffort(oldJobId);
+        returnFromDemoCamera(oldCameraId, oldReturnCameraId);
+
+        demoJobId = null;
+        demoCameraId = DEMO_CAMERA_ID;
+        demoReturnCameraId = State.cameraId === DEMO_CAMERA_ID ? "cam_default" : State.cameraId;
+        demoPollFailures = 0;
+        demoJob = {
+            status: "uploading",
+            filename: file.name,
+            size_bytes: file.size,
+            upload_percent: 0,
+            error: null,
+        };
+        updateDemoControls("uploading", demoJob);
+
+        const form = new FormData();
+        form.append("video", file, file.name);
+        form.append("camera_id", DEMO_CAMERA_ID);
+        form.append("mode", State.mode);
+        form.append("playback_mode", "realtime");
+
+        const xhr = new XMLHttpRequest();
+        demoUploadXhr = xhr;
+        xhr.open("POST", "/api/demo-videos", true);
+        xhr.withCredentials = true;
+        xhr.timeout = DEMO_UPLOAD_TIMEOUT_MS;
+        xhr.upload.onprogress = event => {
+            if (generation !== demoGeneration || demoUploadXhr !== xhr) return;
+            if (!event.lengthComputable || event.total <= 0) return;
+            demoJob.upload_percent = Math.min(100, (event.loaded / event.total) * 100);
+            updateDemoControls("uploading", demoJob);
+        };
+        xhr.onload = () => {
+            if (generation !== demoGeneration || demoUploadXhr !== xhr) return;
+            demoUploadXhr = null;
+            if (xhr.status < 200 || xhr.status >= 300) {
+                markDemoFailed(
+                    demoResponseError(xhr.responseText, "Upload nie powiódł się: HTTP " + xhr.status),
+                    generation,
+                );
+                return;
+            }
+
+            let snapshot;
+            try {
+                snapshot = JSON.parse(xhr.responseText || "{}");
+            } catch (_) {
+                markDemoFailed("Backend zwrócił nieprawidłową odpowiedź po uploadzie.", generation);
+                return;
+            }
+            if (!snapshot.job_id) {
+                markDemoFailed("Backend nie zwrócił identyfikatora zadania.", generation);
+                return;
+            }
+
+            demoJobId = String(snapshot.job_id);
+            demoCameraId = String(snapshot.camera_id || DEMO_CAMERA_ID);
+            demoJob = Object.assign({}, demoJob, snapshot, { upload_percent: 100 });
+            selectCamera(demoCameraId);
+            refreshCameras();
+            applyDemoSnapshot(snapshot, generation, { reconnectOnRunChange: false });
+            scheduleDemoStatusPoll(0, generation);
+        };
+        xhr.onerror = () => {
+            if (generation !== demoGeneration || demoUploadXhr !== xhr) return;
+            demoUploadXhr = null;
+            markDemoFailed("Nie udało się wysłać filmu do backendu.", generation);
+        };
+        xhr.ontimeout = () => {
+            if (generation !== demoGeneration || demoUploadXhr !== xhr) return;
+            demoUploadXhr = null;
+            markDemoFailed("Przekroczono limit czasu wysyłania filmu.", generation);
+        };
+        xhr.onabort = () => {
+            if (generation !== demoGeneration || demoUploadXhr !== xhr) return;
+            demoUploadXhr = null;
+            markDemoFailed("Wysyłanie filmu zostało anulowane.", generation);
+        };
+        xhr.send(form);
+    }
+
+    async function requestDemoAction(action) {
+        if (!demoJobId || demoActionPending) return;
+        const generation = demoGeneration;
+        const jobId = demoJobId;
+        const previousRunId = demoRunId;
+        const expectsNewRun = action === "restart" ||
+            (action === "play" && demoState === "stopped");
+        if (expectsNewRun) {
+            // Keep the already-connected demo socket able to accept frame 0.
+            // The backend starts a fresh run before its HTTP response reaches
+            // us, so retaining the previous run_id here would discard those
+            // first, otherwise perfectly synchronized frames.
+            activateDemoRun(null, false, true);
+        }
+        demoActionPending = true;
+        updateDemoControls(demoState, demoJob);
+        const controller = new AbortController();
+        demoControlController = controller;
+        try {
+            const response = await fetch(
+                "/api/demo-videos/" + encodeURIComponent(jobId) + "/" + action,
+                {
+                    method: "POST",
+                    credentials: "same-origin",
+                    signal: controller.signal,
+                },
+            );
+            if (!response.ok) {
+                const raw = await response.text();
+                throw new Error(demoResponseError(raw, "HTTP " + response.status));
+            }
+            const snapshot = await response.json();
+            if (generation !== demoGeneration || jobId !== demoJobId) return;
+            if (
+                action === "restart" &&
+                (snapshot.run_id === null || snapshot.run_id === undefined ||
+                    String(snapshot.run_id) === previousRunId)
+            ) {
+                activateDemoRun(snapshot.run_id ?? null, true, true);
+            }
+            applyDemoSnapshot(snapshot, generation);
+            if (shouldPollDemoStatus(demoState)) {
+                scheduleDemoStatusPoll(0, generation);
+            } else {
+                clearDemoPollTimer();
             }
         } catch (err) {
-            alert("Nie udało się przeanalizować filmu: " + (err.message || err));
+            if (err && err.name === "AbortError") return;
+            if (generation === demoGeneration) {
+                markDemoFailed(
+                    "Operacja „" + action + "” nie powiodła się: " + (err.message || err),
+                    generation,
+                );
+            }
         } finally {
-            video.pause();
-            URL.revokeObjectURL(objectUrl);
-            demoVideoRunning = false;
-            demoVideoAbort = false;
-            demoVideoBtn.textContent = oldLabel || "Wczytaj film";
-            demoVideoBtn.classList.remove("px-btn--solid");
-            demoVideoInput.value = "";
+            if (demoControlController === controller) demoControlController = null;
+            if (generation === demoGeneration) {
+                demoActionPending = false;
+                updateDemoControls(demoState, demoJob);
+            }
         }
     }
 
     demoVideoBtn.addEventListener("click", () => {
-        if (demoVideoRunning) {
-            demoVideoAbort = true;
-            return;
+        if (["idle", "deleted"].includes(demoState)) {
+            openDemoFilePicker();
+        } else if (demoState === "failed") {
+            changeDemoVideo();
+        } else if (["ready", "stopped"].includes(demoState)) {
+            void requestDemoAction("play");
+        } else if (demoState === "playing") {
+            void requestDemoAction("pause");
+        } else if (demoState === "paused") {
+            void requestDemoAction("resume");
+        } else if (demoState === "finished") {
+            void requestDemoAction("restart");
         }
-        demoVideoInput.click();
     });
-    demoVideoInput.addEventListener("change", () => runDemoVideo(demoVideoInput.files[0]));
+
+    demoVideoStopBtn.addEventListener("click", () => {
+        void requestDemoAction("stop");
+    });
+
+    demoVideoChangeBtn.addEventListener("click", changeDemoVideo);
+
+    demoVideoInput.addEventListener("change", () => {
+        const [file] = demoVideoInput.files || [];
+        if (file) startDemoUpload(file);
+    });
+
+    window.addEventListener("beforeunload", () => {
+        const oldJobId = demoJobId;
+        demoGeneration += 1;
+        cancelDemoRequests();
+        deleteDemoJobBestEffort(oldJobId);
+    });
 
     const pairModal = document.getElementById("pairModal");
     const pairModalClose = document.getElementById("pairModalClose");
@@ -680,7 +1425,7 @@ function showWorkerQrPreview(workerId) {
             const saveLabel = workerSaveBtn.querySelector("span");
             if (saveLabel) saveLabel.textContent = "Zapisz";
             hideWorkerQrPreview();
-            setWorkerRegistryStatus("Pola oznaczone * są wymagane.");
+            setWorkerRegistryStatus("");
             if (focusId) workerQrInput.focus();
             return;
         }
@@ -928,6 +1673,54 @@ function showWorkerQrPreview(workerId) {
         };
     }
 
+    function queueBinaryMetadata(metadata) {
+        pendingBinaryFrames.push(metadata);
+        if (pendingBinaryFrames.length > 4) pendingBinaryFrames.shift();
+    }
+
+    function rejectWsMetadata(data) {
+        if (data && data.frame_transport === "binary-jpeg") {
+            // Preserve the JSON/binary message pairing even when this frame is
+            // intentionally rejected. The following blob consumes this slot.
+            queueBinaryMetadata(null);
+        }
+    }
+
+    function acceptDemoFrame(data) {
+        if (!demoJobId || String(data.job_id || "") !== demoJobId) return false;
+
+        const incomingRunId = data.run_id === null || data.run_id === undefined
+            ? null
+            : String(data.run_id);
+        if (demoRunId !== null && incomingRunId !== demoRunId) return false;
+        if (demoRunId === null && incomingRunId !== null) {
+            activateDemoRun(incomingRunId, false);
+        }
+
+        const frameIndex = Number(data.frame_index);
+        if (!Number.isInteger(frameIndex) || frameIndex < 0) return false;
+        if (frameIndex <= demoLastFrameIndex) return false;
+        demoLastFrameIndex = frameIndex;
+
+        demoJob = Object.assign({}, demoJob || {}, {
+            status: data.status || demoState,
+            current_frame: frameIndex,
+            current_time_sec: data.source_time_sec,
+            source_time_sec: data.source_time_sec,
+            processing_fps: data.processing_fps,
+        });
+        const frameState = String(data.status || "").toLowerCase();
+        if (DEMO_BACKEND_STATES.has(frameState)) {
+            const nextState = frameState;
+            if (!["uploaded", "loading"].includes(nextState)) {
+                clearDemoPreparationWatchdog();
+            }
+            updateDemoControls(nextState, demoJob);
+            if (!shouldPollDemoStatus(nextState)) clearDemoPollTimer();
+        }
+        return true;
+    }
+
     function onWsMessage(evt) {
         if (typeof evt.data !== "string") {
             const metadata = pendingBinaryFrames.shift();
@@ -935,14 +1728,26 @@ function showWorkerQrPreview(workerId) {
             return;
         }
         let data; try { data = JSON.parse(evt.data); } catch (_) { return; }
-        if ((data.camera_id || "cam_default") !== State.cameraId) return;
+        if ((data.camera_id || "cam_default") !== State.cameraId) {
+            rejectWsMetadata(data);
+            return;
+        }
+
+        const isDemoFrame = data.type === "frame" && data.job_id !== undefined;
+        if (isDemoFrame && !acceptDemoFrame(data)) {
+            rejectWsMetadata(data);
+            return;
+        }
         const ts = data.timestamp || 0;
-        if (ts && ts < lastRenderedTs) return;
+        if (!isDemoFrame && ts && ts < lastRenderedTs) {
+            rejectWsMetadata(data);
+            return;
+        }
         lastRenderedTs = ts;
 
         if (data.frame_transport === "binary-jpeg") {
             pendingBinaryFrames.push(data);
-            if (pendingBinaryFrames.length > 2) pendingBinaryFrames.shift();
+            if (pendingBinaryFrames.length > 4) pendingBinaryFrames.shift();
         } else {
             renderFrame(data);
         }
@@ -965,9 +1770,14 @@ function showWorkerQrPreview(workerId) {
             if (image && typeof image.close === "function") image.close();
             return;
         }
-        canvas.width = width;
-        canvas.height = height;
-        videoEl.style.aspectRatio = `${width} / ${height}`;
+        if (canvas.width !== width || canvas.height !== height) {
+            canvas.width = width;
+            canvas.height = height;
+        }
+        const aspectRatio = `${width} / ${height}`;
+        if (videoEl.style.aspectRatio !== aspectRatio) {
+            videoEl.style.aspectRatio = aspectRatio;
+        }
         ctx.drawImage(image, 0, 0);
         if (image && typeof image.close === "function") image.close();
         State.lastCameraSize = width + "×" + height;
@@ -1091,15 +1901,19 @@ function showWorkerQrPreview(workerId) {
         (data.confirmed_posture_alerts || []).forEach(p => {
             const details = (p.signals || []).slice(0, 2).map(x => POSTURE_SIGNAL_LABELS[x] || x);
             const signals = p.signals || [];
-            const fall = signals.includes("possible_fall") || signals.includes("ml_fall_down");
-            const lying = signals.includes("ml_lying_down");
-            const coordination = signals.some(signal => [
+            const fall = signals.includes("fall_detected") ||
+                signals.includes("fall_suspected") ||
+                signals.includes("possible_fall") || signals.includes("ml_fall_down");
+            const lying = signals.includes("person_on_ground") || signals.includes("ml_lying_down");
+            const unstable = signals.includes("unstable_movement");
+            const coordination = unstable || signals.some(signal => [
                 "repeated_body_sway", "unstable_trajectory", "irregular_step_pattern",
                 "upper_body_instability", "sudden_balance_loss",
             ].includes(signal));
             const smoking = signals.includes("hand_to_mouth_pattern") && !coordination;
-            const title = fall ? "Możliwy upadek"
-                        : lying ? "Wykryto pozycję leżącą"
+            const title = fall ? "Wykryto upadek"
+                        : lying ? "Wykryto osobę na ziemi"
+                        : unstable ? "Niestabilny ruch — weryfikacja"
                         : smoking ? "Możliwy gest palenia"
                         : "Nietypowa koordynacja";
             items.push({
@@ -1207,8 +2021,12 @@ function showWorkerQrPreview(workerId) {
         sudden_balance_loss: "utrata równowagi",
         possible_fall: "możliwy upadek / osunięcie",
         hand_to_mouth_pattern: "powtarzalny gest ręka–usta",
-        ml_fall_down: "TCN: upadek",
-        ml_lying_down: "TCN: pozycja leżąca",
+        ml_fall_down: "TCN+GRU: upadek",
+        ml_lying_down: "TCN+GRU: pozycja leżąca",
+        fall_suspected: "podejrzenie upadku",
+        fall_detected: "potwierdzony upadek",
+        person_on_ground: "osoba na ziemi",
+        unstable_movement: "niestabilny ruch",
     };
 
     const BEHAVIOR_LABELS = {
@@ -1219,6 +2037,8 @@ function showWorkerQrPreview(workerId) {
         stand_up: "wstawanie",
         standing: "stanie",
         walking: "chodzenie",
+        unstable_gait: "niestabilny chód",
+        other: "inna czynność",
     };
 
     function updatePosture(data) {
@@ -1228,7 +2048,7 @@ function showWorkerQrPreview(workerId) {
             return;
         }
         postureStatus.textContent = data.behavior_classifier_available
-            ? "postura + TCN aktywne" : "postura aktywna";
+            ? "postura + TCN/GRU aktywne" : "postura aktywna";
         const assessments = (data.posture_assessments || []).slice();
         if (!assessments.length) {
             postureBadge.classList.add("hidden");
@@ -1236,7 +2056,8 @@ function showWorkerQrPreview(workerId) {
         }
         assessments.sort((a, b) => (b.risk_score || 0) - (a.risk_score || 0));
         const p = assessments[0];
-        if (p.status === "normal" || p.status === "collecting_history") {
+        if (p.status === "normal" || p.status === "collecting_history" ||
+            String(p.status || "").startsWith("insufficient_")) {
             postureBadge.classList.add("hidden");
             return;
         }
@@ -1248,6 +2069,9 @@ function showWorkerQrPreview(workerId) {
             observation: "OBSERWACJA",
             verification_required: "WYMAGA WERYFIKACJI",
             high_risk: "WYSOKIE RYZYKO",
+            awaiting_ground_confirmation: "PODEJRZENIE UPADKU",
+            confirmed: "ZDARZENIE POTWIERDZONE",
+            cooldown: "ZDARZENIE W COOLDOWN",
         };
         postureScore.textContent = (statusLabels[p.status] || p.status) +
             " · " + Math.round((p.risk_score || 0) * 100) + "%";
@@ -1265,22 +2089,39 @@ function showWorkerQrPreview(workerId) {
 
 
     const workerUiTracks = new Map();
-    const WORKER_UI_HOLD_MS = 2600;
-    const WORKER_UI_LIVE_GRACE_MS = 1100;
+    // The backend refreshes the cached identity against the current detector
+    // box on every frame. Keep only a short UI grace period so a deleted track
+    // cannot leave a worker profile visible for several seconds.
+    const WORKER_UI_HOLD_MS = 900;
+    const WORKER_UI_LIVE_GRACE_MS = 500;
+
+    function workerUiTrackKey(identity) {
+        if (identity && identity.track_id !== null &&
+            identity.track_id !== undefined) {
+            return "track:" + String(identity.track_id);
+        }
+        return "worker:" + String(identity && identity.worker_id || "");
+    }
 
     function stableWorkerIdentities(rawIdentities) {
         const now = performance.now();
         (rawIdentities || []).forEach(identity => {
             if (!identity || !identity.worker_id) return;
-            const key = String(identity.worker_id);
+            const key = workerUiTrackKey(identity);
             const previous = workerUiTracks.get(key);
+            const sameWorker = previous &&
+                previous.identity.worker_id === identity.worker_id;
             const directRead = identity.cached !== true;
             workerUiTracks.set(key, {
-                identity: Object.assign({}, previous ? previous.identity : {}, identity),
+                identity: Object.assign(
+                    {},
+                    sameWorker ? previous.identity : {},
+                    identity,
+                ),
                 lastSeenAt: now,
                 lastLiveAt: directRead
                     ? now
-                    : (previous ? previous.lastLiveAt : now),
+                    : (sameWorker ? previous.lastLiveAt : now),
             });
         });
         const stable = [];
@@ -1411,10 +2252,17 @@ function showWorkerQrPreview(workerId) {
         if (postureDanger) {
             const t = postureDanger.timestamp ?
                 new Date(postureDanger.timestamp * 1000).toLocaleTimeString("pl-PL") : "—";
-            const fall = (postureDanger.signals || []).includes("possible_fall");
+            const postureSignals = postureDanger.signals || [];
+            const fall = postureSignals.includes("fall_detected") ||
+                postureSignals.includes("fall_suspected") ||
+                postureSignals.includes("possible_fall") || postureSignals.includes("ml_fall_down");
+            const ground = postureSignals.includes("person_on_ground") ||
+                postureSignals.includes("ml_lying_down");
             raiseAlarm(
-                fall ? "fall_detected" : "posture_anomaly",
-                fall ? "STOP — Możliwy upadek pracownika" : "STOP — Możliwa utrata koordynacji ruchowej",
+                fall ? "fall_detected" : (ground ? "person_on_ground" : "posture_anomaly"),
+                fall ? "STOP — Wykryto upadek pracownika"
+                     : ground ? "STOP — Wykryto osobę na ziemi"
+                     : "STOP — Wykryto niestabilny ruch",
                 t + " · " + State.cameraId + " · wymagana weryfikacja człowieka",
                 postureDanger.id
             );
@@ -1438,6 +2286,7 @@ function showWorkerQrPreview(workerId) {
 
     function selectCamera(cameraId) {
         State.cameraId = cameraId || "cam_default";
+        workerUiTracks.clear();
         lastRenderedTs = 0;
         frameRenderSequence++;
         pendingBinaryFrames.length = 0;

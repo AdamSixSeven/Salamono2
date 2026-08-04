@@ -58,6 +58,15 @@ class PostureAssessmentOut(BaseModel):
     behavior_valid_ratio: float = 0.0
     behavior_window_seconds: float = 0.0
     behavior_inference_ms: float = 0.0
+    safety_label: str | None = None
+    safety_confidence: float = 0.0
+    safety_probabilities: dict[str, float] = Field(default_factory=dict)
+    torso_quality: float = 0.0
+    upper_body_quality: float = 0.0
+    lower_body_quality: float = 0.0
+    visible_ratio: float = 0.0
+    learned_event_type: str | None = None
+    learned_event_reason: str = ""
     person: DetectionOut
     # MediaPipe Pose topology in normalized image coordinates:
     # [x, y, z, visibility].  The panel draws this locally so the live
@@ -101,9 +110,16 @@ class DynamicSafetyZoneOut(BaseModel):
 class WorkerIdentificationOut(BaseModel):
     worker_id: str
     source: str = "qr"
+    track_id: int | None = None
+    confidence: float | None = None
     person_box: list[int]
     tag_polygon: list[list[float]] = []
     cached: bool = False
+    identity_status: str = "confirmed"
+    identity_confidence: float | None = None
+    marker_age_sec: float | None = None
+    marker_id: int | None = None
+    alert_eligible: bool = False
     registered: bool = False
     first_name: str | None = None
     last_name: str | None = None
@@ -359,6 +375,10 @@ class AlarmRecord(BaseModel):
     camera_id: str = "cam_default"
     thumbnail_url: str | None = None
     clip_url: str | None = None
+    clip_available: bool = False
+    clip_filename: str | None = None
+    snapshot_url: str | None = None
+    worker: dict | None = None
     review_status: str = "new"       # new | acknowledged | confirmed | false_positive | escalated
     reviewed_at: float | None = None
     reviewed_by: str | None = None

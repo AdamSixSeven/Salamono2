@@ -96,6 +96,40 @@ def test_identified_worker_never_generates_missing_id_event():
     assert monitor.update("cam", "checkpoint", [p], [identity], 1.0) == []
 
 
+def test_unidentified_streak_and_identity_follow_track_across_bbox_motion():
+    cfg = WorkerIDConfig(
+        require_at_checkpoint=True,
+        unidentified_frames_required=2,
+        unidentified_cooldown_seconds=0.0,
+    )
+    monitor = UnidentifiedWorkerMonitor(cfg)
+    first = person((10, 10, 60, 120))
+    first.track_id = 17
+    moved = person((250, 40, 310, 160))
+    moved.track_id = 17
+
+    assert monitor.update("cam", "checkpoint", [first], [], 1.0) == []
+    events = monitor.update("cam", "checkpoint", [moved], [], 1.1)
+    assert len(events) == 1
+    assert events[0].person is moved
+
+    identity = WorkerIdentity(
+        "W-017",
+        first,
+        "marker",
+        [],
+        1.0,
+        track_id=17,
+    )
+    assert monitor.update(
+        "cam",
+        "checkpoint",
+        [moved],
+        [identity],
+        1.2,
+    ) == []
+
+
 def test_site_unidentified_worker_policy_is_opt_in():
     p = person()
     disabled = UnidentifiedWorkerMonitor(

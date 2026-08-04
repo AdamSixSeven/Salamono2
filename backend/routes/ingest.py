@@ -1,5 +1,6 @@
 import asyncio
 import base64
+from concurrent.futures import Future
 import logging
 import time
 import uuid
@@ -15,9 +16,11 @@ from fastapi.responses import JSONResponse
 from backend.calibration import Calibration
 from backend.camera_registry import CameraRegistry
 from backend.danger_rules import DangerEvent, DynamicSafetyZone
-from backend.detector import Detection
+from backend.detector import Detection, Detector
 from backend.frame_processor import FrameJob
 from backend.marker_detector import MarkerDetection
+from backend.performance_profiler import FramePerformanceTrace
+from backend.preview_encoder import EncodedPreview
 from backend.posture_detector import (
     POSE_LANDMARK_COUNT,
     POSTURE_CONNECTIONS,
@@ -46,6 +49,7 @@ from backend.ppe_rules import PPEEvent
 from backend.worker_identification import WorkerIdentity, UnidentifiedWorkerEvent
 from backend.worker_store import WorkerRecord
 from backend.zone_rules import ZoneBreachEvent, signed_distance_to_polygon
+from config import CONFIG
 
 SITE_RULE_DESCRIPTIONS = {
     "person_vehicle_overlap": "Osoba w obrysie pojazdu lub maszyny",
@@ -66,26 +70,164 @@ class _FramePayload:
     received_at: float
     preview_jpeg_bytes: bytes
     preview_jpeg_b64: str
+    preview_jpeg_future: Future[EncodedPreview] | None = None
+    performance_trace: FramePerformanceTrace | None = None
+    render_annotated: bool = False
+
+
+def _profiled_detection(
+    detector,
+    frame: np.ndarray,
+    trace: FramePerformanceTrace | None,
+    *,
+    img_size: int | None = None,
+) -> list[Detection]:
+    profiled = getattr(detector, "detect_profiled", None)
+    if not isinstance(detector, Detector) or not callable(profiled):
+        started = time.perf_counter()
+        detections = detector.detect(frame)
+        if trace is not None:
+            trace.set(
+                "yolo_inference_ms",
+                (time.perf_counter() - started) * 1000.0,
+            )
+        return detections
+
+    detections, timing = profiled(frame, img_size=img_size)
+    if trace is not None:
+        trace.set("yolo_preprocess_ms", timing.preprocess_ms)
+        trace.set("yolo_inference_ms", timing.inference_ms)
+        trace.set("yolo_postprocess_ms", timing.postprocess_ms)
+    return detections
+
+
+def _identity_for_person(
+    person: Detection | DetectionOut,
+    identities: list[WorkerIdentity],
+) -> WorkerIdentity | None:
+    track_id = getattr(person, "track_id", None)
+    if track_id is not None:
+        for identity in identities:
+            if getattr(identity, "track_id", None) == track_id:
+                return identity
+    box = tuple(person.box)
+    for identity in identities:
+        if tuple(identity.person.box) == box:
+            return identity
+    return None
 
 
 def _worker_id_for_person(
     person: Detection | DetectionOut,
     identities: list[WorkerIdentity],
 ) -> str | None:
-    box = tuple(person.box)
-    for identity in identities:
-        if tuple(identity.person.box) == box:
-            return identity.worker_id
-    return None
+    identity = _identity_for_person(person, identities)
+    return identity.worker_id if identity is not None and identity.alert_eligible else None
+
+
+def _identify_workers(
+    request: Request,
+    camera_id: str,
+    frame: np.ndarray,
+    persons: list[Detection],
+    timestamp: float,
+    performance_trace: FramePerformanceTrace | None = None,
+) -> tuple[list[Detection], list[WorkerIdentity], list[Detection]]:
+    """Schedule asynchronous ID work and return current cached identities.
+
+    The third item contains only tracks for which at least one background scan
+    has completed.  It prevents the unidentified-worker policy from firing
+    while a newly observed person is still waiting for its first ArUco pass.
+    Embedded/test applications without the background worker retain the
+    previous synchronous identifier contract.
+    """
+    worker = getattr(request.app.state, "worker_id_worker", None)
+    identifier = getattr(request.app.state, "worker_identifier", None)
+    if worker is not None:
+        try:
+            submit_started = time.perf_counter()
+            submit = getattr(
+                worker,
+                "submit_borrowed_latest",
+                worker.submit_latest,
+            )
+            tracked_persons = submit(
+                camera_id,
+                frame,
+                persons,
+                timestamp,
+            )
+            if performance_trace is not None:
+                performance_trace.set(
+                    "worker_id_submit_ms",
+                    (time.perf_counter() - submit_started) * 1000.0,
+                )
+            identities = worker.current_identities(
+                camera_id,
+                tracked_persons,
+                timestamp,
+            )
+            scanned = set(worker.scanned_track_ids(camera_id))
+            monitor_persons = [
+                person for person in tracked_persons
+                if person.track_id is not None and person.track_id in scanned
+            ]
+            return tracked_persons, identities, monitor_persons
+        except Exception:
+            # A long-lived worker failure must not turn frame ingestion into a
+            # synchronous ArUco fallback or stop the video pipeline.
+            logger.exception(
+                "Worker ID scheduling failed for camera %s",
+                camera_id,
+            )
+            return persons, [], []
+
+    if identifier is not None and identifier.available:
+        try:
+            submit_started = time.perf_counter()
+            identities = identifier.process(
+                camera_id,
+                frame,
+                persons,
+                timestamp,
+            )
+            if performance_trace is not None:
+                performance_trace.set(
+                    "worker_id_submit_ms",
+                    (time.perf_counter() - submit_started) * 1000.0,
+                )
+        except Exception:
+            logger.exception(
+                "Synchronous Worker ID fallback failed for camera %s",
+                camera_id,
+            )
+            identities = []
+        return persons, identities, persons
+    return persons, [], []
+
+
+def _worker_identification_available(request: Request) -> bool:
+    identifier = getattr(request.app.state, "worker_identifier", None)
+    if identifier is None or not identifier.available:
+        return False
+    worker = getattr(request.app.state, "worker_id_worker", None)
+    if worker is None:
+        return True
+    try:
+        return bool(getattr(worker.stats(), "thread_alive", True))
+    except Exception:
+        return False
 
 
 def _worker_profiles(
-    worker_store,
+    profile_resolver,
     identities: list[WorkerIdentity],
 ) -> dict[str, WorkerRecord]:
-    if worker_store is None or not identities:
+    if profile_resolver is None or not identities:
         return {}
-    return worker_store.get_many(identity.worker_id for identity in identities)
+    return profile_resolver.get_many(
+        identity.worker_id for identity in identities
+    )
 
 
 def _attach_worker_profile(
@@ -107,6 +249,44 @@ def _attach_worker_profile(
             "worker_department": profile.department,
         })
     return record
+
+
+def _attach_identity_snapshot(
+    record: AlarmRecord,
+    identity: WorkerIdentity | None,
+    profile: WorkerRecord | None,
+) -> AlarmRecord:
+    """Freeze alert-safe identity metadata at event creation time."""
+    if identity is None or not identity.alert_eligible or profile is None:
+        record.details.pop("worker_id", None)
+        record.details.update({
+            "worker": None,
+            "identity_status": "unidentified",
+            "identity_snapshot_at": record.timestamp,
+        })
+        if identity is not None:
+            record.details.update({
+                "track_id": identity.track_id,
+                "marker_id": identity.marker_id,
+                "marker_age_sec": identity.marker_age_sec,
+                "identity_confidence": identity.confidence,
+            })
+        return record
+    record.details.update({
+        "worker_id": identity.worker_id,
+        "marker_id": identity.marker_id,
+        "identity_status": identity.identity_status,
+        "last_marker_seen_at": record.timestamp - identity.marker_age_sec,
+        "marker_age_sec": identity.marker_age_sec,
+        "identity_confidence": identity.confidence,
+        "identity_snapshot_at": record.timestamp,
+        "worker": {
+            "worker_id": profile.worker_id,
+            "first_name": profile.first_name,
+            "last_name": profile.last_name,
+        },
+    })
+    return _attach_worker_profile(record, profile)
 
 
 def _site_record(
@@ -221,8 +401,12 @@ POSTURE_SIGNAL_DESCRIPTIONS = {
     "sudden_balance_loss": "nagła utrata równowagi",
     "possible_fall": "możliwy upadek",
     "hand_to_mouth_pattern": "powtarzalny gest ręka–usta",
-    "ml_fall_down": "TCN: upadek",
-    "ml_lying_down": "TCN: pozycja leżąca",
+    "ml_fall_down": "TCN+GRU: upadek",
+    "ml_lying_down": "TCN+GRU: pozycja leżąca",
+    "fall_suspected": "podejrzenie upadku",
+    "fall_detected": "potwierdzony upadek",
+    "person_on_ground": "osoba na ziemi",
+    "unstable_movement": "utrzymujący się niestabilny ruch",
 }
 
 
@@ -237,10 +421,16 @@ def _posture_record(
         for signal in assessment.signals
     ]
     is_fall = (
-        "possible_fall" in assessment.signals
+        "fall_detected" in assessment.signals
+        or "fall_suspected" in assessment.signals
+        or "possible_fall" in assessment.signals
         or "ml_fall_down" in assessment.signals
     )
-    is_lying = "ml_lying_down" in assessment.signals
+    is_lying = (
+        "person_on_ground" in assessment.signals
+        or "ml_lying_down" in assessment.signals
+    )
+    is_unstable = "unstable_movement" in assessment.signals
     coordination_signals = {
         "repeated_body_sway",
         "unstable_trajectory",
@@ -254,12 +444,24 @@ def _posture_record(
     )
     if is_fall:
         kind = "fall_detected"
-        rule_name = "ml_fall_down" if "ml_fall_down" in assessment.signals else "possible_fall"
-        desc = "Możliwy upadek lub osunięcie się pracownika"
+        rule_name = (
+            "fall_detected"
+            if "fall_detected" in assessment.signals
+            else "fall_suspected"
+            if "fall_suspected" in assessment.signals
+            else "ml_fall_down"
+            if "ml_fall_down" in assessment.signals
+            else "possible_fall"
+        )
+        desc = "Wykryto sekwencję upadku pracownika"
     elif is_lying:
+        kind = "person_on_ground"
+        rule_name = "person_on_ground"
+        desc = "Wykryto utrzymującą się pozycję na ziemi — wymagana weryfikacja"
+    elif is_unstable:
         kind = "posture_anomaly"
-        rule_name = "ml_lying_down"
-        desc = "Wykryto utrzymującą się pozycję leżącą — wymagana weryfikacja"
+        rule_name = "unstable_movement"
+        desc = "Wykryto utrzymujący się niestabilny wzorzec ruchu"
     elif is_hand_to_mouth:
         kind = "smoking_gesture"
         rule_name = "hand_to_mouth_pattern"
@@ -284,6 +486,15 @@ def _posture_record(
         "behavior_valid_ratio": assessment.behavior_valid_ratio,
         "behavior_window_seconds": assessment.behavior_window_seconds,
         "behavior_inference_ms": assessment.behavior_inference_ms,
+        "safety_label": assessment.safety_label,
+        "safety_confidence": assessment.safety_confidence,
+        "safety_probabilities": assessment.safety_probabilities,
+        "torso_quality": assessment.torso_quality,
+        "upper_body_quality": assessment.upper_body_quality,
+        "lower_body_quality": assessment.lower_body_quality,
+        "visible_ratio": assessment.visible_ratio,
+        "learned_event_type": assessment.learned_event_type,
+        "learned_event_reason": assessment.learned_event_reason,
         "person_confidence": assessment.person.confidence,
         "person_box": assessment.person.box,
         "interpretation": "requires_human_verification",
@@ -445,6 +656,7 @@ def _scheduled_markers(
     frame: np.ndarray,
     camera_id: str,
     zones,
+    performance_trace: FramePerformanceTrace | None = None,
 ) -> list[MarkerDetection]:
     """Run ArUco only when the current camera can use its result.
 
@@ -453,17 +665,30 @@ def _scheduled_markers(
     direct-detector behaviour.
     """
     scheduler = getattr(request.app.state, "marker_scheduler", None)
+    started = time.perf_counter()
     if scheduler is None:
-        return request.app.state.marker_detector.detect(frame)
+        markers = request.app.state.marker_detector.detect(frame)
+        if performance_trace is not None:
+            performance_trace.set(
+                "marker_detection_ms",
+                (time.perf_counter() - started) * 1000.0,
+            )
+        return markers
     marker_zones_active = any(
         zone.active and len(zone.marker_ids) >= 3
         for zone in zones
     )
-    return scheduler.process(
+    def record_timing(elapsed_ms: float) -> None:
+        if performance_trace is not None:
+            performance_trace.set("marker_detection_ms", elapsed_ms)
+
+    markers = scheduler.process(
         camera_id,
         frame,
         marker_zones_active=marker_zones_active,
+        timing_callback=record_timing,
     )
+    return markers
 
 
 def _worker_to_out(
@@ -473,9 +698,16 @@ def _worker_to_out(
     return WorkerIdentificationOut(
         worker_id=identity.worker_id,
         source=identity.source,
+        track_id=getattr(identity, "track_id", None),
+        confidence=getattr(identity, "confidence", None),
         person_box=list(identity.person.box),
         tag_polygon=[[round(x, 1), round(y, 1)] for x, y in identity.tag_polygon],
         cached=identity.cached,
+        identity_status=identity.identity_status,
+        identity_confidence=identity.confidence,
+        marker_age_sec=identity.marker_age_sec,
+        marker_id=identity.marker_id,
+        alert_eligible=identity.alert_eligible,
         registered=profile is not None,
         first_name=profile.first_name if profile is not None else None,
         last_name=profile.last_name if profile is not None else None,
@@ -724,6 +956,18 @@ def _posture_to_out(
         behavior_valid_ratio=round(assessment.behavior_valid_ratio, 4),
         behavior_window_seconds=round(assessment.behavior_window_seconds, 3),
         behavior_inference_ms=round(assessment.behavior_inference_ms, 3),
+        safety_label=assessment.safety_label,
+        safety_confidence=round(assessment.safety_confidence, 4),
+        safety_probabilities={
+            label: round(float(probability), 4)
+            for label, probability in assessment.safety_probabilities.items()
+        },
+        torso_quality=round(assessment.torso_quality, 4),
+        upper_body_quality=round(assessment.upper_body_quality, 4),
+        lower_body_quality=round(assessment.lower_body_quality, 4),
+        visible_ratio=round(assessment.visible_ratio, 4),
+        learned_event_type=assessment.learned_event_type,
+        learned_event_reason=assessment.learned_event_reason,
         person=_det_to_out(assessment.person),
         pose_landmarks=pose_landmarks,
         timestamp=assessment.frame_timestamp,
@@ -924,7 +1168,11 @@ def _annotate_worker_ids(
     out = frame
     for identity in identities:
         x1, y1, _, _ = identity.person.box
-        label = f"ID {identity.worker_id}" + (" ~" if identity.cached else "")
+        label = f"ID {identity.worker_id}"
+        if CONFIG.worker_id.show_debug_status and identity.identity_status == "held":
+            label += " [HOLD]"
+        elif identity.cached:
+            label += " ~"
         (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.52, 1)
         text_y = max(th + 5, y1 - 44)
         cv2.rectangle(out, (x1, text_y - th - 5), (x1 + tw + 6, text_y + 2),
@@ -1109,6 +1357,8 @@ def _handle_site(
     t0: float,
     camera_id: str,
     preview_jpeg_b64: str,
+    performance_trace: FramePerformanceTrace | None = None,
+    rendered_frames: list[np.ndarray] | None = None,
 ) -> FrameResultOut:
     detector = request.app.state.detector
     danger_detector = request.app.state.danger_detector
@@ -1121,20 +1371,85 @@ def _handle_site(
     zone_temporal_filter = request.app.state.zone_temporal_filter
     calibration_store = request.app.state.calibration_store
     posture_manager = getattr(request.app.state, "posture_manager", None)
-    worker_identifier = getattr(request.app.state, "worker_identifier", None)
     unidentified_monitor = getattr(request.app.state, "unidentified_worker_monitor", None)
     worker_store = getattr(request.app.state, "worker_store", None)
+    worker_profile_cache = getattr(
+        request.app.state,
+        "worker_profile_cache",
+        None,
+    )
     runtime = _runtime_options(request, camera_id)
 
     detector_ran = runtime.requires_detector("site")
-    detections = detector.detect(frame) if detector_ran else []
+    yolo_size_controller = getattr(
+        request.app.state,
+        "yolo_size_controller",
+        None,
+    )
+    selected_yolo_size = None
+    if detector_ran and yolo_size_controller is not None:
+        selected_yolo_size = yolo_size_controller.select_size(
+            camera_id,
+            backend_supports_adaptive_size=bool(
+                getattr(detector, "supports_adaptive_size", True)
+            ),
+        )
+    detections = (
+        _profiled_detection(
+            detector,
+            frame,
+            performance_trace,
+            img_size=selected_yolo_size,
+        )
+        if detector_ran else []
+    )
+
+    # Debug: inject a synthetic person into the detection list for N frames.
+    inj = request.app.state.debug_inject_person
+    if inj and inj.get("remaining", 0) > 0:
+        fh_i, fw_i = frame.shape[:2]
+        x1n, y1n, x2n, y2n = inj["box_norm"]
+        detections.append(Detection(
+            class_id=0,
+            class_name="person",
+            category="person",
+            box=(int(x1n * fw_i), int(y1n * fh_i),
+                 int(x2n * fw_i), int(y2n * fh_i)),
+            confidence=float(inj["confidence"]),
+        ))
+        inj["remaining"] -= 1
+        if inj["remaining"] <= 0:
+            request.app.state.debug_inject_person = None
 
     fh, fw = frame.shape[:2]
     needs_zone_geometry = runtime.zones or runtime.distances or runtime.markers
     zones = zone_store.for_camera(camera_id) if needs_zone_geometry else []
+    marker_zones_active = bool(
+        (runtime.zones or runtime.distances)
+        and any(
+            zone.active and len(zone.marker_ids or []) >= 3
+            for zone in zones
+        )
+    )
+    marker_scheduler = getattr(request.app.state, "marker_scheduler", None)
+    calibration_marker_sampling = bool(
+        marker_scheduler is not None
+        and marker_scheduler.calibration_session_active(camera_id)
+    )
+    marker_processing_required = bool(
+        runtime.markers
+        or marker_zones_active
+        or calibration_marker_sampling
+    )
     markers = (
-        _scheduled_markers(request, frame, camera_id, zones)
-        if runtime.markers else []
+        _scheduled_markers(
+            request,
+            frame,
+            camera_id,
+            zones,
+            performance_trace,
+        )
+        if marker_processing_required else []
     )
     stored_calibration = calibration_store.get(camera_id)
     calibration = (
@@ -1144,15 +1459,39 @@ def _handle_site(
         else None
     )
     persons = [d for d in detections if d.category == "person"]
+    latest_detection_store = getattr(
+        request.app.state,
+        "latest_detection_store",
+        None,
+    )
+    if detector_ran and latest_detection_store is not None:
+        latest_detection_store.put(camera_id, now, fw, fh, detections)
+    if performance_trace is not None:
+        performance_trace.has_person = bool(persons)
 
     worker_identities: list[WorkerIdentity] = []
-    if runtime.worker_id and worker_identifier is not None and worker_identifier.available:
-        worker_identities = worker_identifier.process(
-            camera_id, frame, persons, now,
+    monitor_persons = persons
+    if runtime.worker_id and persons:
+        persons, worker_identities, monitor_persons = _identify_workers(
+            request,
+            camera_id,
+            frame,
+            persons,
+            now,
+            performance_trace,
         )
-    worker_profiles = _worker_profiles(worker_store, worker_identities)
+    worker_profiles = _worker_profiles(
+        worker_profile_cache or worker_store,
+        worker_identities,
+    )
     unidentified_events = (
-        unidentified_monitor.update(camera_id, "site", persons, worker_identities, now)
+        unidentified_monitor.update(
+            camera_id,
+            "site",
+            monitor_persons,
+            worker_identities,
+            now,
+        )
         if runtime.worker_id and unidentified_monitor is not None else []
     )
 
@@ -1161,7 +1500,7 @@ def _handle_site(
         raw_dangers = danger_detector.evaluate(
             detections, now, calibration, frame_w=fw, frame_h=fh,
         )
-        confirmed = temporal_filter.update(raw_dangers, now)
+        confirmed = temporal_filter.update(raw_dangers, now, camera_id)
         dynamic_safety_zones = danger_detector.dynamic_zones(
             detections, fw, fh, calibration,
         )
@@ -1170,7 +1509,7 @@ def _handle_site(
         confirmed = []
         dynamic_safety_zones = []
 
-    if runtime.markers:
+    if marker_zones_active:
         zones = _resolve_marker_zones(
             zones, markers, camera_id,
             request.app.state.marker_zone_cache,
@@ -1180,7 +1519,11 @@ def _handle_site(
         raw_zone_breaches = zone_detector.evaluate(
             detections, zones, fw, fh, now, calibration,
         )
-        confirmed_zone_breaches = zone_temporal_filter.update(raw_zone_breaches, now)
+        confirmed_zone_breaches = zone_temporal_filter.update(
+            raw_zone_breaches,
+            now,
+            camera_id,
+        )
     else:
         raw_zone_breaches = []
         confirmed_zone_breaches = []
@@ -1190,7 +1533,12 @@ def _handle_site(
     )
 
     posture_assessments: list[PostureAssessment] = []
-    if runtime.posture and posture_manager is not None and posture_manager.available:
+    if (
+        runtime.posture
+        and persons
+        and posture_manager is not None
+        and posture_manager.available
+    ):
         posture_worker = getattr(request.app.state, "posture_worker", None)
         if posture_worker is None:
             # Compatibility path for small embedded deployments and tests.
@@ -1200,7 +1548,12 @@ def _handle_site(
         else:
             # MediaPipe owns a private frame copy and never blocks the main
             # detector pipeline. Its one-slot queue always replaces stale work.
-            posture_worker.submit_latest(camera_id, frame, persons, now)
+            submit = getattr(
+                posture_worker,
+                "submit_borrowed_latest",
+                posture_worker.submit_latest,
+            )
+            submit(camera_id, frame, persons, now)
             posture_snapshot = posture_worker.get_latest(camera_id)
             if posture_snapshot is not None and posture_snapshot.result is not None:
                 posture_assessments = _align_posture_to_current_people(
@@ -1236,55 +1589,91 @@ def _handle_site(
                 else:
                     seen[camera_id] = result_key
 
-    annotated = frame.copy()
-    if runtime.zones:
-        annotated = _annotate_zones(annotated, zones, raw_zone_breaches)
-    if runtime.distances:
-        annotated = _annotate_dynamic_safety_zones(annotated, dynamic_safety_zones)
-    annotated = _annotate_site(
-        annotated,
-        detections if runtime.boxes else [],
-        raw_dangers if runtime.distances else [],
-        confirmed if runtime.distances else [],
-    )
-    if runtime.markers:
-        calibration_ids = (
-            set(stored_calibration.marker_ids) if stored_calibration else set()
+    if detector_ran and yolo_size_controller is not None:
+        yolo_size_controller.observe(
+            camera_id,
+            detections,
+            posture_assessments,
         )
-        annotated = _annotate_markers(annotated, markers, calibration_ids)
-    if runtime.distances:
-        annotated = _annotate_person_distances(annotated, person_distances)
-    if runtime.posture:
-        annotated = _annotate_posture(annotated, posture_assessments)
-    if runtime.worker_id:
-        annotated = _annotate_worker_ids(annotated, worker_identities)
-        annotated = _annotate_unidentified(annotated, unidentified_events)
+
+    annotated: np.ndarray | None = None
+    overlay_ms = 0.0
+
+    def _evidence_frame() -> np.ndarray:
+        # The live panel draws metadata overlays itself.  Backend rasterization
+        # is therefore needed only for sampled evidence and alert thumbnails.
+        # Keeping it lazy removes a full-resolution copy/draw from ordinary
+        # frames while preserving annotated evidence when an event occurs.
+        nonlocal annotated, overlay_ms
+        if annotated is not None:
+            return annotated
+        overlay_started = time.perf_counter()
+        out = frame.copy()
+        if runtime.zones:
+            out = _annotate_zones(out, zones, raw_zone_breaches)
+        if runtime.distances:
+            out = _annotate_dynamic_safety_zones(out, dynamic_safety_zones)
+        out = _annotate_site(
+            out,
+            detections,
+            raw_dangers if runtime.distances else [],
+            confirmed if runtime.distances else [],
+        )
+        if runtime.markers or marker_zones_active:
+            calibration_ids = (
+                set(stored_calibration.marker_ids) if stored_calibration else set()
+            )
+            out = _annotate_markers(out, markers, calibration_ids)
+        if runtime.distances:
+            out = _annotate_person_distances(out, person_distances)
+        if runtime.posture:
+            out = _annotate_posture(out, posture_assessments)
+        if runtime.worker_id:
+            out = _annotate_worker_ids(out, worker_identities)
+            out = _annotate_unidentified(out, unidentified_events)
+        annotated = out
+        overlay_ms += (time.perf_counter() - overlay_started) * 1000.0
+        return out
+
     if evidence_recorder is not None and (
         runtime.distances or runtime.zones or runtime.posture or runtime.worker_id
     ):
-        evidence_recorder.push(camera_id, annotated, now)
+        wants_sample = getattr(evidence_recorder, "should_sample", None)
+        if not callable(wants_sample) or wants_sample(camera_id, now):
+            evidence_jpeg_ms = evidence_recorder.push(
+                camera_id,
+                _evidence_frame(),
+                now,
+            )
+            if performance_trace is not None and isinstance(
+                evidence_jpeg_ms,
+                (int, float),
+            ):
+                performance_trace.add("jpeg_encode_ms", evidence_jpeg_ms)
 
     alert_outs = []
     for evt in confirmed:
         alert_id = uuid.uuid4().hex[:8]
-        thumb_url = frame_store.save(annotated, alert_id)
+        thumb_url = frame_store.save(_evidence_frame(), alert_id)
         clip_url = evidence_recorder.trigger(camera_id, alert_id, now) if evidence_recorder else None
         alert = _event_to_alert(evt, alert_id, thumb_url)
         alert_outs.append(alert)
-        worker_id = _worker_id_for_person(evt.person, worker_identities)
+        identity = _identity_for_person(evt.person, worker_identities)
+        worker_id = identity.worker_id if identity is not None and identity.alert_eligible else None
         record = _site_record(alert, camera_id, worker_id, clip_url)
-        alert_store.append(_attach_worker_profile(record, worker_profiles.get(worker_id)))
+        alert_store.append(_attach_identity_snapshot(record, identity, worker_profiles.get(worker_id)))
 
     zone_breach_outs = []
     for zevt in confirmed_zone_breaches:
         breach_id = uuid.uuid4().hex[:8]
-        thumb_url = frame_store.save(annotated, breach_id)
+        thumb_url = frame_store.save(_evidence_frame(), breach_id)
         clip_url = evidence_recorder.trigger(camera_id, breach_id, now) if evidence_recorder else None
         breach_out = _zone_to_out(zevt, breach_id, thumb_url)
         zone_breach_outs.append(breach_out)
-        worker_id = _worker_id_for_person(zevt.person, worker_identities)
+        identity = _identity_for_person(zevt.person, worker_identities)
+        worker_id = identity.worker_id if identity is not None and identity.alert_eligible else None
         record = _zone_record(breach_out, camera_id, worker_id, clip_url)
-        alert_store.append(_attach_worker_profile(record, worker_profiles.get(worker_id)))
+        alert_store.append(_attach_identity_snapshot(record, identity, worker_profiles.get(worker_id)))
 
     posture_outs = [
         _posture_to_out(assessment, f"active-{assessment.track_id}")
@@ -1295,18 +1684,19 @@ def _handle_site(
         if not assessment.confirmed:
             continue
         posture_id = uuid.uuid4().hex[:8]
-        thumb_url = frame_store.save(annotated, posture_id)
+        thumb_url = frame_store.save(_evidence_frame(), posture_id)
         clip_url = evidence_recorder.trigger(camera_id, posture_id, now) if evidence_recorder else None
         posture_out = _posture_to_out(assessment, posture_id, thumb_url)
         confirmed_posture_outs.append(posture_out)
-        worker_id = _worker_id_for_person(assessment.person, worker_identities)
+        identity = _identity_for_person(assessment.person, worker_identities)
+        worker_id = identity.worker_id if identity is not None and identity.alert_eligible else None
         record = _posture_record(posture_out, camera_id, worker_id, clip_url)
-        alert_store.append(_attach_worker_profile(record, worker_profiles.get(worker_id)))
+        alert_store.append(_attach_identity_snapshot(record, identity, worker_profiles.get(worker_id)))
 
     unidentified_outs = []
     for event in unidentified_events:
         event_id = uuid.uuid4().hex[:8]
-        thumb_url = frame_store.save(annotated, event_id)
+        thumb_url = frame_store.save(_evidence_frame(), event_id)
         clip_url = evidence_recorder.trigger(camera_id, event_id, now) if evidence_recorder else None
         event_out = _unidentified_to_out(event, event_id, thumb_url)
         unidentified_outs.append(event_out)
@@ -1328,6 +1718,12 @@ def _handle_site(
         if runtime.zones and zone.active and zone.polygon and len(zone.polygon) >= 3
     ]
 
+    if performance_trace is not None:
+        performance_trace.set("overlay_ms", overlay_ms)
+
+    if rendered_frames is not None:
+        rendered_frames.append(_evidence_frame())
+
     processing_ms = (time.monotonic() - t0) * 1000
     request.app.state.frame_counter += 1
 
@@ -1347,13 +1743,18 @@ def _handle_site(
         ),
         active_zone_breaches=active_zone_outs,
         confirmed_zone_breaches=zone_breach_outs,
-        markers=[_marker_to_out(marker) for marker in markers],
+        markers=(
+            [_marker_to_out(marker) for marker in markers]
+            if runtime.markers else []
+        ),
         worker_identifications=[
             _worker_to_out(identity, worker_profiles.get(identity.worker_id))
             for identity in worker_identities
         ],
         unidentified_workers=unidentified_outs,
-        worker_identification_available=bool(runtime.worker_id and worker_identifier and worker_identifier.available),
+        worker_identification_available=bool(
+            runtime.worker_id and _worker_identification_available(request)
+        ),
         dynamic_safety_zones=[
             _dynamic_zone_to_out(zone, fw, fh) for zone in dynamic_safety_zones
         ],
@@ -1374,55 +1775,120 @@ def _handle_checkpoint(
     t0: float,
     camera_id: str,
     preview_jpeg_b64: str,
+    performance_trace: FramePerformanceTrace | None = None,
+    rendered_frames: list[np.ndarray] | None = None,
 ) -> FrameResultOut:
     detector = request.app.state.ppe_detector
     checker = request.app.state.ppe_checker
     frame_store = request.app.state.frame_store
     alert_store = request.app.state.alert_store
     evidence_recorder = getattr(request.app.state, "evidence_recorder", None)
-    worker_identifier = getattr(request.app.state, "worker_identifier", None)
     unidentified_monitor = getattr(request.app.state, "unidentified_worker_monitor", None)
     worker_store = getattr(request.app.state, "worker_store", None)
+    worker_profile_cache = getattr(
+        request.app.state,
+        "worker_profile_cache",
+        None,
+    )
     runtime = _runtime_options(request, camera_id)
 
     detector_ran = runtime.requires_detector("checkpoint")
-    detections = detector.detect(frame) if detector_ran else []
+    detections = (
+        _profiled_detection(detector, frame, performance_trace)
+        if detector_ran else []
+    )
     persons = [d for d in detections if d.category == "person"]
-    worker_identities: list[WorkerIdentity] = []
-    if runtime.worker_id and worker_identifier is not None and worker_identifier.available:
-        worker_identities = worker_identifier.process(
-            camera_id, frame, persons, now,
+    latest_detection_store = getattr(
+        request.app.state,
+        "latest_detection_store",
+        None,
+    )
+    if detector_ran and latest_detection_store is not None:
+        latest_detection_store.put(
+            camera_id,
+            now,
+            int(frame.shape[1]),
+            int(frame.shape[0]),
+            detections,
         )
-    worker_profiles = _worker_profiles(worker_store, worker_identities)
+    if performance_trace is not None:
+        performance_trace.has_person = bool(persons)
+    worker_identities: list[WorkerIdentity] = []
+    monitor_persons = persons
+    if runtime.worker_id and persons:
+        persons, worker_identities, monitor_persons = _identify_workers(
+            request,
+            camera_id,
+            frame,
+            persons,
+            now,
+            performance_trace,
+        )
+    worker_profiles = _worker_profiles(
+        worker_profile_cache or worker_store,
+        worker_identities,
+    )
     unidentified_events = (
-        unidentified_monitor.update(camera_id, "checkpoint", persons, worker_identities, now)
+        unidentified_monitor.update(
+            camera_id,
+            "checkpoint",
+            monitor_persons,
+            worker_identities,
+            now,
+        )
         if runtime.worker_id and unidentified_monitor is not None else []
     )
 
     if runtime.ppe:
         events = checker.evaluate(detections, frame_h=frame.shape[0],
                                   frame_timestamp=now)
-        confirmed = checker.confirm(events, now)
+        confirmed = checker.confirm(events, now, camera_id)
     else:
         events = []
         confirmed = []
-    annotated = _annotate_ppe(
-        frame,
-        detections if runtime.boxes else [],
-        confirmed if runtime.ppe else [],
-    )
-    if runtime.worker_id:
-        annotated = _annotate_worker_ids(annotated, worker_identities)
-        annotated = _annotate_unidentified(annotated, unidentified_events)
+    annotated: np.ndarray | None = None
+    overlay_ms = 0.0
+
+    def _evidence_frame() -> np.ndarray:
+        nonlocal annotated, overlay_ms
+        if annotated is not None:
+            return annotated
+        overlay_started = time.perf_counter()
+        out = _annotate_ppe(
+            frame,
+            detections if runtime.ppe else [],
+            confirmed if runtime.ppe else [],
+        )
+        if runtime.worker_id:
+            out = _annotate_worker_ids(out, worker_identities)
+            out = _annotate_unidentified(out, unidentified_events)
+        annotated = out
+        overlay_ms += (time.perf_counter() - overlay_started) * 1000.0
+        return out
+
     if evidence_recorder is not None and (runtime.ppe or runtime.worker_id):
-        evidence_recorder.push(camera_id, annotated, now)
+        wants_sample = getattr(evidence_recorder, "should_sample", None)
+        if not callable(wants_sample) or wants_sample(camera_id, now):
+            evidence_jpeg_ms = evidence_recorder.push(
+                camera_id,
+                _evidence_frame(),
+                now,
+            )
+            if performance_trace is not None and isinstance(
+                evidence_jpeg_ms,
+                (int, float),
+            ):
+                performance_trace.add("jpeg_encode_ms", evidence_jpeg_ms)
 
     check_outs = []
     for event in confirmed:
         check_id = uuid.uuid4().hex[:8]
         # Successful checkpoint checks are returned to the UI but do not need
         # persistent evidence. Save thumbnail/clip only for actual violations.
-        thumb_url = frame_store.save(annotated, check_id) if event.missing else None
+        thumb_url = (
+            frame_store.save(_evidence_frame(), check_id)
+            if event.missing else None
+        )
         clip_url = (
             evidence_recorder.trigger(camera_id, check_id, now)
             if event.missing and evidence_recorder else None
@@ -1430,18 +1896,25 @@ def _handle_checkpoint(
         check_out = _ppe_to_out(event, check_id, thumb_url)
         check_outs.append(check_out)
         if event.missing:
-            worker_id = _worker_id_for_person(event.person, worker_identities)
+            identity = _identity_for_person(event.person, worker_identities)
+            worker_id = identity.worker_id if identity is not None and identity.alert_eligible else None
             record = _ppe_record(check_out, camera_id, worker_id, clip_url)
-            alert_store.append(_attach_worker_profile(record, worker_profiles.get(worker_id)))
+            alert_store.append(_attach_identity_snapshot(record, identity, worker_profiles.get(worker_id)))
 
     unidentified_outs = []
     for event in unidentified_events:
         event_id = uuid.uuid4().hex[:8]
-        thumb_url = frame_store.save(annotated, event_id)
+        thumb_url = frame_store.save(_evidence_frame(), event_id)
         clip_url = evidence_recorder.trigger(camera_id, event_id, now) if evidence_recorder else None
         event_out = _unidentified_to_out(event, event_id, thumb_url)
         unidentified_outs.append(event_out)
         alert_store.append(_unidentified_record(event_out, camera_id, "checkpoint", clip_url))
+
+    if performance_trace is not None:
+        performance_trace.set("overlay_ms", overlay_ms)
+
+    if rendered_frames is not None:
+        rendered_frames.append(_evidence_frame())
 
     processing_ms = (time.monotonic() - t0) * 1000
     request.app.state.frame_counter += 1
@@ -1458,7 +1931,9 @@ def _handle_checkpoint(
             for identity in worker_identities
         ],
         unidentified_workers=unidentified_outs,
-        worker_identification_available=bool(runtime.worker_id and worker_identifier and worker_identifier.available),
+        worker_identification_available=bool(
+            runtime.worker_id and _worker_identification_available(request)
+        ),
         frame_jpeg_b64=preview_jpeg_b64,
         processing_ms=max(0.1, round(processing_ms, 1)),
         runtime_options={key: bool(value) for key, value in runtime.to_dict().items() if key != "updated_at"},
@@ -1490,7 +1965,128 @@ def _with_calibration_status(
     })
 
 
-def process_frame_job(app, job: FrameJob) -> FrameResultOut:
+def create_decoded_frame_job(
+    app,
+    *,
+    frame: np.ndarray,
+    camera_id: str,
+    timestamp: float,
+    mode: str = "site",
+    jpeg_quality: int = 85,
+    video_decode_ms: float | None = None,
+    performance_source: str = "demo",
+    render_annotated: bool = False,
+) -> FrameJob:
+    """Adapt an already-decoded backend frame to the existing pipeline.
+
+    Live camera uploads still use :func:`receive_frame`.  Demo-video workers
+    call this adapter so their decoded NumPy frame follows the exact same
+    inference, latest-frame, camera-registry and WebSocket path without an
+    artificial browser JPEG upload.
+    """
+
+    profiler = getattr(app.state, "performance_profiler", None)
+    performance_trace = (
+        profiler.new_trace(
+            source=performance_source,
+            video_decode_ms=video_decode_ms,
+        )
+        if profiler is not None else None
+    )
+    prepare_started = time.perf_counter()
+
+    if not isinstance(frame, np.ndarray) or frame.size == 0:
+        raise ValueError("decoded frame must be a non-empty NumPy array")
+    if frame.ndim != 3 or frame.shape[2] != 3:
+        raise ValueError("decoded frame must use BGR three-channel layout")
+    camera_id = str(camera_id).strip()
+    if not camera_id:
+        raise ValueError("camera_id must not be empty")
+
+    quality = min(100, max(1, int(jpeg_quality)))
+    preview_encoder = getattr(app.state, "preview_encoder", None)
+    preview_jpeg_future: Future[EncodedPreview] | None = None
+    jpeg_bytes = b""
+    jpeg_ms = 0.0
+    if preview_encoder is not None:
+        # JPEG is CPU work and YOLO is predominantly GPU work. Run both from
+        # the same immutable decoded frame, then join only at publication.
+        preview_jpeg_future = preview_encoder.submit(frame, quality)
+    else:
+        jpeg_started = time.perf_counter()
+        encoded, buffer = cv2.imencode(
+            ".jpg",
+            frame,
+            [int(cv2.IMWRITE_JPEG_QUALITY), quality],
+        )
+        if not encoded:
+            raise ValueError("decoded frame could not be encoded for preview")
+        jpeg_bytes = buffer.tobytes()
+        jpeg_ms = (time.perf_counter() - jpeg_started) * 1000.0
+        if performance_trace is not None:
+            performance_trace.set("jpeg_encode_ms", jpeg_ms)
+    received_at = time.time()
+    effective_mode = (
+        "checkpoint"
+        if mode == "checkpoint" and getattr(app.state, "ppe_detector", None) is not None
+        else "site"
+    )
+
+    latest_frame_store = getattr(app.state, "latest_frame_store", None)
+    if latest_frame_store is not None:
+        stored = latest_frame_store.set(
+            camera_id,
+            frame,
+            float(timestamp),
+            effective_mode,
+            received_at=received_at,
+            image_bytes=jpeg_bytes or None,
+            content_type="image/jpeg" if jpeg_bytes else None,
+        )
+        if not stored:
+            raise ValueError("decoded frame exceeds the latest-frame store limit")
+
+    job = FrameJob(
+        camera_id=camera_id,
+        frame=frame,
+        timestamp=float(timestamp),
+        payload=_FramePayload(
+            mode=effective_mode,
+            received_at=received_at,
+            preview_jpeg_bytes=jpeg_bytes,
+            preview_jpeg_b64="",
+            preview_jpeg_future=preview_jpeg_future,
+            performance_trace=performance_trace,
+            render_annotated=bool(render_annotated),
+        ),
+    )
+    _record_frame_received(
+        app,
+        camera_id=camera_id,
+        timestamp=float(timestamp),
+        received_at=received_at,
+        mode=effective_mode,
+        frame=frame,
+        processing_pending=True,
+    )
+    if performance_trace is not None:
+        performance_trace.set(
+            "frame_prepare_ms",
+            max(
+                0.0,
+                (time.perf_counter() - prepare_started) * 1000.0 - jpeg_ms,
+            ),
+        )
+        performance_trace.mark_queued()
+    return job
+
+
+def process_frame_job(
+    app,
+    job: FrameJob,
+    *,
+    rendered_frames: list[np.ndarray] | None = None,
+) -> FrameResultOut:
     """Heavy inference callback used by :class:`LatestFrameProcessor`.
 
     The generic processor invokes this function through ``asyncio.to_thread``.
@@ -1504,9 +2100,16 @@ def process_frame_job(app, job: FrameJob) -> FrameResultOut:
 
     request_context = SimpleNamespace(app=app)
     processing_started = time.monotonic()
+    performance_trace = payload.performance_trace
     analysis_lock = getattr(app.state, "analysis_lock", None)
     lock_context = analysis_lock if analysis_lock is not None else nullcontext()
+    render_sink = rendered_frames if payload.render_annotated else None
     with lock_context:
+        if performance_trace is not None:
+            performance_trace.set(
+                "queue_age_ms",
+                (time.perf_counter() - performance_trace.queued_at) * 1000.0,
+            )
         if (
             payload.mode == "checkpoint"
             and app.state.ppe_detector is not None
@@ -1518,6 +2121,8 @@ def process_frame_job(app, job: FrameJob) -> FrameResultOut:
                 processing_started,
                 job.camera_id,
                 payload.preview_jpeg_b64,
+                performance_trace,
+                render_sink,
             )
         else:
             result = _handle_site(
@@ -1527,8 +2132,81 @@ def process_frame_job(app, job: FrameJob) -> FrameResultOut:
                 processing_started,
                 job.camera_id,
                 payload.preview_jpeg_b64,
+                performance_trace,
+                render_sink,
             )
-        return _with_calibration_status(app, result, job.frame)
+        result = _with_calibration_status(app, result, job.frame)
+        return result
+
+
+def reset_camera_temporal_state(
+    app,
+    camera_id: str,
+    *,
+    timeout: float | None = 10.0,
+) -> None:
+    """Reset one source run without changing its runtime layer switches."""
+
+    posture_worker = getattr(app.state, "posture_worker", None)
+    posture_manager = getattr(app.state, "posture_manager", None)
+    if posture_worker is not None:
+        if not posture_worker.reset_camera(camera_id, timeout=timeout):
+            raise TimeoutError(
+                f"posture worker did not release camera {camera_id!r}"
+            )
+    elif posture_manager is not None:
+        posture_manager.reset_camera(camera_id)
+
+    yolo_size_controller = getattr(app.state, "yolo_size_controller", None)
+    if yolo_size_controller is not None:
+        yolo_size_controller.reset_camera(camera_id)
+
+    latest_detection_store = getattr(app.state, "latest_detection_store", None)
+    if latest_detection_store is not None:
+        latest_detection_store.remove(camera_id)
+
+    worker_id_worker = getattr(app.state, "worker_id_worker", None)
+    if worker_id_worker is not None:
+        worker_id_worker.reset_camera(camera_id)
+
+    analysis_lock = getattr(app.state, "analysis_lock", None)
+    lock_context = analysis_lock if analysis_lock is not None else nullcontext()
+    with lock_context:
+        for name in (
+            "temporal_filter",
+            "zone_temporal_filter",
+            "ppe_checker",
+            "unidentified_worker_monitor",
+        ):
+            component = getattr(app.state, name, None)
+            reset = getattr(component, "reset_camera", None)
+            if callable(reset):
+                reset(camera_id)
+
+        seen = getattr(app.state, "posture_confirmations_seen", None)
+        if isinstance(seen, dict):
+            seen.pop(camera_id, None)
+        marker_cache = getattr(app.state, "marker_zone_cache", None)
+        if isinstance(marker_cache, dict):
+            for key in [
+                key for key in marker_cache
+                if isinstance(key, tuple) and key and key[0] == camera_id
+            ]:
+                marker_cache.pop(key, None)
+
+    for name in ("marker_scheduler", "evidence_recorder"):
+        component = getattr(app.state, name, None)
+        reset = getattr(component, "reset_camera", None)
+        if callable(reset):
+            reset(camera_id)
+
+    latest = getattr(app.state, "latest_frame_store", None)
+    remove_latest = getattr(latest, "remove", None)
+    if callable(remove_latest):
+        remove_latest(camera_id)
+    registry = getattr(app.state, "camera_registry", None)
+    if registry is not None:
+        registry.pop(camera_id, None)
 
 
 def _record_frame_received(
@@ -1635,6 +2313,8 @@ async def record_frame_failure(
     payload = job.payload
     if not isinstance(payload, _FramePayload):
         return
+    if payload.performance_trace is not None:
+        payload.performance_trace.finish()
     registry = getattr(app.state, "camera_registry", None)
     if registry is None:
         registry = CameraRegistry(max_cameras=32)
@@ -1676,25 +2356,61 @@ async def publish_frame_result(
     app,
     job: FrameJob,
     result: FrameResultOut,
+    extra_metadata: dict | None = None,
 ) -> None:
     """Publish processed metadata and the matching JPEG on the event loop."""
 
+    payload = job.payload
+    performance_trace = (
+        payload.performance_trace
+        if isinstance(payload, _FramePayload) else None
+    )
     if not _record_frame_processed(app, job, result):
         # A newer result was already published for this camera (possible
         # during a short async→sync compatibility transition).
+        if performance_trace is not None:
+            performance_trace.set("websocket_send_ms", 0.0)
+            performance_trace.finish()
         return
     manager = app.state.ws_manager
     data = result.model_dump()
-    payload = job.payload
-    jpeg_bytes = (
-        payload.preview_jpeg_bytes
-        if isinstance(payload, _FramePayload) else None
-    )
-    if hasattr(manager, "broadcast_frame"):
-        await manager.broadcast_frame(data, jpeg_bytes)
-    else:
-        # Small integrations and older tests may expose only this method.
-        await manager.broadcast_json(data)
+    if extra_metadata:
+        data.update(extra_metadata)
+    send_started: float | None = None
+    try:
+        jpeg_bytes = (
+            payload.preview_jpeg_bytes
+            if isinstance(payload, _FramePayload) else None
+        )
+        if (
+            isinstance(payload, _FramePayload)
+            and payload.preview_jpeg_future is not None
+        ):
+            encoded_preview = await asyncio.wrap_future(
+                payload.preview_jpeg_future
+            )
+            jpeg_bytes = encoded_preview.jpeg_bytes
+            if performance_trace is not None:
+                performance_trace.set(
+                    "jpeg_encode_ms",
+                    encoded_preview.encode_ms,
+                )
+        send_started = time.perf_counter()
+        if hasattr(manager, "broadcast_frame"):
+            await manager.broadcast_frame(data, jpeg_bytes)
+        else:
+            # Small integrations and older tests may expose only this method.
+            await manager.broadcast_json(data)
+    finally:
+        if performance_trace is not None:
+            performance_trace.set(
+                "websocket_send_ms",
+                (
+                    (time.perf_counter() - send_started) * 1000.0
+                    if send_started is not None else 0.0
+                ),
+            )
+            performance_trace.finish()
 
 
 @router.post(
@@ -1716,6 +2432,11 @@ async def receive_frame(
     include_frame: bool = Form(default=True),
     async_processing: bool = Form(default=False),
 ):
+    profiler = getattr(request.app.state, "performance_profiler", None)
+    performance_trace = (
+        profiler.new_trace(source="phone") if profiler is not None else None
+    )
+    prepare_started = time.perf_counter()
     raw = await image.read(MAX_FRAME_UPLOAD_BYTES + 1)
     if len(raw) > MAX_FRAME_UPLOAD_BYTES:
         raise HTTPException(
@@ -1759,14 +2480,10 @@ async def receive_frame(
                 413,
                 "Frame exceeds the latest-frame store limit and was rejected",
             )
-
-    # Keep the uploaded JPEG byte-for-byte for the live view.  Re-encoding the
-    # already compressed phone frame used to soften it further, and—more
-    # importantly—the previous response encoded `annotated`, permanently
-    # burning every overlay into pixels before the panel could toggle it.
+    # Preserve the uploaded JPEG; overlays are rendered by the client.
+    jpeg_started = time.perf_counter()
     if async_processing:
-        # Binary WebSocket clients receive these bytes directly.  Avoid
-        # allocating a ~33% larger Base64 string on every phone frame.
+        # Publish JPEG bytes directly to binary WebSocket clients.
         preview_jpeg_bytes = await asyncio.to_thread(
             _live_preview_jpeg_bytes,
             raw,
@@ -1774,12 +2491,14 @@ async def receive_frame(
         )
         preview_jpeg_b64 = ""
     else:
-        # Keep the legacy synchronous HTTP/JSON contract intact.
         preview_jpeg_bytes, preview_jpeg_b64 = await asyncio.to_thread(
             _live_preview_jpeg,
             raw,
             frame,
         )
+    jpeg_ms = (time.perf_counter() - jpeg_started) * 1000.0
+    if performance_trace is not None:
+        performance_trace.set("jpeg_encode_ms", jpeg_ms)
     effective_mode = (
         "checkpoint"
         if mode == "checkpoint" and request.app.state.ppe_detector is not None
@@ -1794,6 +2513,7 @@ async def receive_frame(
             received_at=received_at,
             preview_jpeg_bytes=preview_jpeg_bytes,
             preview_jpeg_b64=preview_jpeg_b64,
+            performance_trace=performance_trace,
         ),
     )
 
@@ -1815,6 +2535,18 @@ async def receive_frame(
             )
 
         submission = await processor.submit(job)
+        if performance_trace is not None:
+            performance_trace.set(
+                "frame_prepare_ms",
+                max(
+                    0.0,
+                    (time.perf_counter() - prepare_started) * 1000.0 - jpeg_ms,
+                ),
+            )
+            performance_trace.mark_queued()
+            if submission.replaced:
+                performance_trace.dropped_frames += 1
+                profiler.record_drop("replaced_pending")
         _record_frame_received(
             request.app,
             camera_id=camera_id,
@@ -1825,6 +2557,10 @@ async def receive_frame(
             processing_pending=submission.accepted,
         )
         if not submission.accepted:
+            if performance_trace is not None:
+                performance_trace.dropped_frames += 1
+                profiler.record_drop(submission.reason or "rejected")
+                performance_trace.finish(has_person=None)
             raise HTTPException(
                 503,
                 f"Background frame processor rejected the frame: "
@@ -1844,6 +2580,15 @@ async def receive_frame(
             content=accepted.model_dump(mode="json"),
         )
 
+    if performance_trace is not None:
+        performance_trace.set(
+            "frame_prepare_ms",
+            max(
+                0.0,
+                (time.perf_counter() - prepare_started) * 1000.0 - jpeg_ms,
+            ),
+        )
+        performance_trace.mark_queued()
     _record_frame_received(
         request.app,
         camera_id=camera_id,

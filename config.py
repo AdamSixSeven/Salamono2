@@ -4,18 +4,37 @@ from dataclasses import dataclass, field
 
 @dataclass
 class YOLOConfig:
-    model_name: str = "yolo11n.pt"
+    model_name: str = "models/perimetr_scene_v3_best.pt"
     confidence_threshold: float = 0.35
     iou_threshold: float = 0.45
-    device: str = "cpu"
+    # ``auto`` selects CUDA when available and falls back to CPU. Explicit
+    # values (``0``, ``cuda:0``, ``cpu``) remain supported.
+    device: str = "auto"
     # 512 is the balanced live-preview default.  Raise to 640 when small or
     # distant people are more important than latency.
     img_size: int = 512
-    # COCO defaults: person=0, car=2, bus=5, truck=7.  For a custom
-    # construction-equipment checkpoint set YOLO_HAZARD_CLASS_IDS to the
-    # model-specific class IDs, e.g. "1,3,6".
+    # Normal frames stay at 512. A short 640 recovery window is armed by a
+    # horizontal person/posture signal, plus a sparse scan when no person was
+    # detected, so prone-person recall does not impose a permanent 640 cost.
+    adaptive_size_enabled: bool = True
+    fall_recovery_img_size: int = 640
+    fall_recovery_scan_interval_frames: int = 3
+    fall_recovery_hold_frames: int = 12
+    fall_recovery_horizontal_ratio: float = 1.20
+    precision: str = "auto"
+    backend: str = "auto"
+    onnx_model_path: str = ""
+    tensorrt_model_path: str = ""
+    allow_backend_fallback: bool = True
+    fast_predictor_enabled: bool = True
+    warmup_runs: int = 3
+    # Perimetr scene-v3 compact class map:
+    # 0 person; 1 car; 2 bus; 3 truck; 4 excavator; 5 bulldozer;
+    # 6 grader; 7 loader; 8 mobile_crane; 9 road_roller.
+    # Every non-person class is treated by the existing proximity logic as a
+    # dynamic person-machine/vehicle hazard.
     person_class_ids: list[int] = field(default_factory=lambda: [0])
-    hazard_class_ids: list[int] = field(default_factory=lambda: [2, 5, 7])
+    hazard_class_ids: list[int] = field(default_factory=lambda: list(range(1, 10)))
 
 
 @dataclass
@@ -40,6 +59,13 @@ class IngestConfig:
 
 
 @dataclass
+class PerformanceConfig:
+    enabled: bool = True
+    window_frames: int = 600
+    debug_interval_seconds: float = 10.0
+
+
+@dataclass
 class PPEConfig:
     model_path: str = "ppe.pt"
     confidence: float = 0.35
@@ -58,14 +84,14 @@ class PostureConfig:
     model_path: str = "models/pose_landmarker_heavy.task"
     sample_fps: float = 15.0
 
-    # Learned seven-class temporal behavior classifier (TCN).
+    # Learned nine-class, four-safety-head temporal classifier (TCN+GRU).
     behavior_enabled: bool = True
-    behavior_model_path: str = "models/behavior/tcn_heavy_ch64/model.pt"
+    behavior_model_path: str = "models/behavior/tcn_gru_pose_event_v2/model.pt"
     behavior_device: str = "auto"
     behavior_feature_fps: float = 15.0
     behavior_min_valid_ratio: float = 0.45
     behavior_min_window_coverage: float = 0.70
-    behavior_max_sample_gap_seconds: float = 0.35
+    behavior_max_sample_gap_seconds: float = 0.50
     behavior_inference_stride_samples: int = 3
     behavior_smoothing_windows: int = 4
     behavior_fall_threshold: float = 0.80
@@ -73,9 +99,33 @@ class PostureConfig:
     behavior_fall_consecutive_windows: int = 1
     behavior_lying_consecutive_windows: int = 3
     behavior_alerts_enabled: bool = True
-    max_poses: int = 1
+
+    # Learned event controller.  The old geometry remains available as
+    # telemetry and for explicit backwards-compatible tests, but the pilot
+    # configuration disables heuristic alerts in .env.
+    learned_events_enabled: bool = True
+    heuristic_alerts_enabled: bool = True
+    unstable_threshold: float = 0.72
+    unstable_confirm_seconds: float = 1.6
+    learned_fall_threshold: float = 0.68
+    ground_threshold: float = 0.72
+    # A strong fall signal from both action and safety heads can confirm a fall
+    # even when the model keeps reporting ``fall_transition`` and never settles
+    # on ``ground_state``. This is common when the four-second window still
+    # contains most of the fall motion.
+    direct_fall_threshold: float = 0.88
+    direct_fall_action_threshold: float = 0.72
+    direct_fall_confirm_seconds: float = 0.8
+    fall_followup_seconds: float = 4.0
+    ground_confirm_seconds: float = 0.8
+    min_torso_quality_for_fall: float = 0.45
+    min_lower_body_quality_for_unstable: float = 0.35
+
+    max_poses: int = 4
     max_camera_instances: int = 2
     min_person_height_frac: float = 0.18
+    min_person_long_side_frac: float = 0.10
+    min_person_area_frac: float = 0.0025
     min_landmark_visibility: float = 0.50
     min_pose_detection_confidence: float = 0.50
     min_pose_presence_confidence: float = 0.50
@@ -84,6 +134,9 @@ class PostureConfig:
     crop_center_follow: float = 0.72
     crop_size_follow: float = 0.28
     optical_flow_enabled: bool = True
+    # LK optical flow is display-only. Half resolution keeps normalized
+    # landmarks unchanged while reducing its pixel workload by roughly 4x.
+    optical_flow_scale: float = 0.5
     optical_flow_win_size: int = 21
     optical_flow_max_level: int = 3
     optical_flow_fb_threshold_px: float = 1.5
@@ -133,20 +186,49 @@ class PostureConfig:
 
 @dataclass
 class WorkerIDConfig:
-    # Optional QR-based worker identification.  This deliberately avoids face
-    # recognition.  QR payloads must begin with prefix, e.g. worker:W-001.
+    # Optional full-frame ArUco worker identification (no face recognition).
     enabled: bool = True
     sample_fps: float = 1.5
-    cache_ttl_seconds: float = 2.0
+    cache_ttl_seconds: float = 4.0
+    crop_padding: float = 0.15
+    profile_cache_ttl_seconds: float = 60.0
+    full_frame_fallback: bool = False
+    max_pending_frames: int = 1
+    diagnostic_logging: bool = False
+    initial_confirmations: int = 2
+    change_confirmations: int = 4
+    display_ttl_seconds: float = 5.0
+    alert_max_age_seconds: float = 2.0
+    ambiguous_iou_threshold: float = 0.35
+    enforce_unique_active_id: bool = True
+    reacquire_enabled: bool = True
+    reacquire_max_gap_seconds: float = 0.7
+    show_debug_status: bool = False
     match_padding: float = 0.18
     max_payload_length: int = 96
     require_at_checkpoint: bool = True
     require_on_site: bool = False
     unidentified_frames_required: int = 3
     unidentified_cooldown_seconds: float = 20.0
-    # Persistent profile directory keyed by the identifier encoded in QR.
+    # Persistent profile directory keyed by the marker-derived identifier.
     # This path is inside the Docker ``perimetr_data`` volume by default.
     database_path: str = "data/workers.sqlite3"
+
+    def __post_init__(self) -> None:
+        self.initial_confirmations = int(self.initial_confirmations)
+        self.change_confirmations = int(self.change_confirmations)
+        if self.initial_confirmations < 1:
+            raise ValueError("WORKER_ID_CONFIRM_SCANS must be >= 1")
+        if self.change_confirmations <= self.initial_confirmations:
+            raise ValueError("WORKER_ID_SWITCH_CONFIRM_SCANS must be greater than confirm scans")
+        if self.display_ttl_seconds < 0 or self.alert_max_age_seconds < 0:
+            raise ValueError("worker identity TTL values must not be negative")
+        if self.alert_max_age_seconds > self.display_ttl_seconds:
+            raise ValueError("WORKER_ID_ALERT_MAX_AGE_SEC must be <= display TTL")
+        if not 0.0 <= self.ambiguous_iou_threshold <= 1.0:
+            raise ValueError("WORKER_ID_AMBIGUOUS_IOU_THRESHOLD must be in range 0..1")
+        if self.reacquire_max_gap_seconds < 0:
+            raise ValueError("WORKER_ID_REACQUIRE_MAX_GAP_SEC must not be negative")
 
 
 @dataclass
@@ -159,6 +241,23 @@ class EvidenceConfig:
     sample_fps: float = 3.0
     jpeg_quality: int = 70
     max_buffer_frames: int = 90
+    ffmpeg_binary: str | None = None
+
+
+@dataclass
+class DemoVideoConfig:
+    """Backend-decoded demonstration video uploads and playback."""
+
+    upload_dir: str = "data/tmp/demo_uploads"
+    output_dir: str = "data/tmp/demo_outputs"
+    max_size_mb: int = 2048
+    allowed_extensions: tuple[str, ...] = (".mp4", ".avi", ".mov", ".mkv")
+    job_ttl_seconds: float = 3600.0
+    max_pending_jobs: int = 2
+    processing_enabled: bool = True
+    playback_mode: str = "realtime"
+    probe_timeout_seconds: float = 15.0
+    control_timeout_seconds: float = 10.0
 
 
 @dataclass
@@ -187,10 +286,12 @@ class AppConfig:
     yolo: YOLOConfig = field(default_factory=YOLOConfig)
     danger: DangerConfig = field(default_factory=DangerConfig)
     ingest: IngestConfig = field(default_factory=IngestConfig)
+    performance: PerformanceConfig = field(default_factory=PerformanceConfig)
     ppe: PPEConfig = field(default_factory=PPEConfig)
     posture: PostureConfig = field(default_factory=PostureConfig)
     worker_id: WorkerIDConfig = field(default_factory=WorkerIDConfig)
     evidence: EvidenceConfig = field(default_factory=EvidenceConfig)
+    demo_video: DemoVideoConfig = field(default_factory=DemoVideoConfig)
     depth3d: Depth3DConfig = field(default_factory=Depth3DConfig)
     flagged_frames_dir: str = "data/flagged_frames"
     host: str = "0.0.0.0"
@@ -205,12 +306,42 @@ def _from_env() -> AppConfig:
         cfg.yolo.confidence_threshold = float(v)
     if v := os.getenv("YOLO_DEVICE"):
         cfg.yolo.device = v
+    if v := os.getenv("YOLO_PRECISION"):
+        cfg.yolo.precision = v.strip().lower()
+    if v := os.getenv("YOLO_BACKEND"):
+        cfg.yolo.backend = v.strip().lower()
+    if v := os.getenv("YOLO_ONNX_MODEL"):
+        cfg.yolo.onnx_model_path = v
+    if v := os.getenv("YOLO_TENSORRT_MODEL"):
+        cfg.yolo.tensorrt_model_path = v
+    if v := os.getenv("YOLO_ALLOW_BACKEND_FALLBACK"):
+        cfg.yolo.allow_backend_fallback = v.strip().lower() in {"1", "true", "yes", "on"}
+    if v := os.getenv("YOLO_FAST_PREDICTOR_ENABLED"):
+        cfg.yolo.fast_predictor_enabled = v.strip().lower() in {"1", "true", "yes", "on"}
+    if v := os.getenv("YOLO_WARMUP_RUNS"):
+        cfg.yolo.warmup_runs = max(1, int(v))
     if v := os.getenv("YOLO_IMG_SIZE"):
         cfg.yolo.img_size = int(v)
+    if v := os.getenv("YOLO_ADAPTIVE_SIZE_ENABLED"):
+        cfg.yolo.adaptive_size_enabled = v.strip().lower() in {"1", "true", "yes", "on"}
+    if v := os.getenv("YOLO_FALL_RECOVERY_IMG_SIZE"):
+        cfg.yolo.fall_recovery_img_size = max(cfg.yolo.img_size, int(v))
+    if v := os.getenv("YOLO_FALL_RECOVERY_SCAN_INTERVAL_FRAMES"):
+        cfg.yolo.fall_recovery_scan_interval_frames = max(1, int(v))
+    if v := os.getenv("YOLO_FALL_RECOVERY_HOLD_FRAMES"):
+        cfg.yolo.fall_recovery_hold_frames = max(1, int(v))
+    if v := os.getenv("YOLO_FALL_RECOVERY_HORIZONTAL_RATIO"):
+        cfg.yolo.fall_recovery_horizontal_ratio = max(1.0, float(v))
     if v := os.getenv("YOLO_PERSON_CLASS_IDS"):
         cfg.yolo.person_class_ids = [int(x.strip()) for x in v.split(",") if x.strip()]
     if v := os.getenv("YOLO_HAZARD_CLASS_IDS"):
         cfg.yolo.hazard_class_ids = [int(x.strip()) for x in v.split(",") if x.strip()]
+    if v := os.getenv("PERFORMANCE_PROFILING_ENABLED"):
+        cfg.performance.enabled = v.strip().lower() in {"1", "true", "yes", "on"}
+    if v := os.getenv("PERFORMANCE_WINDOW_FRAMES"):
+        cfg.performance.window_frames = max(10, int(v))
+    if v := os.getenv("PERFORMANCE_DEBUG_INTERVAL_SEC"):
+        cfg.performance.debug_interval_seconds = max(1.0, float(v))
     if v := os.getenv("DANGER_PROXIMITY_PX"):
         cfg.danger.proximity_px = int(v)
     if v := os.getenv("DANGER_DANGER_PROXIMITY_PX"):
@@ -265,10 +396,40 @@ def _from_env() -> AppConfig:
         cfg.posture.behavior_lying_consecutive_windows = max(1, int(v))
     if v := os.getenv("POSTURE_BEHAVIOR_ALERTS_ENABLED"):
         cfg.posture.behavior_alerts_enabled = v.strip().lower() in {"1", "true", "yes", "on"}
+    if v := os.getenv("POSTURE_LEARNED_EVENTS_ENABLED"):
+        cfg.posture.learned_events_enabled = v.strip().lower() in {"1", "true", "yes", "on"}
+    if v := os.getenv("POSTURE_HEURISTIC_ALERTS_ENABLED"):
+        cfg.posture.heuristic_alerts_enabled = v.strip().lower() in {"1", "true", "yes", "on"}
+    if v := os.getenv("POSTURE_UNSTABLE_THRESHOLD"):
+        cfg.posture.unstable_threshold = min(1.0, max(0.0, float(v)))
+    if v := os.getenv("POSTURE_UNSTABLE_CONFIRM_SEC"):
+        cfg.posture.unstable_confirm_seconds = max(0.0, float(v))
+    if v := os.getenv("POSTURE_FALL_THRESHOLD"):
+        cfg.posture.learned_fall_threshold = min(1.0, max(0.0, float(v)))
+    if v := os.getenv("POSTURE_GROUND_THRESHOLD"):
+        cfg.posture.ground_threshold = min(1.0, max(0.0, float(v)))
+    if v := os.getenv("POSTURE_DIRECT_FALL_THRESHOLD"):
+        cfg.posture.direct_fall_threshold = min(1.0, max(0.0, float(v)))
+    if v := os.getenv("POSTURE_DIRECT_FALL_ACTION_THRESHOLD"):
+        cfg.posture.direct_fall_action_threshold = min(1.0, max(0.0, float(v)))
+    if v := os.getenv("POSTURE_DIRECT_FALL_CONFIRM_SEC"):
+        cfg.posture.direct_fall_confirm_seconds = max(0.0, float(v))
+    if v := os.getenv("POSTURE_FALL_FOLLOWUP_SEC"):
+        cfg.posture.fall_followup_seconds = max(0.1, float(v))
+    if v := os.getenv("POSTURE_GROUND_CONFIRM_SEC"):
+        cfg.posture.ground_confirm_seconds = max(0.0, float(v))
+    if v := os.getenv("POSTURE_MIN_TORSO_QUALITY_FOR_FALL"):
+        cfg.posture.min_torso_quality_for_fall = min(1.0, max(0.0, float(v)))
+    if v := os.getenv("POSTURE_MIN_LOWER_BODY_QUALITY_FOR_UNSTABLE"):
+        cfg.posture.min_lower_body_quality_for_unstable = min(1.0, max(0.0, float(v)))
     if v := os.getenv("POSTURE_MAX_POSES"):
         cfg.posture.max_poses = int(v)
     if v := os.getenv("POSTURE_MIN_PERSON_HEIGHT_FRAC"):
         cfg.posture.min_person_height_frac = float(v)
+    if v := os.getenv("POSTURE_MIN_PERSON_LONG_SIDE_FRAC"):
+        cfg.posture.min_person_long_side_frac = max(0.0, float(v))
+    if v := os.getenv("POSTURE_MIN_PERSON_AREA_FRAC"):
+        cfg.posture.min_person_area_frac = max(0.0, float(v))
     if v := os.getenv("POSTURE_CROP_MARGIN"):
         cfg.posture.crop_margin = max(0.0, float(v))
     if v := os.getenv("POSTURE_CROP_CENTER_FOLLOW"):
@@ -277,6 +438,8 @@ def _from_env() -> AppConfig:
         cfg.posture.crop_size_follow = min(1.0, max(0.0, float(v)))
     if v := os.getenv("POSTURE_OPTICAL_FLOW_ENABLED"):
         cfg.posture.optical_flow_enabled = v.strip().lower() in {"1", "true", "yes", "on"}
+    if v := os.getenv("POSTURE_OPTICAL_FLOW_SCALE"):
+        cfg.posture.optical_flow_scale = min(1.0, max(0.1, float(v)))
     if v := os.getenv("POSTURE_OPTICAL_FLOW_WIN_SIZE"):
         cfg.posture.optical_flow_win_size = max(5, int(v))
     if v := os.getenv("POSTURE_OPTICAL_FLOW_MAX_LEVEL"):
@@ -305,6 +468,36 @@ def _from_env() -> AppConfig:
         cfg.worker_id.sample_fps = float(v)
     if v := os.getenv("WORKER_ID_CACHE_TTL_SEC"):
         cfg.worker_id.cache_ttl_seconds = float(v)
+    if v := os.getenv("WORKER_ID_CROP_PADDING"):
+        cfg.worker_id.crop_padding = min(1.0, max(0.0, float(v)))
+    if v := os.getenv("WORKER_ID_PROFILE_CACHE_TTL_SEC"):
+        cfg.worker_id.profile_cache_ttl_seconds = max(0.0, float(v))
+    if v := os.getenv("WORKER_ID_FULL_FRAME_FALLBACK"):
+        cfg.worker_id.full_frame_fallback = v.strip().lower() in {
+            "1", "true", "yes", "on",
+        }
+    if v := os.getenv("WORKER_ID_MAX_PENDING_FRAMES"):
+        cfg.worker_id.max_pending_frames = max(1, int(v))
+    if v := os.getenv("WORKER_ID_DIAGNOSTIC_LOGGING"):
+        cfg.worker_id.diagnostic_logging = v.strip().lower() in {"1", "true", "yes", "on"}
+    if v := os.getenv("WORKER_ID_CONFIRM_SCANS"):
+        cfg.worker_id.initial_confirmations = max(1, int(v))
+    if v := os.getenv("WORKER_ID_SWITCH_CONFIRM_SCANS"):
+        cfg.worker_id.change_confirmations = int(v)
+    if v := os.getenv("WORKER_ID_DISPLAY_TTL_SEC"):
+        cfg.worker_id.display_ttl_seconds = float(v)
+    if v := os.getenv("WORKER_ID_ALERT_MAX_AGE_SEC"):
+        cfg.worker_id.alert_max_age_seconds = float(v)
+    if v := os.getenv("WORKER_ID_AMBIGUOUS_IOU_THRESHOLD"):
+        cfg.worker_id.ambiguous_iou_threshold = float(v)
+    if v := os.getenv("WORKER_ID_ENFORCE_UNIQUE_ACTIVE_ID"):
+        cfg.worker_id.enforce_unique_active_id = v.strip().lower() in {"1", "true", "yes", "on"}
+    if v := os.getenv("WORKER_ID_REACQUIRE_ENABLED"):
+        cfg.worker_id.reacquire_enabled = v.strip().lower() in {"1", "true", "yes", "on"}
+    if v := os.getenv("WORKER_ID_REACQUIRE_MAX_GAP_SEC"):
+        cfg.worker_id.reacquire_max_gap_seconds = float(v)
+    if v := os.getenv("WORKER_ID_SHOW_DEBUG_STATUS"):
+        cfg.worker_id.show_debug_status = v.strip().lower() in {"1", "true", "yes", "on"}
     if v := os.getenv("WORKER_ID_REQUIRE_AT_CHECKPOINT"):
         cfg.worker_id.require_at_checkpoint = v.strip().lower() in {"1", "true", "yes", "on"}
     if v := os.getenv("WORKER_ID_REQUIRE_ON_SITE"):
@@ -315,6 +508,7 @@ def _from_env() -> AppConfig:
         cfg.worker_id.unidentified_cooldown_seconds = float(v)
     if v := os.getenv("WORKER_DATABASE_PATH"):
         cfg.worker_id.database_path = v
+    cfg.worker_id.__post_init__()
     if v := os.getenv("EVIDENCE_ENABLED"):
         cfg.evidence.enabled = v.strip().lower() in {"1", "true", "yes", "on"}
     if v := os.getenv("EVIDENCE_CLIPS_DIR"):
@@ -325,6 +519,38 @@ def _from_env() -> AppConfig:
         cfg.evidence.post_seconds = float(v)
     if v := os.getenv("EVIDENCE_SAMPLE_FPS"):
         cfg.evidence.sample_fps = float(v)
+    if v := os.getenv("EVIDENCE_FFMPEG_BINARY"):
+        cfg.evidence.ffmpeg_binary = v.strip() or None
+    if v := os.getenv("DEMO_VIDEO_UPLOAD_DIR"):
+        cfg.demo_video.upload_dir = v
+    if v := os.getenv("DEMO_VIDEO_OUTPUT_DIR"):
+        cfg.demo_video.output_dir = v
+    if v := os.getenv("DEMO_VIDEO_MAX_SIZE_MB"):
+        cfg.demo_video.max_size_mb = max(1, int(v))
+    if v := os.getenv("DEMO_VIDEO_ALLOWED_EXTENSIONS"):
+        extensions = tuple(
+            extension if extension.startswith(".") else f".{extension}"
+            for item in v.split(",")
+            if (extension := item.strip().lower())
+        )
+        if extensions:
+            cfg.demo_video.allowed_extensions = extensions
+    if v := os.getenv("DEMO_VIDEO_JOB_TTL_SEC"):
+        cfg.demo_video.job_ttl_seconds = max(1.0, float(v))
+    if v := os.getenv("DEMO_VIDEO_MAX_PENDING_JOBS"):
+        cfg.demo_video.max_pending_jobs = max(1, int(v))
+    if v := os.getenv("DEMO_VIDEO_PROCESSING_ENABLED"):
+        cfg.demo_video.processing_enabled = v.strip().lower() in {
+            "1", "true", "yes", "on",
+        }
+    if v := os.getenv("DEMO_VIDEO_PLAYBACK_MODE"):
+        playback_mode = v.strip().lower()
+        if playback_mode in {"realtime", "fast"}:
+            cfg.demo_video.playback_mode = playback_mode
+    if v := os.getenv("DEMO_VIDEO_PROBE_TIMEOUT_SEC"):
+        cfg.demo_video.probe_timeout_seconds = max(0.1, float(v))
+    if v := os.getenv("DEMO_VIDEO_CONTROL_TIMEOUT_SEC"):
+        cfg.demo_video.control_timeout_seconds = max(0.1, float(v))
     if v := os.getenv("DEPTH3D_ENABLED"):
         cfg.depth3d.enabled = v.strip().lower() in {"1", "true", "yes", "on"}
     if v := os.getenv("DEPTH3D_MODEL_ID"):

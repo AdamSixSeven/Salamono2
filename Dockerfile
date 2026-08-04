@@ -9,22 +9,21 @@ RUN apt-get update && \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Pre-download YOLO model so container starts instantly
-RUN python -c "from ultralytics import YOLO; YOLO('yolo11n.pt')"
+# The bundled custom detector is copied from models/ below; no COCO download is required.
 
 # Pre-download PPE and MediaPipe posture models.
 RUN apt-get update && apt-get install -y --no-install-recommends curl && \
     curl -L -o ppe.pt "https://huggingface.co/Hansung-Cho/yolov8-ppe-detection/resolve/main/best.pt" && \
     mkdir -p models && \
     curl -L -o models/pose_landmarker_heavy.task \
-      "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/latest/pose_landmarker_heavy.task" && \
+      "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_heavy/float16/latest/pose_landmarker_heavy.task" && \
     apt-get remove -y curl && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
 
 COPY config.py .
 COPY backend/ backend/
-COPY pose_behavior/ pose_behavior/
 COPY frontend/ frontend/
 COPY phone/ phone/
+COPY etap0/ etap0/
 COPY tools/ tools/
 COPY models/ models/
 

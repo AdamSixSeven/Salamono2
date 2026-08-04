@@ -40,18 +40,20 @@ dist/
 Thumbs.db
 desktop.ini
 
-# Runtime state, calibration and evidence
-data/
+# Runtime data. The worker registry is intentionally versioned.
+data/*
+!data/workers.sqlite3
 logs/
 *.log
 *.jsonl
 *.sqlite
 *.sqlite3
+!data/workers.sqlite3
 *.sqlite3-shm
 *.sqlite3-wal
 *.db
 
-# Captures and generated media
+# Captures, recordings and generated media
 captures/
 recordings/
 screenshots/
@@ -82,14 +84,18 @@ reports/
 !frontend/assets/**
 !docs/assets/**
 
-# Downloaded models and ML caches
+# Model exports and caches. Only the active runtime models are versioned.
 *.pt
+!ppe.pt
+!models/perimetr_scene_v3_best.pt
+!models/behavior/tcn_gru_pose_event_v2/model.pt
 *.pth
 *.onnx
 *.engine
 *.trt
 *.tflite
 *.task
+!models/pose_landmarker_heavy.task
 *.safetensors
 models/*.bin
 models/depth3d/
