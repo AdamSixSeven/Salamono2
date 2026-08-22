@@ -146,6 +146,30 @@ def test_sampling_returns_cached_score_without_duplicate_confirmation():
     assert cached.assessments[0].confirmed is False
 
 
+def test_partially_occluded_pose_is_displayed_but_not_analyzed():
+    low_visibility_pose = make_pose()
+    low_visibility_pose[:, 3] = 0.35
+    analyzer = PostureAnalyzer(
+        SequenceEstimator([low_visibility_pose]),
+        cfg(
+            min_landmark_visibility=0.30,
+            min_analysis_landmark_visibility=0.50,
+        ),
+    )
+    frame = np.zeros((480, 640, 3), dtype=np.uint8)
+
+    result = analyzer.process(frame, [person()], 0.0)
+
+    assert len(result.assessments) == 1
+    assessment = result.assessments[0]
+    assert assessment.status == "insufficient_pose"
+    assert assessment.landmarks is not None
+    assert assessment.signals == []
+    assert assessment.confirmed is False
+    assert assessment.metrics["analysis_landmarks_valid"] == 0.0
+    assert not analyzer._tracks[assessment.track_id].history
+
+
 def test_cached_learned_confirmation_is_emitted_only_once():
     analyzer = PostureAnalyzer(
         SequenceEstimator([make_pose()]),
@@ -189,6 +213,62 @@ def test_cached_learned_confirmation_is_emitted_only_once():
     replay = analyzer._merge_behavior_assessment(track, assessment, 10.3)
     assert new_prediction.confirmed is True
     assert replay.confirmed is False
+
+
+def test_phone_or_smoking_probability_creates_one_smoking_alert_at_threshold():
+    analyzer = PostureAnalyzer(
+        SequenceEstimator([make_pose()]),
+        cfg(learned_events_enabled=False, heuristic_alerts_enabled=False),
+    )
+    assessment = PostureAssessment(
+        track_id=7,
+        person=person(),
+        risk_score=0.0,
+        severity="OK",
+        status="normal",
+        signals=[],
+        metrics={},
+        frame_timestamp=10.0,
+        pose_confidence=0.95,
+        history_seconds=2.0,
+    )
+
+    for probabilities in (
+        {"phone_call": 0.85, "smoking": 0.1},
+        {"phone_call": 0.90, "smoking": 0.91},
+    ):
+        track = _Track(track_id=7, last_box=person().box, last_seen=10.0)
+        track.behavior_prediction_version = 1
+        track.behavior_last_prediction_at = 10.0
+        track.secondary_behavior_probabilities = probabilities
+
+        result = analyzer._merge_behavior_assessment(track, assessment, 10.0)
+        replay = analyzer._merge_behavior_assessment(track, assessment, 10.1)
+
+        assert result.signals == ["smoking_detected"]
+        assert result.severity == "WARNING"
+        assert result.status == "smoking_detected"
+        assert result.confirmed is True
+        assert replay.confirmed is False
+
+    below_threshold = _Track(
+        track_id=8,
+        last_box=person().box,
+        last_seen=10.0,
+    )
+    below_threshold.behavior_prediction_version = 1
+    below_threshold.behavior_last_prediction_at = 10.0
+    below_threshold.secondary_behavior_probabilities = {
+        "phone_call": 0.849,
+        "smoking": 0.849,
+    }
+    result = analyzer._merge_behavior_assessment(
+        below_threshold,
+        replace(assessment, track_id=8),
+        10.0,
+    )
+    assert "smoking_detected" not in result.signals
+    assert result.confirmed is False
 
 
 def test_manager_accepts_injected_estimator_without_mediapipe_model():

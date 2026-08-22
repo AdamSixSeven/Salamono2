@@ -71,15 +71,13 @@ class TestDangerDetector:
         assert events[0].severity == "DANGER"
         assert events[0].rule_name == "person_vehicle_overlap"
 
-    def test_proximity_triggers_warning(self):
+    def test_intermediate_proximity_does_not_trigger_warning(self):
         cfg = DangerConfig(proximity_px=50, overlap_iou=0.01)
         dd = DangerDetector(cfg)
         person = _make_det("person", [0, 0, 50, 100], cls_id=0)
         truck = _make_det("vehicle", [80, 0, 200, 100], cls_id=7)
         events = dd.evaluate([person, truck], 0.0)
-        assert len(events) == 1
-        assert events[0].severity == "WARNING"
-        assert events[0].rule_name == "person_near_vehicle"
+        assert events == []
 
     def test_far_apart_no_danger(self):
         cfg = DangerConfig(proximity_px=50, overlap_iou=0.01)

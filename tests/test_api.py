@@ -547,7 +547,8 @@ async def test_hand_to_mouth_candidate_is_saved_as_smoking_gesture():
         assert resp.status_code == 200
         stored = app.state.alert_store.query(kind="smoking_gesture")
         assert len(stored) == 1
-        assert stored[0].rule_name == "hand_to_mouth_pattern"
+        assert stored[0].rule_name == "smoking_detected"
+        assert stored[0].description == "WYKRYTO PALENIE"
         assert stored[0].details["interpretation"] == "requires_human_verification"
     finally:
         app.state.posture_manager = old_manager

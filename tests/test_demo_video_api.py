@@ -1,3 +1,5 @@
+from io import BytesIO
+
 import cv2
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
@@ -144,5 +146,36 @@ async def test_upload_api_rejects_type_and_size_without_leaking_jobs(tmp_path):
 
         assert service.list_jobs() == []
         assert list(service.upload_dir.iterdir()) == []
+    finally:
+        service.close(timeout=1.0)
+
+
+@pytest.mark.asyncio
+async def test_distance_asset_cannot_enter_demo_playback_or_cleanup_api(tmp_path):
+    service = _service(tmp_path)
+    distance_asset = service.upload_stream(
+        "manual.mp4",
+        "video/mp4",
+        BytesIO(b"manual-video"),
+        camera_id="distance_clip:private",
+        asset_kind="distance",
+    )
+    service.start_read_only_probe(distance_asset.job_id)
+    service.wait_for_status(distance_asset.job_id, "ready", timeout=1.0)
+    app = _app(service)
+    transport = ASGITransport(app=app)
+    try:
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            prefix = f"/api/demo-videos/{distance_asset.job_id}"
+            assert (await client.get(prefix)).status_code == 404
+            for action in ("play", "restart", "export", "stop"):
+                assert (await client.post(f"{prefix}/{action}")).status_code == 404
+            assert (await client.get(f"{prefix}/output")).status_code == 404
+            assert (await client.delete(prefix)).status_code == 404
+
+        # The failed cross-API attempts neither start inference nor remove the
+        # read-only clip; its owning Distance endpoint remains authoritative.
+        assert service.get(distance_asset.job_id).status == "ready"
+        assert service.asset_kind_for(distance_asset.job_id) == "distance"
     finally:
         service.close(timeout=1.0)

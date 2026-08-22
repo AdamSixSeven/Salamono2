@@ -61,12 +61,29 @@ def _raise_http(exc: BaseException) -> None:
     raise exc
 
 
+def _demo_asset_operation(
+    service: DemoVideoService,
+    operation: Callable[[str], DemoVideoJobSnapshot],
+    job_id: str,
+):
+    if service.asset_kind_for(job_id) != "demo":
+        # Distance clip assets are controlled only by the Distance API.
+        raise DemoVideoNotFoundError(f"Unknown demo video job: {job_id}")
+    return operation(job_id)
+
+
 async def _control(
+    service: DemoVideoService,
     operation: Callable[..., DemoVideoJobSnapshot],
     job_id: str,
 ) -> dict:
     try:
-        snapshot = await asyncio.to_thread(operation, job_id)
+        snapshot = await asyncio.to_thread(
+            _demo_asset_operation,
+            service,
+            operation,
+            job_id,
+        )
     except DemoVideoError as exc:
         _raise_http(exc)
         raise AssertionError("unreachable")
@@ -153,7 +170,12 @@ async def upload_demo_video(
 async def get_demo_video(request: Request, job_id: str):
     service = _service(request)
     try:
-        snapshot = await asyncio.to_thread(service.get, job_id)
+        snapshot = await asyncio.to_thread(
+            _demo_asset_operation,
+            service,
+            service.get,
+            job_id,
+        )
     except DemoVideoError as exc:
         _raise_http(exc)
         raise AssertionError("unreachable")
@@ -165,44 +187,49 @@ async def get_demo_video(request: Request, job_id: str):
 @router.post("/{job_id}/play")
 async def play_demo_video(request: Request, job_id: str):
     service = _service(request)
-    return await _control(service.play, job_id)
+    return await _control(service, service.play, job_id)
 
 
 @router.post("/{job_id}/pause")
 async def pause_demo_video(request: Request, job_id: str):
     service = _service(request)
-    return await _control(service.pause, job_id)
+    return await _control(service, service.pause, job_id)
 
 
 @router.post("/{job_id}/resume")
 async def resume_demo_video(request: Request, job_id: str):
     service = _service(request)
-    return await _control(service.resume, job_id)
+    return await _control(service, service.resume, job_id)
 
 
 @router.post("/{job_id}/restart")
 async def restart_demo_video(request: Request, job_id: str):
     service = _service(request)
-    return await _control(service.restart, job_id)
+    return await _control(service, service.restart, job_id)
 
 
 @router.post("/{job_id}/stop")
 async def stop_demo_video(request: Request, job_id: str):
     service = _service(request)
-    return await _control(service.stop, job_id)
+    return await _control(service, service.stop, job_id)
 
 
 @router.post("/{job_id}/export")
 async def export_demo_video(request: Request, job_id: str):
     service = _service(request)
-    return await _control(service.export, job_id)
+    return await _control(service, service.export, job_id)
 
 
 @router.get("/{job_id}/output")
 async def download_demo_video_output(request: Request, job_id: str):
     service = _service(request)
     try:
-        path = await asyncio.to_thread(service.output_path_for, job_id)
+        path = await asyncio.to_thread(
+            _demo_asset_operation,
+            service,
+            service.output_path_for,
+            job_id,
+        )
     except DemoVideoError as exc:
         _raise_http(exc)
         raise AssertionError("unreachable")
@@ -213,7 +240,12 @@ async def download_demo_video_output(request: Request, job_id: str):
 async def delete_demo_video(request: Request, job_id: str) -> Response:
     service = _service(request)
     try:
-        await asyncio.to_thread(service.delete, job_id)
+        await asyncio.to_thread(
+            _demo_asset_operation,
+            service,
+            service.delete,
+            job_id,
+        )
     except DemoVideoError as exc:
         _raise_http(exc)
     return Response(status_code=204)

@@ -809,7 +809,7 @@
                 const y = Number(landmark[1]);
                 const visibility = Number(landmark[3]);
                 if (!Number.isFinite(x) || !Number.isFinite(y) ||
-                    !Number.isFinite(visibility) || visibility < 0.5 ||
+                    !Number.isFinite(visibility) || visibility < 0.3 ||
                     x < 0 || x > 1 || y < 0 || y > 1) return;
                 points.set(index, [x * zoneCanvas.width, y * zoneCanvas.height]);
             });
@@ -836,15 +836,9 @@
 
             const box = assessment.person && assessment.person.box;
             if (validBox(box)) {
-                const score = Number.isFinite(Number(assessment.risk_score))
-                    ? " · " + Math.round(Number(assessment.risk_score) * 100) + "%"
-                    : "";
-                const behavior = assessment.behavior_label
-                    ? " · " + assessment.behavior_label + " " +
-                      Math.round(Number(assessment.behavior_confidence || 0) * 100) + "%"
-                    : "";
+                const postureLabel = assessment.behavior_label || "analyzing";
                 drawChip(
-                    "POSTURE #" + assessment.track_id + score + behavior,
+                    postureLabel,
                     Number(box[0]),
                     Number(box[1]) - 44,
                     color,
@@ -882,8 +876,7 @@
             // The backend supplies a projected metric polygon after ground-plane
             // calibration, or a cheap image-space fallback before calibration.
             dynamicSafetyZones
-                .slice()
-                .sort((a, b) => (a.severity === "DANGER") - (b.severity === "DANGER"))
+                .filter(z => z.severity === "DANGER")
                 .forEach(z => {
                     const poly = z.polygon || [];
                     if (poly.length < 3) return;

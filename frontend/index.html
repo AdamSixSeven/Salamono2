@@ -16,13 +16,14 @@
             <a href="/" class="active">Podgląd</a>
             <a href="/review.html">Historia</a>
             <a href="/calibrate.html">Kalibracja</a>
+            <a href="/distance.html">Dystans</a>
             <a href="/depth3d.html">Głębia</a>
         </nav>
     </div>
     <div class="px-header-right">
         <div class="px-mode-tools">
             <button class="px-ai-mode-btn" id="aiModeBtn" type="button"
-                    aria-label="Analiza AI i zapis filmu" title="Przetwórz cały film i zapisz MP4">
+                    aria-label="Seryjna analiza AI filmów" title="Wybierz jeden lub wiele filmów do pełnej analizy AI">
                 <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
                     <path d="M9.5 4.5A3 3 0 0 0 5 7.1a3.2 3.2 0 0 0-1 5.9 3.5 3.5 0 0 0 4 5.5c.5 1 1.5 1.5 2.5 1.5V4.5Z"/>
                     <path d="M14.5 4.5A3 3 0 0 1 19 7.1a3.2 3.2 0 0 1 1 5.9 3.5 3.5 0 0 1-4 5.5c-.5 1-1.5 1.5-2.5 1.5V4.5Z"/>
@@ -50,7 +51,7 @@
         </button>
         <input id="demoVideoInput" type="file"
                accept=".mp4,.avi,.mov,.mkv,video/mp4,video/quicktime,video/x-msvideo,video/x-matroska"
-               hidden>
+               multiple hidden>
         <button class="px-btn" id="pairPhoneBtn" type="button">
             <i data-lucide="qr-code"></i>Podłącz telefon
         </button>

@@ -132,6 +132,8 @@ def _identify_workers(
     persons: list[Detection],
     timestamp: float,
     performance_trace: FramePerformanceTrace | None = None,
+    *,
+    wait_for_current_frame: bool = False,
 ) -> tuple[list[Detection], list[WorkerIdentity], list[Detection]]:
     """Schedule asynchronous ID work and return current cached identities.
 
@@ -146,17 +148,28 @@ def _identify_workers(
     if worker is not None:
         try:
             submit_started = time.perf_counter()
-            submit = getattr(
-                worker,
-                "submit_borrowed_latest",
-                worker.submit_latest,
-            )
+            if wait_for_current_frame:
+                submit = getattr(worker, "submit_for_export", worker.submit_latest)
+            else:
+                submit = getattr(
+                    worker,
+                    "submit_borrowed_latest",
+                    worker.submit_latest,
+                )
             tracked_persons = submit(
                 camera_id,
                 frame,
                 persons,
                 timestamp,
             )
+            if wait_for_current_frame:
+                wait_for_result = getattr(worker, "wait_for_result", None)
+                if callable(wait_for_result):
+                    wait_for_result(
+                        camera_id,
+                        after_timestamp=float(np.nextafter(timestamp, -np.inf)),
+                        timeout=CONFIG.demo_video.control_timeout_seconds,
+                    )
             if performance_trace is not None:
                 performance_trace.set(
                     "worker_id_submit_ms",
@@ -407,6 +420,7 @@ POSTURE_SIGNAL_DESCRIPTIONS = {
     "fall_detected": "potwierdzony upadek",
     "person_on_ground": "osoba na ziemi",
     "unstable_movement": "utrzymujący się niestabilny ruch",
+    "smoking_detected": "WYKRYTO PALENIE",
 }
 
 
@@ -438,9 +452,12 @@ def _posture_record(
         "upper_body_instability",
         "sudden_balance_loss",
     }
-    is_hand_to_mouth = (
-        "hand_to_mouth_pattern" in assessment.signals
-        and not coordination_signals.intersection(assessment.signals)
+    is_smoking = (
+        "smoking_detected" in assessment.signals
+        or (
+            "hand_to_mouth_pattern" in assessment.signals
+            and not coordination_signals.intersection(assessment.signals)
+        )
     )
     if is_fall:
         kind = "fall_detected"
@@ -462,10 +479,10 @@ def _posture_record(
         kind = "posture_anomaly"
         rule_name = "unstable_movement"
         desc = "Wykryto utrzymujący się niestabilny wzorzec ruchu"
-    elif is_hand_to_mouth:
+    elif is_smoking:
         kind = "smoking_gesture"
-        rule_name = "hand_to_mouth_pattern"
-        desc = "Powtarzalny gest ręka–usta — możliwe palenie, wymagana weryfikacja"
+        rule_name = "smoking_detected"
+        desc = "WYKRYTO PALENIE"
     else:
         kind = "posture_anomaly"
         rule_name = "coordination_anomaly"
@@ -966,6 +983,19 @@ def _posture_to_out(
         upper_body_quality=round(assessment.upper_body_quality, 4),
         lower_body_quality=round(assessment.lower_body_quality, 4),
         visible_ratio=round(assessment.visible_ratio, 4),
+        secondary_behavior_probabilities={
+            label: round(float(probability), 4)
+            for label, probability in assessment.secondary_behavior_probabilities.items()
+        },
+        secondary_behavior_valid_ratio=round(
+            assessment.secondary_behavior_valid_ratio, 4
+        ),
+        secondary_behavior_window_seconds=round(
+            assessment.secondary_behavior_window_seconds, 3
+        ),
+        secondary_behavior_inference_ms=round(
+            assessment.secondary_behavior_inference_ms, 3
+        ),
         learned_event_type=assessment.learned_event_type,
         learned_event_reason=assessment.learned_event_reason,
         person=_det_to_out(assessment.person),
@@ -1016,19 +1046,7 @@ def _annotate_posture(
             for point in points.values():
                 cv2.circle(out, point, 3, color, -1, cv2.LINE_AA)
 
-        behavior_suffix = ""
-        if assessment.behavior_label:
-            behavior_suffix = (
-                f" | {assessment.behavior_label} "
-                f"{assessment.behavior_confidence:.0%}"
-            )
-        if assessment.status == "collecting_history":
-            label = f"POSTURE #{assessment.track_id}: kalibracja{behavior_suffix}"
-        else:
-            label = (
-                f"POSTURE #{assessment.track_id}: "
-                f"{assessment.risk_score:.0%} {assessment.status}{behavior_suffix}"
-            )
+        label = assessment.behavior_label or "analyzing"
         x1, y1, x2, _ = assessment.person.box
         text_y = max(18, y1 - 24)
         (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.48, 1)
@@ -1135,21 +1153,22 @@ def _annotate_dynamic_safety_zones(
     if not zones:
         return frame
     out = frame
-    # Draw WARNING first, then the smaller DANGER zone on top.
-    for zone in sorted(zones, key=lambda item: item.severity == "DANGER"):
+    for zone in zones:
+        if zone.severity != "DANGER":
+            continue
         if len(zone.polygon_px) < 3:
             continue
         pts = np.asarray(
             [[int(round(x)), int(round(y))] for x, y in zone.polygon_px],
             dtype=np.int32,
         )
-        color = COLOR_DANGER if zone.severity == "DANGER" else COLOR_WARNING
+        color = COLOR_DANGER
         overlay = out.copy()
         cv2.fillPoly(overlay, [pts], color)
-        alpha = 0.10 if zone.severity == "DANGER" else 0.055
+        alpha = 0.10
         cv2.addWeighted(overlay, alpha, out, 1.0 - alpha, 0, out)
         cv2.polylines(out, [pts], True, color, 2, cv2.LINE_AA)
-        x, y = zone.hazard.box[0], max(18, zone.hazard.box[1] - (32 if zone.severity == "DANGER" else 50))
+        x, y = zone.hazard.box[0], max(18, zone.hazard.box[1] - 32)
         if zone.threshold_m is not None:
             label = f"{zone.severity} {zone.threshold_m:.1f} m"
         else:
@@ -1162,21 +1181,29 @@ def _annotate_dynamic_safety_zones(
 def _annotate_worker_ids(
     frame: np.ndarray,
     identities: list[WorkerIdentity],
+    profiles: dict[str, WorkerRecord] | None = None,
 ) -> np.ndarray:
     if not identities:
         return frame
     out = frame
+    profiles = profiles or {}
+    worker_color = (128, 30, 82)  # frontend rgba(82, 30, 128, 0.92), in BGR
     for identity in identities:
         x1, y1, _, _ = identity.person.box
+        profile = profiles.get(identity.worker_id)
         label = f"ID {identity.worker_id}"
-        if CONFIG.worker_id.show_debug_status and identity.identity_status == "held":
-            label += " [HOLD]"
-        elif identity.cached:
-            label += " ~"
+        if profile is not None and profile.full_name:
+            label += f" · {profile.full_name}"
         (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.52, 1)
-        text_y = max(th + 5, y1 - 44)
-        cv2.rectangle(out, (x1, text_y - th - 5), (x1 + tw + 6, text_y + 2),
-                      (180, 80, 255), -1)
+        text_top = min(max(0, y1 + 3), max(0, out.shape[0] - th - 8))
+        text_y = text_top + th + 4
+        cv2.rectangle(
+            out,
+            (x1, text_top),
+            (min(out.shape[1] - 1, x1 + tw + 6), text_y + 2),
+            worker_color,
+            -1,
+        )
         cv2.putText(out, label, (x1 + 3, text_y - 2),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.52, (255, 255, 255), 1,
                     cv2.LINE_AA)
@@ -1185,7 +1212,7 @@ def _annotate_worker_ids(
                 [[int(round(x)), int(round(y))] for x, y in identity.tag_polygon],
                 dtype=np.int32,
             )
-            cv2.polylines(out, [pts], True, (180, 80, 255), 2, cv2.LINE_AA)
+            cv2.polylines(out, [pts], True, worker_color, 2, cv2.LINE_AA)
     return out
 
 
@@ -1479,6 +1506,7 @@ def _handle_site(
             persons,
             now,
             performance_trace,
+            wait_for_current_frame=rendered_frames is not None,
         )
     worker_profiles = _worker_profiles(
         worker_profile_cache or worker_store,
@@ -1548,13 +1576,32 @@ def _handle_site(
         else:
             # MediaPipe owns a private frame copy and never blocks the main
             # detector pipeline. Its one-slot queue always replaces stale work.
-            submit = getattr(
-                posture_worker,
-                "submit_borrowed_latest",
-                posture_worker.submit_latest,
-            )
+            if rendered_frames is not None:
+                submit = getattr(
+                    posture_worker,
+                    "submit_for_export",
+                    posture_worker.submit_latest,
+                )
+            else:
+                submit = getattr(
+                    posture_worker,
+                    "submit_borrowed_latest",
+                    posture_worker.submit_latest,
+                )
             submit(camera_id, frame, persons, now)
-            posture_snapshot = posture_worker.get_latest(camera_id)
+            if rendered_frames is not None:
+                wait_for_result = getattr(posture_worker, "wait_for_result", None)
+                waited_snapshot = (
+                    wait_for_result(
+                        camera_id,
+                        after_timestamp=float(np.nextafter(now, -np.inf)),
+                        timeout=CONFIG.demo_video.control_timeout_seconds,
+                    )
+                    if callable(wait_for_result) else posture_worker.get_latest(camera_id)
+                )
+                posture_snapshot = waited_snapshot or posture_worker.get_latest(camera_id)
+            else:
+                posture_snapshot = posture_worker.get_latest(camera_id)
             if posture_snapshot is not None and posture_snapshot.result is not None:
                 posture_assessments = _align_posture_to_current_people(
                     posture_snapshot.result.assessments,
@@ -1629,7 +1676,7 @@ def _handle_site(
         if runtime.posture:
             out = _annotate_posture(out, posture_assessments)
         if runtime.worker_id:
-            out = _annotate_worker_ids(out, worker_identities)
+            out = _annotate_worker_ids(out, worker_identities, worker_profiles)
             out = _annotate_unidentified(out, unidentified_events)
         annotated = out
         overlay_ms += (time.perf_counter() - overlay_started) * 1000.0
@@ -1823,6 +1870,7 @@ def _handle_checkpoint(
             persons,
             now,
             performance_trace,
+            wait_for_current_frame=rendered_frames is not None,
         )
     worker_profiles = _worker_profiles(
         worker_profile_cache or worker_store,
@@ -1860,7 +1908,7 @@ def _handle_checkpoint(
             confirmed if runtime.ppe else [],
         )
         if runtime.worker_id:
-            out = _annotate_worker_ids(out, worker_identities)
+            out = _annotate_worker_ids(out, worker_identities, worker_profiles)
             out = _annotate_unidentified(out, unidentified_events)
         annotated = out
         overlay_ms += (time.perf_counter() - overlay_started) * 1000.0

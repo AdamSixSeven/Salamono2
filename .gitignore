@@ -89,6 +89,8 @@ reports/
 !ppe.pt
 !models/perimetr_scene_v3_best.pt
 !models/behavior/tcn_gru_pose_event_v2/model.pt
+!models/behavior/tcn_gru_pose_event_v2/best_motion.pt
+!models/behavior/pose_event_v4_dual_norm_raw/best.pt
 *.pth
 *.onnx
 *.engine

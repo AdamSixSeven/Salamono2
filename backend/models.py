@@ -65,6 +65,10 @@ class PostureAssessmentOut(BaseModel):
     upper_body_quality: float = 0.0
     lower_body_quality: float = 0.0
     visible_ratio: float = 0.0
+    secondary_behavior_probabilities: dict[str, float] = Field(default_factory=dict)
+    secondary_behavior_valid_ratio: float = 0.0
+    secondary_behavior_window_seconds: float = 0.0
+    secondary_behavior_inference_ms: float = 0.0
     learned_event_type: str | None = None
     learned_event_reason: str = ""
     person: DetectionOut

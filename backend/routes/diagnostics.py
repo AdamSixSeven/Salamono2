@@ -56,6 +56,12 @@ async def performance_diagnostics(request: Request):
             "behavior_available": bool(
                 getattr(posture_manager, "behavior_available", False)
             ),
+            "secondary_behavior_available": bool(
+                getattr(posture_manager, "secondary_behavior_available", False)
+            ),
+            "secondary_behavior_error": getattr(
+                posture_manager, "secondary_behavior_unavailable_reason", None
+            ),
             "behavior_stride": int(
                 posture_manager.cfg.behavior_inference_stride_samples
             ),

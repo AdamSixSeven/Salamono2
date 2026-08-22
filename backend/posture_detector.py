@@ -41,8 +41,9 @@ if TYPE_CHECKING:
 
 # MediaPipe Pose Landmarker returns the 33-landmark BlazePose topology.
 POSE_LANDMARK_COUNT = 33
-POSTURE_DRAW_MIN_VISIBILITY = 0.50
+POSTURE_DRAW_MIN_VISIBILITY = 0.30
 PERSON_CROP_MARGIN = 0.24
+SECONDARY_SMOKING_ALERT_THRESHOLD = 0.85
 
 # Landmark indices used by the posture heuristics.
 LEFT_MOUTH = 9
@@ -128,7 +129,9 @@ class MediaPipePoseEstimator:
                 model_asset_path=self._config.model_path,
             ),
             running_mode=self._mp.tasks.vision.RunningMode.VIDEO,
-            num_poses=1,
+            # A square crop can contain a neighbouring worker. Returning two
+            # candidates lets the existing bbox matcher select the target.
+            num_poses=max(1, int(self._config.poses_per_crop)),
             min_pose_detection_confidence=(
                 self._config.min_pose_detection_confidence
             ),
@@ -255,6 +258,10 @@ class PostureAssessment:
     upper_body_quality: float = 0.0
     lower_body_quality: float = 0.0
     visible_ratio: float = 0.0
+    secondary_behavior_probabilities: dict[str, float] = field(default_factory=dict)
+    secondary_behavior_valid_ratio: float = 0.0
+    secondary_behavior_window_seconds: float = 0.0
+    secondary_behavior_inference_ms: float = 0.0
     learned_event_type: str | None = None
     learned_event_reason: str = ""
 
@@ -282,6 +289,7 @@ class _Track:
     behavior_samples_since_inference: int = 0
     behavior_prediction_version: int = 0
     behavior_confirmation_emitted_version: int = -1
+    secondary_smoking_emitted_version: int = -1
     behavior_streak_version: int = 0
     behavior_fall_streak: int = 0
     behavior_lying_streak: int = 0
@@ -300,6 +308,11 @@ class _Track:
     upper_body_quality: float = 0.0
     lower_body_quality: float = 0.0
     visible_ratio: float = 0.0
+    secondary_behavior_probability_history: deque[dict[str, float]] = field(default_factory=deque)
+    secondary_behavior_probabilities: dict[str, float] = field(default_factory=dict)
+    secondary_behavior_valid_ratio: float = 0.0
+    secondary_behavior_window_seconds: float = 0.0
+    secondary_behavior_inference_ms: float = 0.0
     learned_decision: EventDecision | None = None
 
 
@@ -1033,6 +1046,41 @@ class PostureAnalyzer:
                 continue
             sample = self._sample_from_pose(pose, person.box, frame_w, frame_h, timestamp)
             if sample is None:
+                # Keep a partially occluded skeleton visible, but do not feed
+                # it into temporal behavior/fall analysis.
+                visible_ids = [
+                    LEFT_SHOULDER, RIGHT_SHOULDER, LEFT_HIP, RIGHT_HIP,
+                    LEFT_KNEE, RIGHT_KNEE, LEFT_ANKLE, RIGHT_ANKLE,
+                ]
+                pose_confidence = float(np.mean(pose[visible_ids, 3]))
+                assessment = PostureAssessment(
+                    track_id=track.track_id,
+                    person=person,
+                    risk_score=0.0,
+                    severity="OK",
+                    status="insufficient_pose",
+                    signals=[],
+                    metrics={
+                        "pose_age_ms": 0.0,
+                        "optical_flow_points": 0.0,
+                        "analysis_landmarks_valid": 0.0,
+                    },
+                    frame_timestamp=timestamp,
+                    pose_confidence=pose_confidence,
+                    history_seconds=(
+                        track.history[-1].timestamp - track.history[0].timestamp
+                        if len(track.history) > 1 else 0.0
+                    ),
+                    landmarks=pose.copy(),
+                    frame_width=frame_w,
+                    frame_height=frame_h,
+                )
+                track.latest = assessment
+                track.display_landmarks = pose.copy()
+                track.display_box = person.box
+                track.display_frame_width = frame_w
+                track.display_frame_height = frame_h
+                assessments.append(assessment)
                 continue
             track.history.append(sample)
             self._trim_history(track, timestamp)
@@ -1183,8 +1231,9 @@ class PostureAnalyzer:
         frame_h: int,
         timestamp: float,
     ) -> PoseSample | None:
+        analysis_visibility = self.cfg.min_analysis_landmark_visibility
         required = pose[[LEFT_SHOULDER, RIGHT_SHOULDER, LEFT_HIP, RIGHT_HIP]]
-        if np.any(required[:, 3] < self.cfg.min_landmark_visibility):
+        if np.any(required[:, 3] < analysis_visibility):
             return None
 
         left_shoulder, right_shoulder, left_hip, right_hip = required
@@ -1201,14 +1250,14 @@ class PostureAnalyzer:
 
         ankle_separation: float | None = None
         ankles = pose[[LEFT_ANKLE, RIGHT_ANKLE]]
-        if np.all(ankles[:, 3] >= self.cfg.min_landmark_visibility):
+        if np.all(ankles[:, 3] >= analysis_visibility):
             ankle_separation = abs(float(ankles[0, 0] - ankles[1, 0])) / shoulder_width
 
         hand_to_mouth: bool | None = None
         mouth = pose[[LEFT_MOUTH, RIGHT_MOUTH]]
         wrists = pose[[15, 16]]
-        visible_mouth = mouth[mouth[:, 3] >= self.cfg.min_landmark_visibility, :2]
-        visible_wrists = wrists[wrists[:, 3] >= self.cfg.min_landmark_visibility, :2]
+        visible_mouth = mouth[mouth[:, 3] >= analysis_visibility, :2]
+        visible_wrists = wrists[wrists[:, 3] >= analysis_visibility, :2]
         if len(visible_mouth) and len(visible_wrists):
             distances = np.linalg.norm(
                 visible_wrists[:, None, :] - visible_mouth[None, :, :],
@@ -1320,6 +1369,37 @@ class PostureAnalyzer:
         track.upper_body_quality = float(prediction.upper_body_quality)
         track.lower_body_quality = float(prediction.lower_body_quality)
         track.visible_ratio = float(prediction.visible_ratio)
+
+        secondary = dict(prediction.secondary_probabilities)
+        if secondary:
+            track.secondary_behavior_probability_history.append(secondary)
+            while (
+                len(track.secondary_behavior_probability_history)
+                > self.cfg.behavior_smoothing_windows
+            ):
+                track.secondary_behavior_probability_history.popleft()
+            secondary_labels = list(secondary)
+            track.secondary_behavior_probabilities = {
+                label: float(
+                    np.mean(
+                        [
+                            probabilities.get(label, 0.0)
+                            for probabilities in track.secondary_behavior_probability_history
+                        ]
+                    )
+                )
+                for label in secondary_labels
+            }
+            track.secondary_behavior_valid_ratio = float(
+                prediction.secondary_valid_ratio
+            )
+            track.secondary_behavior_window_seconds = float(
+                prediction.secondary_window_seconds
+            )
+            track.secondary_behavior_inference_ms = float(
+                prediction.secondary_inference_ms
+            )
+
         track.behavior_prediction_version += 1
 
         if self.cfg.learned_events_enabled:
@@ -1347,6 +1427,9 @@ class PostureAnalyzer:
             ("pose_upper_body_quality", track.upper_body_quality),
             ("pose_lower_body_quality", track.lower_body_quality),
             ("pose_visible_ratio", track.visible_ratio),
+            ("secondary_behavior_valid_ratio", track.secondary_behavior_valid_ratio),
+            ("secondary_behavior_window_seconds", track.secondary_behavior_window_seconds),
+            ("secondary_behavior_inference_ms", track.secondary_behavior_inference_ms),
         ):
             metrics[name] = round(float(value), 4)
         for label, probability in track.behavior_probabilities.items():
@@ -1355,6 +1438,10 @@ class PostureAnalyzer:
             )
         for label, probability in track.safety_probabilities.items():
             metrics[f"learned_{label}"] = round(float(probability), 4)
+        for label, probability in track.secondary_behavior_probabilities.items():
+            metrics[f"secondary_behavior_probability_{label}"] = round(
+                float(probability), 4
+            )
 
         if self.cfg.heuristic_alerts_enabled:
             risk = assessment.risk_score
@@ -1436,6 +1523,39 @@ class PostureAnalyzer:
                 severity = "WARNING"
                 status = "verification_required"
 
+        secondary_smoking_confidence = max(
+            float(track.secondary_behavior_probabilities.get("smoking", 0.0)),
+            float(track.secondary_behavior_probabilities.get("phone_call", 0.0)),
+        )
+        secondary_fresh = (
+            bool(track.secondary_behavior_probabilities)
+            and timestamp - track.behavior_last_prediction_at
+            <= max(1.0, self.cfg.cached_result_ttl_seconds + 0.4)
+        )
+        if (
+            secondary_fresh
+            and secondary_smoking_confidence >= SECONDARY_SMOKING_ALERT_THRESHOLD
+        ):
+            if "smoking_detected" not in signals:
+                signals.append("smoking_detected")
+            risk = max(risk, secondary_smoking_confidence)
+            if severity != "DANGER":
+                severity = "WARNING"
+                status = "smoking_detected"
+            if (
+                track.secondary_smoking_emitted_version
+                != track.behavior_prediction_version
+            ):
+                track.secondary_smoking_emitted_version = (
+                    track.behavior_prediction_version
+                )
+                if (
+                    timestamp - track.last_gesture_alert_time
+                    >= self.cfg.cooldown_seconds
+                ):
+                    confirmed = True
+                    track.last_gesture_alert_time = timestamp
+
         return replace(
             assessment,
             risk_score=_clip01(risk),
@@ -1457,6 +1577,12 @@ class PostureAnalyzer:
             upper_body_quality=track.upper_body_quality,
             lower_body_quality=track.lower_body_quality,
             visible_ratio=track.visible_ratio,
+            secondary_behavior_probabilities=dict(
+                track.secondary_behavior_probabilities
+            ),
+            secondary_behavior_valid_ratio=track.secondary_behavior_valid_ratio,
+            secondary_behavior_window_seconds=track.secondary_behavior_window_seconds,
+            secondary_behavior_inference_ms=track.secondary_behavior_inference_ms,
             learned_event_type=learned_event_type,
             learned_event_reason=learned_event_reason,
         )
@@ -1821,6 +1947,14 @@ class PostureManager:
         self.performance_profiler = performance_profiler
         self.behavior_available = behavior_classifier is not None
         self.behavior_unavailable_reason: str | None = None
+        self.secondary_behavior_available = bool(
+            behavior_classifier is not None
+            and getattr(behavior_classifier, "secondary_runtime", None) is not None
+        )
+        self.secondary_behavior_unavailable_reason: str | None = (
+            getattr(behavior_classifier, "secondary_error", None)
+            if behavior_classifier is not None else None
+        )
         # Custom estimator factories are predominantly used by deterministic
         # tests; do not load a real checkpoint behind their back.
         if (
@@ -1837,11 +1971,22 @@ class PostureManager:
                     min_valid_ratio=self.cfg.behavior_min_valid_ratio,
                     min_window_coverage=self.cfg.behavior_min_window_coverage,
                     max_sample_gap_seconds=self.cfg.behavior_max_sample_gap_seconds,
+                    secondary_enabled=self.cfg.secondary_behavior_enabled,
+                    secondary_model_path=self.cfg.secondary_behavior_model_path,
+                    secondary_device=self.cfg.secondary_behavior_device,
                 )
                 self.behavior_available = True
+                self.secondary_behavior_available = bool(
+                    getattr(self.behavior_classifier, "secondary_runtime", None) is not None
+                )
+                self.secondary_behavior_unavailable_reason = getattr(
+                    self.behavior_classifier, "secondary_error", None
+                )
             except Exception as exc:
                 self.behavior_available = False
                 self.behavior_unavailable_reason = str(exc)
+                self.secondary_behavior_available = False
+                self.secondary_behavior_unavailable_reason = str(exc)
 
     def _check_available(self) -> tuple[bool, str | None]:
         if not self.cfg.enabled:
@@ -2040,6 +2185,23 @@ class PostureWorker:
             persons,
             timestamp,
             _copy_frame=False,
+        )
+
+    def submit_for_export(
+        self,
+        camera_id: str,
+        frame: np.ndarray,
+        persons: list[Detection],
+        timestamp: float,
+    ) -> bool:
+        """Queue an owned frame that an offline renderer can safely await."""
+
+        return self.submit_latest(
+            camera_id,
+            frame,
+            persons,
+            timestamp,
+            _copy_frame=True,
         )
 
     def set_camera_enabled(self, camera_id: str, enabled: bool) -> None:

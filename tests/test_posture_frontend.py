@@ -44,6 +44,27 @@ def test_overlay_tracks_landmarks_per_track_and_resets_on_camera_change():
     assert "cancelPostureAnimation()" in camera_handler
 
 
+def test_overlay_uses_behavior_label_without_track_id_and_only_red_dynamic_zone():
+    posture_renderer = ZONES.split("function drawPosture", 1)[1].split(
+        "function syncCanvasSize", 1,
+    )[0]
+    assert 'assessment.behavior_label || "analyzing"' in posture_renderer
+    assert "POSTURE #" not in posture_renderer
+    assert '"WYKRYTO PALENIE' not in posture_renderer
+    assert "risk_score" not in posture_renderer
+    assert "secondary_behavior_probabilities" not in posture_renderer
+    assert "TEL" not in posture_renderer
+    assert "SMOKE" not in posture_renderer
+    assert '.filter(z => z.severity === "DANGER")' in ZONES
+
+
+def test_overlay_draws_partially_occluded_landmarks_from_thirty_percent():
+    posture_renderer = ZONES.split("function drawPosture", 1)[1].split(
+        "function syncCanvasSize", 1,
+    )[0]
+    assert "visibility < 0.3" in posture_renderer
+
+
 def test_interpolator_math_duplicate_frame_guard_and_private_copies():
     node = shutil.which("node")
     if node is None:

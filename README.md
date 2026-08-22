@@ -1,88 +1,86 @@
 # Perimetr
 
-Perimetr jest systemem analizy obrazu dla nadzoru BHP na placu budowy. Odbiera
-obraz z telefonu, kamery albo pliku wideo, analizuje osoby, maszyny, wyposażenie
-ochronne, strefy i zachowanie oraz zapisuje zdarzenia do weryfikacji operatora.
+Perimetr to system analizy obrazu dla nadzoru BHP na placu budowy. Obsługuje
+kamerę, telefon i pliki wideo, wykrywa osoby oraz maszyny, analizuje zachowanie
+i zapisuje zdarzenia do późniejszej weryfikacji.
 
-System raportuje obserwowalne zdarzenia. Nie diagnozuje stanu zdrowia,
-nietrzeźwości ani użycia substancji.
+System raportuje obserwowalne zdarzenia i nie diagnozuje stanu zdrowia ani
+przyczyny zachowania.
 
-## Aktualne moduły
+## Główne moduły
 
-- własny detektor sceny YOLO: osoba oraz dziewięć klas pojazdów i maszyn;
-- statyczne i dynamiczne strefy `WARNING` / `DANGER`;
-- odległości metryczne po kalibracji, z jawnym trybem pikselowym bez kalibracji;
-- PPE na bramce: kask i kamizelka;
-- MediaPipe Pose Heavy dla maksymalnie czterech osób;
-- Pose Event v2: TCN/GRU 128/128, dziewięć klas czynności i cztery stany safety;
-- potwierdzanie upadku, osoby na ziemi i utrzymanego niestabilnego ruchu;
-- pełnoklatkowa identyfikacja ArUco powiązana z `track_id` i rejestrem SQLite;
-- podtrzymywanie ID z osobnym czasem dla UI i przypisania alarmu;
-- historia zdarzeń, zdjęcia, klipy oraz decyzja operatora;
-- tryb demonstracyjny z pliku wideo;
+- własny detektor YOLO dla osoby oraz dziewięciu klas pojazdów i maszyn;
+- pojedyncza dynamiczna strefa `DANGER` wokół maszyny;
+- pomiar odległości osoba–maszyna z kalibracją ground-plane;
+- ręczna analiza wybranej klatki z wgranego klipu w zakładce Dystans;
+- PPE w trybie bramki;
+- MediaPipe Pose Heavy oraz model action/safety long300;
+- dodatkowy model zachowania V4 dla sygnałów palenia/telefonu;
+- identyfikacja pracownika przez ArUco i rejestr SQLite;
+- historia alarmów, zrzuty i klipy dowodowe;
+- odtwarzanie demo oraz seryjna analiza AI filmów;
 - opcjonalny moduł Depth Anything V2.
 
 ## Uruchomienie na Windows
 
-Projekt jest przeznaczony dla Pythona 3.11.
+Projekt jest przygotowany dla Pythona 3.11.
 
 ```powershell
 py -3.11 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
 pip install -r requirements.txt
+Copy-Item .env.example .env
 python -m uvicorn backend.main:app --host 0.0.0.0 --port 8000 --env-file .env
 ```
 
-Panel będzie dostępny pod adresem `http://127.0.0.1:8000`.
+Panel: `http://127.0.0.1:8000`.
 
-Plik `.env` jest dołączony jako konfiguracja uruchomieniowa, ale pozostaje
-ignorowany przez Git. Wartości referencyjne znajdują się w `.env.example`.
+## Modele
 
-## Modele dołączone do projektu
+W repozytorium pozostają modele potrzebne przez aktualny runtime:
 
 ```text
 ppe.pt
 models/perimetr_scene_v3_best.pt
 models/pose_landmarker_heavy.task
-models/behavior/tcn_gru_pose_event_v2/model.pt
+models/behavior/tcn_gru_pose_event_v2/best_motion.pt
+models/behavior/pose_event_v4_dual_norm_raw/best.pt
 ```
 
-Pozostałe warianty modeli i lokalne eksporty są ignorowane przez Git. Skrypty w
-`tools/` pozwalają ponownie pobrać standardowy model PPE i MediaPipe.
+`models/behavior/tcn_gru_pose_event_v2/model.pt` pozostaje jako zgodny checkpoint
+starszego runtime. Pozostałe warianty i eksporty modeli są ignorowane przez Git.
 
-## Rejestr pracowników
+## Dane uruchomieniowe
 
-Baza `data/workers.sqlite3` jest celowo zachowana i nie jest ignorowana przez
-Git. Zawiera aktualny rejestr wykorzystywany do mapowania markerów ArUco na
-profile pracowników.
+`data/workers.sqlite3` jest celowo wersjonowany, ponieważ zawiera rejestr
+pracowników używany przez identyfikację ArUco. Alerty, kalibracje, eksporty,
+klipy, zrzuty i pliki tymczasowe są generowane lokalnie i ignorowane.
 
-Pozostałe pliki w `data/` są stanem uruchomieniowym: alertami, kalibracjami,
-strefami, klipami, zrzutami i plikami tymczasowymi. Są tworzone automatycznie i
-pozostają ignorowane.
+Kalibracja modułu Dystans znajduje się w `distance_assets/`.
 
 ## Struktura
 
 ```text
-backend/      API, pipeline wizyjny i zapis zdarzeń
-frontend/     panel podglądu, historia, kalibracja i głębia
-phone/        klient kamery telefonu
-pose_event/   cechy pozy, model TCN/GRU i automat zdarzeń
-models/       aktywne modele sceny, pozy i zachowania
-data/         rejestr pracowników oraz dane uruchomieniowe
-tests/        testy jednostkowe i integracyjne
-tools/        narzędzia instalacyjne i diagnostyczne
+backend/          API i pipeline analizy
+frontend/         panel, historia, kalibracja, dystans i głębia
+phone/            klient kamery telefonu
+pose_event/       modele i runtime analizy sekwencji pozy
+models/           modele runtime
+distance_assets/  kalibracja ground-plane
+data/             rejestr pracowników i dane uruchomieniowe
+tests/            testy
+tools/            narzędzia instalacyjne i diagnostyczne
 ```
 
-## Weryfikacja
+## Szybka weryfikacja
 
 ```powershell
 pytest -q
 python -m compileall backend pose_event
 node --check frontend/app.js
-node --check frontend/zones.js
+node --check frontend/distance.js
 node --check frontend/depth3d.js
-node --check frontend/review.js
 ```
 
-Opcjonalny moduł głębi wymaga zależności z `requirements-depth3d.txt`.
+Moduł głębi ma dodatkowe zależności w `requirements-depth3d.txt`.

@@ -1,3 +1,4 @@
+from dataclasses import replace
 from unittest.mock import patch
 
 import numpy as np
@@ -104,3 +105,32 @@ def test_posture_output_exposes_full_pose_for_client_overlay():
     assert len(output.pose_landmarks) == POSE_LANDMARK_COUNT
     assert all(len(landmark) == 4 for landmark in output.pose_landmarks)
     assert output.pose_landmarks[0][3] == 0.95
+
+
+def test_posture_chip_uses_only_behavior_label_without_track_id():
+    frame = np.zeros((100, 100, 3), dtype=np.uint8)
+    assessment = replace(
+        _assessment(_visible_pose()),
+        severity="WARNING",
+        status="smoking_detected",
+        signals=["smoking_detected"],
+        risk_score=0.91,
+        behavior_label="standing",
+        behavior_confidence=0.93,
+        secondary_behavior_probabilities={"phone_call": 0.91, "smoking": 0.88},
+    )
+
+    with patch("backend.routes.ingest.cv2.putText") as draw_text:
+        _annotate_posture(frame, [assessment])
+
+    label = draw_text.call_args_list[-1].args[1]
+    assert label == "standing"
+    assert "%" not in label
+    assert "TEL" not in label
+    assert "SMOKE" not in label
+    assert "POSTURE" not in label
+    assert "#1" not in label
+
+    with patch("backend.routes.ingest.cv2.putText") as draw_text:
+        _annotate_posture(frame, [_assessment(_visible_pose())])
+    assert draw_text.call_args_list[-1].args[1] == "analyzing"

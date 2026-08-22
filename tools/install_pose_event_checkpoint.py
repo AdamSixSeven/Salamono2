@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
-"""Validate and install the trained baseline pose-event checkpoint.
+"""Validate and install a compatible pose-event action/safety checkpoint.
 
-Usage:
-    python tools/install_pose_event_checkpoint.py \
-        /path/to/perimetr_pose_event_v2_1/models/behavior/tcn_gru_pose_event_v2/best.pt
+Accepted checkpoints:
+- original pose-event V2 multitask model,
+- V3.2 motion-only train-normalization checkpoint (including seed43 long300).
+
+The runtime path stays stable so existing POSTURE_BEHAVIOR_MODEL configuration
+continues to work.
 """
 
 from __future__ import annotations
@@ -36,6 +39,7 @@ EXPECTED_SAFETY = [
     "fall_transition",
     "ground_state",
 ]
+V32_MOTION_FORMAT = "perimetr_pose_event_v3_2_motion_ablation"
 
 
 def _sha256(path: Path) -> str:
@@ -60,22 +64,17 @@ def _load_checkpoint(path: Path) -> dict:
     return checkpoint
 
 
-def _validate(checkpoint: dict) -> None:
-    if checkpoint.get("format_version") != 2:
-        raise SystemExit("Unsupported checkpoint: expected pose-event format_version=2")
-    if checkpoint.get("model_type") != "tcn_gru_multitask":
-        raise SystemExit("Unsupported checkpoint: expected model_type=tcn_gru_multitask")
-
+def _validate_common(checkpoint: dict) -> None:
     action_classes = list(checkpoint.get("action_classes", []))
     safety_classes = list(checkpoint.get("safety_classes", []))
     if action_classes != EXPECTED_ACTIONS:
         raise SystemExit(
-            "Action classes do not match the selected 9-class baseline:\n"
+            "Action classes do not match the selected 9-class model:\n"
             + json.dumps(action_classes, ensure_ascii=False, indent=2)
         )
     if safety_classes != EXPECTED_SAFETY:
         raise SystemExit(
-            "Safety classes do not match the selected baseline:\n"
+            "Safety classes do not match the selected 4-class model:\n"
             + json.dumps(safety_classes, ensure_ascii=False, indent=2)
         )
 
@@ -98,7 +97,7 @@ def _validate(checkpoint: dict) -> None:
         wrong["dropout"] = {"expected": 0.20, "actual": dropout}
     if wrong:
         raise SystemExit(
-            "This is not the selected 128/128 dropout=0.20 baseline:\n"
+            "Checkpoint architecture does not match the expected 128/128 model:\n"
             + json.dumps(wrong, ensure_ascii=False, indent=2)
         )
 
@@ -107,10 +106,40 @@ def _validate(checkpoint: dict) -> None:
     if abs(float(checkpoint.get("fps", 0.0)) - 15.0) > 1e-6:
         raise SystemExit("Checkpoint FPS must be 15")
 
+    if "feature_mean" not in checkpoint or "feature_std" not in checkpoint:
+        raise SystemExit("Checkpoint must contain feature_mean and feature_std")
+
+
+def _validate(checkpoint: dict) -> str:
+    if checkpoint.get("format_version") == 2:
+        if checkpoint.get("model_type") != "tcn_gru_multitask":
+            raise SystemExit("Unsupported V2 checkpoint model_type")
+        _validate_common(checkpoint)
+        if "state_dict" not in checkpoint:
+            raise SystemExit("V2 checkpoint is missing state_dict")
+        return "pose-event-v2"
+
+    if checkpoint.get("format") == V32_MOTION_FORMAT:
+        _validate_common(checkpoint)
+        state = checkpoint.get("motion_state_dict")
+        if not isinstance(state, dict):
+            raise SystemExit("V3.2 motion checkpoint is missing motion_state_dict")
+        missing = [
+            key for key in ("motion_branch", "action_head", "safety_head")
+            if key not in state
+        ]
+        if missing:
+            raise SystemExit(f"V3.2 motion checkpoint is missing: {missing}")
+        return "pose-event-v3.2-motion"
+
+    raise SystemExit(
+        "Unsupported checkpoint: expected pose-event V2 or V3.2 motion-only checkpoint"
+    )
+
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("checkpoint", help="Path to the trained baseline best.pt")
+    parser.add_argument("checkpoint", help="Path to a compatible best.pt/best_motion.pt")
     parser.add_argument(
         "--force",
         action="store_true",
@@ -130,7 +159,7 @@ def main() -> int:
         return 3
 
     checkpoint = _load_checkpoint(source)
-    _validate(checkpoint)
+    kind = _validate(checkpoint)
 
     TARGET_DIR.mkdir(parents=True, exist_ok=True)
     shutil.copy2(source, TARGET_MODEL)
@@ -139,15 +168,25 @@ def main() -> int:
         f"{digest}  model.pt\n", encoding="utf-8"
     )
 
-    for name in ("test_report.json", "history.json"):
+    for name in (
+        "test_report.json",
+        "motion_test_report.json",
+        "history.json",
+        "behavior_history.json",
+    ):
         candidate = source.parent / name
         if candidate.is_file():
             shutil.copy2(candidate, TARGET_DIR / name)
 
     print("Installed:", TARGET_MODEL)
     print("SHA-256:", digest)
+    print("Checkpoint:", kind)
     print("Architecture: TCN/GRU 128/128, 2 GRU layers, dropout 0.20")
-    print("Classes: 9 action + 4 safety")
+    print("Runtime heads: 9 action + 4 safety")
+    if kind == "pose-event-v3.2-motion":
+        metadata = dict(checkpoint.get("metadata") or {})
+        print("Normalization:", metadata.get("normalization_source", "checkpoint feature_mean/std"))
+        print("Behavior heads: not trained / not used")
     return 0
 
 

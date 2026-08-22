@@ -25,7 +25,7 @@ class DangerEvent:
 
 @dataclass
 class DynamicSafetyZone:
-    """A moving warning/danger polygon attached to a detected machine."""
+    """A moving danger polygon attached to a detected machine."""
 
     zone_id: str
     hazard: Detection
@@ -155,15 +155,11 @@ class DangerDetector:
                 if dist_m is not None:
                     if dist_m <= self.cfg.danger_distance_m:
                         rule_name, severity = "person_vehicle_danger_zone", "DANGER"
-                    elif dist_m <= self.cfg.warning_distance_m:
-                        rule_name, severity = "person_near_vehicle", "WARNING"
                     else:
                         continue
                 else:
                     if dist_px <= self.cfg.danger_proximity_px:
                         rule_name, severity = "person_vehicle_danger_zone", "DANGER"
-                    elif dist_px <= self.cfg.proximity_px:
-                        rule_name, severity = "person_near_vehicle", "WARNING"
                     else:
                         continue
 
@@ -194,10 +190,11 @@ class DangerDetector:
         )
         zones: list[DynamicSafetyZone] = []
         for index, hazard in enumerate(self._hazards(detections)):
-            for severity, radius_m, radius_px in (
-                ("WARNING", self.cfg.warning_distance_m, self.cfg.proximity_px),
-                ("DANGER", self.cfg.danger_distance_m, self.cfg.danger_proximity_px),
-            ):
+            for severity, radius_m, radius_px in ((
+                "DANGER",
+                self.cfg.danger_distance_m,
+                self.cfg.danger_proximity_px,
+            ),):
                 if metric_calibration is not None:
                     # Draw a metric capsule around the machine's projected
                     # ground-contact segment. This matches `ground_distance_m`
@@ -254,7 +251,7 @@ class DangerDetector:
                     threshold_m, threshold_px = None, float(radius_px)
 
                 zones.append(DynamicSafetyZone(
-                    zone_id=f"machine-{index}-{severity.lower()}",
+                    zone_id=f"machine-{index}-danger",
                     hazard=hazard,
                     severity=severity,
                     polygon_px=points,

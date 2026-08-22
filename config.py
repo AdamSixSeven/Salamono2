@@ -89,6 +89,10 @@ class PostureConfig:
     behavior_model_path: str = "models/behavior/tcn_gru_pose_event_v2/model.pt"
     behavior_device: str = "auto"
     behavior_feature_fps: float = 15.0
+    # Secondary smoking/phone-call classifier.
+    secondary_behavior_enabled: bool = False
+    secondary_behavior_model_path: str = "models/behavior/pose_event_v4_dual_norm_raw/best.pt"
+    secondary_behavior_device: str = "auto"
     behavior_min_valid_ratio: float = 0.45
     behavior_min_window_coverage: float = 0.70
     behavior_max_sample_gap_seconds: float = 0.50
@@ -122,11 +126,14 @@ class PostureConfig:
     min_lower_body_quality_for_unstable: float = 0.35
 
     max_poses: int = 4
+    poses_per_crop: int = 2
     max_camera_instances: int = 2
     min_person_height_frac: float = 0.18
     min_person_long_side_frac: float = 0.10
     min_person_area_frac: float = 0.0025
-    min_landmark_visibility: float = 0.50
+    # Separate thresholds for drawing/matching and alert analysis.
+    min_landmark_visibility: float = 0.30
+    min_analysis_landmark_visibility: float = 0.50
     min_pose_detection_confidence: float = 0.50
     min_pose_presence_confidence: float = 0.50
     min_tracking_confidence: float = 0.50
@@ -376,6 +383,12 @@ def _from_env() -> AppConfig:
         cfg.posture.behavior_device = v
     if v := os.getenv("POSTURE_BEHAVIOR_FEATURE_FPS"):
         cfg.posture.behavior_feature_fps = max(0.1, float(v))
+    if v := os.getenv("POSTURE_SECONDARY_BEHAVIOR_ENABLED"):
+        cfg.posture.secondary_behavior_enabled = v.strip().lower() in {"1", "true", "yes", "on"}
+    if v := os.getenv("POSTURE_SECONDARY_BEHAVIOR_MODEL"):
+        cfg.posture.secondary_behavior_model_path = v
+    if v := os.getenv("POSTURE_SECONDARY_BEHAVIOR_DEVICE"):
+        cfg.posture.secondary_behavior_device = v
     if v := os.getenv("POSTURE_BEHAVIOR_MIN_VALID_RATIO"):
         cfg.posture.behavior_min_valid_ratio = min(1.0, max(0.0, float(v)))
     if v := os.getenv("POSTURE_BEHAVIOR_MIN_WINDOW_COVERAGE"):
@@ -424,12 +437,26 @@ def _from_env() -> AppConfig:
         cfg.posture.min_lower_body_quality_for_unstable = min(1.0, max(0.0, float(v)))
     if v := os.getenv("POSTURE_MAX_POSES"):
         cfg.posture.max_poses = int(v)
+    if v := os.getenv("POSTURE_POSES_PER_CROP"):
+        cfg.posture.poses_per_crop = max(1, int(v))
     if v := os.getenv("POSTURE_MIN_PERSON_HEIGHT_FRAC"):
         cfg.posture.min_person_height_frac = float(v)
     if v := os.getenv("POSTURE_MIN_PERSON_LONG_SIDE_FRAC"):
         cfg.posture.min_person_long_side_frac = max(0.0, float(v))
     if v := os.getenv("POSTURE_MIN_PERSON_AREA_FRAC"):
         cfg.posture.min_person_area_frac = max(0.0, float(v))
+    if v := os.getenv("POSTURE_MIN_LANDMARK_VISIBILITY"):
+        cfg.posture.min_landmark_visibility = min(1.0, max(0.0, float(v)))
+    if v := os.getenv("POSTURE_MIN_ANALYSIS_LANDMARK_VISIBILITY"):
+        cfg.posture.min_analysis_landmark_visibility = min(
+            1.0, max(0.0, float(v))
+        )
+    if v := os.getenv("POSTURE_MIN_POSE_DETECTION_CONFIDENCE"):
+        cfg.posture.min_pose_detection_confidence = min(1.0, max(0.0, float(v)))
+    if v := os.getenv("POSTURE_MIN_POSE_PRESENCE_CONFIDENCE"):
+        cfg.posture.min_pose_presence_confidence = min(1.0, max(0.0, float(v)))
+    if v := os.getenv("POSTURE_MIN_TRACKING_CONFIDENCE"):
+        cfg.posture.min_tracking_confidence = min(1.0, max(0.0, float(v)))
     if v := os.getenv("POSTURE_CROP_MARGIN"):
         cfg.posture.crop_margin = max(0.0, float(v))
     if v := os.getenv("POSTURE_CROP_CENTER_FOLLOW"):

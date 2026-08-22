@@ -69,22 +69,65 @@ def test_loading_has_a_bounded_ready_or_failed_exit_and_change_remains_usable():
     assert 'demoVideoChangeBtn.addEventListener("click", changeDemoVideo);' in APP_JS
 
 
+def _source_between(start: str, end: str) -> str:
+    start_index = APP_JS.index(start)
+    end_index = APP_JS.index(end, start_index)
+    return APP_JS[start_index:end_index]
+
+
 def test_status_polling_and_all_control_endpoints_use_the_job_id():
     assert '"/api/demo-videos/" + encodeURIComponent(jobId)' in APP_JS
     assert '"/api/demo-videos/" + encodeURIComponent(jobId) + "/" + action' in APP_JS
     assert 'method: "DELETE"' in APP_JS
     assert 'method: "POST"' in APP_JS
     assert "scheduleDemoStatusPoll" in APP_JS
-    assert 'window.addEventListener("beforeunload"' in APP_JS
     assert "deleteDemoJobBestEffort(oldJobId);" in APP_JS
 
 
-def test_same_file_can_be_selected_again_and_change_deletes_the_old_job():
+def test_page_navigation_disposes_only_frontend_clients_without_deleting_job():
+    lifecycle = _source_between(
+        "function disposeDemoPageClient()",
+        "function resumeDemoPageClient()",
+    )
+    assert 'window.addEventListener("beforeunload"' not in APP_JS
+    assert 'window.addEventListener("pagehide", disposeDemoPageClient);' in APP_JS
+    assert 'window.addEventListener("pageshow", resumeDemoPageClient);' in APP_JS
+    assert "clearDemoPollTimer();" in lifecycle
+    assert "clearDemoPreparationWatchdog();" in lifecycle
+    assert "disconnectWebSocketForPageLifecycle();" in lifecycle
+    assert "cancelDemoRequests" not in lifecycle
+    assert "demoUploadXhr.abort" not in lifecycle
+    assert "deleteDemoJobBestEffort" not in lifecycle
+    assert 'method: "DELETE"' not in lifecycle
+    # Deletion happens only after a replacement file was actually selected.
+    assert APP_JS.count("deleteDemoJobBestEffort(oldJobId);") == 1
+
+
+def test_active_demo_job_is_persisted_and_restored_without_restart():
+    restore = _source_between(
+        "async function restorePersistedDemoJob()",
+        "function deleteDemoJobBestEffort(jobId)",
+    )
+    assert 'const DEMO_SESSION_STORAGE_KEY = "perimetr:demo-video-session";' in APP_JS
+    assert "localStorage.setItem(DEMO_SESSION_STORAGE_KEY" in APP_JS
+    assert "localStorage.getItem(DEMO_SESSION_STORAGE_KEY)" in APP_JS
+    assert '"/api/demo-videos/" + encodeURIComponent(demoJobId)' in restore
+    assert "applyDemoSnapshot(snapshot, generation)" in restore
+    assert "selectCamera(demoCameraId);" in restore
+    assert "scheduleDemoStatusPoll(0, generation);" in restore
+    initial_page_setup = APP_JS[APP_JS.rindex("filterAlertsUI();"):]
+    assert "connectWebSocket();" in initial_page_setup
+    assert "void restorePersistedDemoJob();" in initial_page_setup
+
+
+def test_same_file_can_be_selected_again_and_picker_cancel_keeps_the_old_job():
     assert 'demoVideoInput.value = "";' in APP_JS
-    assert "function changeDemoVideo()" in APP_JS
-    assert "resetDemoClient({ returnToCamera: true });" in APP_JS
-    assert "deleteDemoJobBestEffort(oldJobId);" in APP_JS
-    assert "openDemoFilePicker();" in APP_JS
+    change = _source_between("function changeDemoVideo()", "function startDemoUpload(file)")
+    replacement = _source_between("function startDemoUpload(file)", "async function requestDemoAction")
+    assert "openDemoFilePicker();" in change
+    assert "resetDemoClient" not in change
+    assert "deleteDemoJobBestEffort" not in change
+    assert "deleteDemoJobBestEffort(oldJobId);" in replacement
 
 
 def test_demo_frames_are_filtered_by_job_run_and_monotonic_frame_index():

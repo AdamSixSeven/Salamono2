@@ -44,7 +44,7 @@ from backend.ppe_rules import PPEChecker
 from backend.posture_detector import PostureManager, PostureWorker
 from backend.preview_encoder import PreviewJpegEncoder
 from backend.runtime_options import RuntimeProcessingStore
-from backend.routes import alerts, calibration, debug, demo_videos, depth3d, diagnostics, ingest, pair, reports, runtime, workers, ws, zones
+from backend.routes import alerts, calibration, debug, demo_videos, distance, depth3d, diagnostics, ingest, pair, reports, runtime, workers, ws, zones
 from backend.ws_manager import ConnectionManager
 from backend.zone_rules import ZoneBreachDetector, ZoneTemporalFilter
 from backend.zones_store import ZoneStore
@@ -106,7 +106,10 @@ async def lifespan(app: FastAPI):
         )
     app.state.ws_manager = ConnectionManager()
     app.state.frame_store = FrameStore()
-    app.state.latest_frame_store = LatestFrameStore(max_cameras=16)
+    app.state.latest_frame_store = LatestFrameStore(
+    max_cameras=16,
+    max_frame_bytes=32 * 1024 * 1024,
+    )
     app.state.latest_detection_store = LatestDetectionStore(max_cameras=16)
     app.state.preview_encoder = PreviewJpegEncoder()
     app.state.runtime_processing_store = RuntimeProcessingStore(max_cameras=64)
@@ -175,6 +178,25 @@ async def lifespan(app: FastAPI):
                 classifier.device,
                 classifier.warmup_ms,
             )
+            if getattr(app.state.posture_manager, "secondary_behavior_available", False):
+                secondary = classifier.secondary_runtime
+                logger.info(
+                    "Secondary smoking/phone classifier ready (%s, device=%s, "
+                    "smoke_T=%.3f, phone_T=%.3f)",
+                    CONFIG.posture.secondary_behavior_model_path,
+                    secondary.device,
+                    secondary.smoking_temperature,
+                    secondary.phone_call_temperature,
+                )
+            elif CONFIG.posture.secondary_behavior_enabled:
+                logger.info(
+                    "Secondary smoking/phone classifier disabled: %s",
+                    getattr(
+                        app.state.posture_manager,
+                        "secondary_behavior_unavailable_reason",
+                        None,
+                    ),
+                )
         elif CONFIG.posture.behavior_enabled:
             logger.info(
                 "Learned behavior classifier disabled: %s",
@@ -383,6 +405,7 @@ app.include_router(ingest.router, prefix="/api")
 app.include_router(alerts.router, prefix="/api")
 app.include_router(zones.router, prefix="/api")
 app.include_router(calibration.router, prefix="/api")
+app.include_router(distance.router, prefix="/api")
 app.include_router(depth3d.router, prefix="/api")
 app.include_router(debug.router, prefix="/api")
 app.include_router(pair.router, prefix="/api")
@@ -557,6 +580,10 @@ async def readiness():
         "posture_analysis": bool(posture_manager and posture_manager.available),
         "learned_behavior_classifier": bool(
             posture_manager and getattr(posture_manager, "behavior_available", False)
+        ),
+        "secondary_smoking_phone_classifier": bool(
+            posture_manager
+            and getattr(posture_manager, "secondary_behavior_available", False)
         ),
         # Keep the old component key for clients that already consume it.
         "worker_qr": worker_id_operational,

@@ -16,7 +16,10 @@ PERFORMANCE_ENV_KEYS = (
     "YOLO_FALL_RECOVERY_IMG_SIZE",
     "POSTURE_SAMPLE_FPS",
     "POSTURE_MAX_POSES",
+    "POSTURE_POSES_PER_CROP",
     "POSTURE_MIN_PERSON_HEIGHT_FRAC",
+    "POSTURE_MIN_LANDMARK_VISIBILITY",
+    "POSTURE_MIN_ANALYSIS_LANDMARK_VISIBILITY",
     "WORKER_ID_SAMPLE_FPS",
     "WORKER_ID_CACHE_TTL_SEC",
     "WORKER_ID_CROP_PADDING",
@@ -35,7 +38,10 @@ def test_live_pipeline_defaults_are_latency_balanced():
     assert cfg.yolo.fall_recovery_img_size == 640
     assert cfg.posture.sample_fps == 15.0
     assert cfg.posture.max_poses == 4
+    assert cfg.posture.poses_per_crop == 2
     assert cfg.posture.min_person_height_frac == 0.18
+    assert cfg.posture.min_landmark_visibility == 0.30
+    assert cfg.posture.min_analysis_landmark_visibility == 0.50
     assert cfg.posture.optical_flow_enabled is True
     assert cfg.posture.optical_flow_scale == 0.5
     assert cfg.posture.crop_margin == 0.24
@@ -79,7 +85,10 @@ def test_performance_defaults_remain_overridable_and_engine_path_is_supported(
     monkeypatch.setenv("YOLO_FALL_RECOVERY_IMG_SIZE", "768")
     monkeypatch.setenv("POSTURE_SAMPLE_FPS", "2.5")
     monkeypatch.setenv("POSTURE_MAX_POSES", "2")
+    monkeypatch.setenv("POSTURE_POSES_PER_CROP", "3")
     monkeypatch.setenv("POSTURE_MIN_PERSON_HEIGHT_FRAC", "0.20")
+    monkeypatch.setenv("POSTURE_MIN_LANDMARK_VISIBILITY", "0.25")
+    monkeypatch.setenv("POSTURE_MIN_ANALYSIS_LANDMARK_VISIBILITY", "0.55")
     monkeypatch.setenv("WORKER_ID_SAMPLE_FPS", "1")
     monkeypatch.setenv("WORKER_ID_CACHE_TTL_SEC", "7")
     monkeypatch.setenv("WORKER_ID_CROP_PADDING", "0.25")
@@ -96,7 +105,10 @@ def test_performance_defaults_remain_overridable_and_engine_path_is_supported(
     assert cfg.yolo.fall_recovery_img_size == 768
     assert cfg.posture.sample_fps == 2.5
     assert cfg.posture.max_poses == 2
+    assert cfg.posture.poses_per_crop == 3
     assert cfg.posture.min_person_height_frac == 0.20
+    assert cfg.posture.min_landmark_visibility == 0.25
+    assert cfg.posture.min_analysis_landmark_visibility == 0.55
     assert cfg.worker_id.sample_fps == 1.0
     assert cfg.worker_id.cache_ttl_seconds == 7.0
     assert cfg.worker_id.crop_padding == 0.25
@@ -117,6 +129,7 @@ def test_env_example_matches_runtime_performance_defaults():
     assert "YOLO_FALL_RECOVERY_IMG_SIZE=640" in example
     assert "POSTURE_SAMPLE_FPS=15" in example
     assert "POSTURE_MAX_POSES=4" in example
+    assert "POSTURE_POSES_PER_CROP=2" in example
     assert "POSTURE_OPTICAL_FLOW_ENABLED=true" in example
     assert "POSTURE_OPTICAL_FLOW_SCALE=0.5" in example
     assert "POSTURE_BEHAVIOR_INFERENCE_STRIDE=3" in example
@@ -124,6 +137,8 @@ def test_env_example_matches_runtime_performance_defaults():
     assert "POSTURE_MIN_PERSON_HEIGHT_FRAC=0.18" in example
     assert "POSTURE_MIN_PERSON_LONG_SIDE_FRAC=0.10" in example
     assert "POSTURE_MIN_PERSON_AREA_FRAC=0.0025" in example
+    assert "POSTURE_MIN_LANDMARK_VISIBILITY=0.30" in example
+    assert "POSTURE_MIN_ANALYSIS_LANDMARK_VISIBILITY=0.50" in example
     assert "WORKER_ID_SAMPLE_FPS=1.5" in example
     assert "WORKER_ID_CACHE_TTL_SEC=4" in example
     assert "WORKER_ID_CROP_PADDING=0.15" in example

@@ -434,8 +434,6 @@
     syncLayerButtons();
 
 
-    aiModeBtn.addEventListener("click", () => void requestDemoExport());
-
     modeSegmented.querySelectorAll("button").forEach(btn => {
         btn.addEventListener("click", () => {
             State.mode = btn.dataset.mode;
@@ -552,15 +550,71 @@
     let demoPollFailures = 0;
     let demoReturnCameraId = null;
     let demoDownloadedOutputUrl = null;
+    let demoPageDisposed = false;
+
+    // Kolejka analizy filmów uruchamiana zielonym przyciskiem.
+    let demoPickerPurpose = "single";
+    let demoBatchActive = false;
+    let demoBatchCancelled = false;
+    let demoBatchFiles = [];
+    let demoBatchIndex = -1;
+    let demoBatchDone = 0;
+    let demoBatchFailed = [];
+    let demoBatchFinalMessage = "";
 
     const DEMO_CAMERA_ID = "demo_upload";
+    const DEMO_SESSION_STORAGE_KEY = "perimetr:demo-video-session";
     const DEMO_STATUS_POLL_MS = 600;
     const DEMO_PREPARE_TIMEOUT_MS = 45_000;
     const DEMO_UPLOAD_TIMEOUT_MS = 30 * 60 * 1000;
+    const DEMO_BATCH_PREPARE_TIMEOUT_MS = 3 * 60 * 1000;
+    const DEMO_BATCH_EXPORT_TIMEOUT_MS = 6 * 60 * 60 * 1000;
+    const DEMO_BATCH_DOWNLOAD_GRACE_MS = 2500;
     const DEMO_BACKEND_STATES = new Set([
         "uploaded", "loading", "ready", "playing", "paused", "finished",
         "stopped", "failed", "deleted",
     ]);
+
+    function loadPersistedDemoSession() {
+        try {
+            const raw = localStorage.getItem(DEMO_SESSION_STORAGE_KEY);
+            if (!raw) return null;
+            const parsed = JSON.parse(raw);
+            const jobId = String(parsed && parsed.job_id || "").trim();
+            if (!jobId) {
+                localStorage.removeItem(DEMO_SESSION_STORAGE_KEY);
+                return null;
+            }
+            return {
+                jobId: jobId,
+                cameraId: String(parsed.camera_id || DEMO_CAMERA_ID),
+                returnCameraId: parsed.return_camera_id
+                    ? String(parsed.return_camera_id)
+                    : null,
+            };
+        } catch (_) {
+            return null;
+        }
+    }
+
+    function persistDemoSession() {
+        if (!demoJobId) return;
+        try {
+            localStorage.setItem(DEMO_SESSION_STORAGE_KEY, JSON.stringify({
+                job_id: demoJobId,
+                camera_id: demoCameraId || DEMO_CAMERA_ID,
+                return_camera_id: demoReturnCameraId,
+            }));
+        } catch (_) { /* localStorage can be unavailable in privacy mode */ }
+    }
+
+    function clearPersistedDemoSession(jobId) {
+        try {
+            const persisted = loadPersistedDemoSession();
+            if (jobId && persisted && persisted.jobId !== String(jobId)) return;
+            localStorage.removeItem(DEMO_SESSION_STORAGE_KEY);
+        } catch (_) { /* localStorage can be unavailable in privacy mode */ }
+    }
 
     function demoControlPresentation(state) {
         const primaryLabels = {
@@ -602,8 +656,14 @@
     }
 
     function demoStatusMessage(state, job) {
+        if (demoBatchFinalMessage && !demoBatchActive) {
+            return demoBatchFinalMessage;
+        }
+        const batchPrefix = demoBatchActive && demoBatchFiles.length
+            ? "AI " + (demoBatchIndex + 1) + "/" + demoBatchFiles.length + " · "
+            : "";
         if (job && job.export_status === "processing") {
-            return "Pełna analiza AI i zapis filmu…";
+            return batchPrefix + "Pełna analiza AI i zapis filmu…";
         }
         if (job && job.export_status === "ready") {
             return "Film z analizą AI zapisany";
@@ -621,7 +681,7 @@
             failed: "Błąd: " + (job.error || "Nie udało się przygotować filmu"),
             deleted: "Usunięto",
         };
-        return messages[state] || messages.failed;
+        return batchPrefix + (messages[state] || messages.failed);
     }
 
     function demoStatusMeta(job) {
@@ -655,12 +715,18 @@
         demoVideoChangeBtn.classList.toggle("hidden", !presentation.showChange);
         demoVideoChangeBtn.disabled = false;
         const exportRunning = job && job.export_status === "processing";
-        aiModeBtn.disabled = demoActionPending || exportRunning || !demoJobId ||
-            ["uploading", "uploaded", "loading", "playing", "paused"].includes(state);
-        aiModeBtn.classList.toggle("is-processing", !!exportRunning);
-        aiModeBtn.title = exportRunning
-            ? "Trwa pełna analiza AI i zapis filmu"
-            : "Przetwórz cały film i zapisz MP4";
+        if (demoBatchActive) {
+            aiModeBtn.disabled = false;
+            aiModeBtn.classList.add("is-processing");
+            aiModeBtn.title = "Kolejka AI " + (demoBatchIndex + 1) + "/" +
+                demoBatchFiles.length + " — kliknij, aby zatrzymać po bieżącym filmie";
+        } else {
+            aiModeBtn.disabled = demoActionPending || exportRunning;
+            aiModeBtn.classList.toggle("is-processing", !!exportRunning);
+            aiModeBtn.title = exportRunning
+                ? "Trwa pełna analiza AI i zapis filmu"
+                : "Wybierz jeden lub wiele filmów do pełnej analizy AI";
+        }
 
         demoVideoStatusPanel.classList.toggle("hidden", state === "idle");
         demoVideoStatusPanel.classList.toggle("is-error", state === "failed");
@@ -749,7 +815,7 @@
     }
 
     function startDemoPreparationWatchdog(generation) {
-        if (demoLoadingTimer !== null) return;
+        if (demoPageDisposed || demoLoadingTimer !== null) return;
         demoLoadingTimer = setTimeout(() => {
             demoLoadingTimer = null;
             if (generation !== demoGeneration) return;
@@ -768,7 +834,9 @@
     }
 
     function shouldPollDemoStatus(state) {
-        return ["uploaded", "loading", "playing"].includes(state);
+        // Eksport może kończyć się już po zakończeniu odtwarzania źródła.
+        return ["uploaded", "loading", "playing"].includes(state) ||
+            (!!demoJob && demoJob.export_status === "processing");
     }
 
     function applyDemoSnapshot(snapshot, generation, options) {
@@ -807,7 +875,7 @@
 
     async function requestDemoExport() {
         if (!demoJobId) {
-            openDemoFilePicker();
+            if (!demoBatchActive) openDemoAiBatchPicker();
             return;
         }
         if (!["ready", "finished", "stopped"].includes(demoState)) return;
@@ -845,7 +913,7 @@
 
     function scheduleDemoStatusPoll(delayMs, generation) {
         clearDemoPollTimer();
-        if (!demoJobId || generation !== demoGeneration) return;
+        if (demoPageDisposed || !demoJobId || generation !== demoGeneration) return;
         demoPollTimer = setTimeout(() => {
             demoPollTimer = null;
             void pollDemoStatus(generation);
@@ -853,7 +921,7 @@
     }
 
     async function pollDemoStatus(generation) {
-        if (!demoJobId || generation !== demoGeneration) return;
+        if (demoPageDisposed || !demoJobId || generation !== demoGeneration) return;
         const jobId = demoJobId;
         const controller = new AbortController();
         demoStatusController = controller;
@@ -879,6 +947,7 @@
         } finally {
             if (demoStatusController === controller) demoStatusController = null;
             if (
+                !demoPageDisposed &&
                 generation === demoGeneration &&
                 demoJobId === jobId &&
                 shouldPollDemoStatus(demoState)
@@ -888,8 +957,67 @@
         }
     }
 
+    async function restorePersistedDemoJob() {
+        if (demoPageDisposed || demoUploadXhr || demoJobId) return false;
+        const persisted = loadPersistedDemoSession();
+        if (!persisted) return false;
+
+        const generation = ++demoGeneration;
+        demoJobId = persisted.jobId;
+        demoCameraId = persisted.cameraId || DEMO_CAMERA_ID;
+        demoReturnCameraId = persisted.returnCameraId;
+        demoPollFailures = 0;
+        demoJob = { job_id: demoJobId, status: "loading" };
+        updateDemoControls("loading", demoJob);
+
+        const controller = new AbortController();
+        demoStatusController = controller;
+        try {
+            const response = await fetch(
+                "/api/demo-videos/" + encodeURIComponent(demoJobId),
+                { credentials: "same-origin", signal: controller.signal },
+            );
+            if (generation !== demoGeneration) return false;
+            if (response.status === 404 || response.status === 410) {
+                clearPersistedDemoSession(demoJobId);
+                resetDemoClient({ returnToCamera: true });
+                return false;
+            }
+            if (!response.ok) {
+                const raw = await response.text();
+                throw new Error(demoResponseError(raw, "HTTP " + response.status));
+            }
+
+            const snapshot = await response.json();
+            if (!snapshot.job_id || String(snapshot.job_id) !== demoJobId) {
+                throw new Error("Backend zwrócił stan innego filmu demonstracyjnego.");
+            }
+            if (!applyDemoSnapshot(snapshot, generation)) return false;
+            persistDemoSession();
+            if (demoCameraId && State.cameraId !== demoCameraId) {
+                selectCamera(demoCameraId);
+                cameraSelect.value = demoCameraId;
+            }
+            refreshCameras();
+            scheduleDemoStatusPoll(0, generation);
+            return true;
+        } catch (err) {
+            if (err && err.name === "AbortError") return false;
+            if (generation === demoGeneration) {
+                markDemoFailed(
+                    "Nie można odtworzyć stanu filmu: " + (err.message || err),
+                    generation,
+                );
+            }
+            return false;
+        } finally {
+            if (demoStatusController === controller) demoStatusController = null;
+        }
+    }
+
     function deleteDemoJobBestEffort(jobId) {
         if (!jobId) return;
+        clearPersistedDemoSession(jobId);
         void fetch("/api/demo-videos/" + encodeURIComponent(jobId), {
             method: "DELETE",
             credentials: "same-origin",
@@ -923,20 +1051,31 @@
         }
     }
 
-    function openDemoFilePicker() {
+    function openDemoFilePicker(purpose) {
+        demoPickerPurpose = purpose === "ai-batch" ? "ai-batch" : "single";
         demoVideoInput.value = "";
         demoVideoInput.click();
     }
 
+    function openDemoAiBatchPicker() {
+        if (demoBatchActive) {
+            demoBatchCancelled = true;
+            demoBatchFinalMessage = "Zatrzymywanie kolejki AI po bieżącym filmie…";
+            updateDemoControls(demoState, demoJob);
+            return;
+        }
+        demoBatchFinalMessage = "";
+        openDemoFilePicker("ai-batch");
+    }
+
     function changeDemoVideo() {
-        const oldJobId = demoJobId;
-        resetDemoClient({ returnToCamera: true });
-        deleteDemoJobBestEffort(oldJobId);
+        // Stary job jest zastępowany dopiero po wybraniu nowego pliku.
         openDemoFilePicker();
     }
 
     function startDemoUpload(file) {
         if (!file) return;
+        if (!demoBatchActive) demoBatchFinalMessage = "";
 
         const oldJobId = demoJobId;
         const oldCameraId = demoCameraId;
@@ -1004,6 +1143,7 @@
             demoJobId = String(snapshot.job_id);
             demoCameraId = String(snapshot.camera_id || DEMO_CAMERA_ID);
             demoJob = Object.assign({}, demoJob, snapshot, { upload_percent: 100 });
+            persistDemoSession();
             selectCamera(demoCameraId);
             refreshCameras();
             applyDemoSnapshot(snapshot, generation, { reconnectOnRunChange: false });
@@ -1090,6 +1230,117 @@
         }
     }
 
+    function sleepDemoBatch(ms) {
+        return new Promise(resolve => setTimeout(resolve, Math.max(0, Number(ms) || 0)));
+    }
+
+    function waitForDemoBatch(predicate, timeoutMs, label) {
+        const started = Date.now();
+        return new Promise((resolve, reject) => {
+            const tick = () => {
+                if (demoBatchCancelled) {
+                    reject(new Error("Kolejka AI została zatrzymana"));
+                    return;
+                }
+                if (demoState === "failed") {
+                    reject(new Error((demoJob && demoJob.error) || "Przetwarzanie filmu nie powiodło się"));
+                    return;
+                }
+                if (demoJob && demoJob.export_status === "failed") {
+                    reject(new Error(demoJob.export_error || "Eksport AI nie powiódł się"));
+                    return;
+                }
+                try {
+                    if (predicate()) {
+                        resolve();
+                        return;
+                    }
+                } catch (err) {
+                    reject(err);
+                    return;
+                }
+                if (Date.now() - started >= timeoutMs) {
+                    reject(new Error("Przekroczono limit czasu: " + label));
+                    return;
+                }
+                setTimeout(tick, 250);
+            };
+            tick();
+        });
+    }
+
+    async function runDemoAiBatch(files) {
+        const queue = Array.from(files || []).filter(Boolean);
+        if (!queue.length || demoBatchActive) return;
+
+        demoBatchActive = true;
+        demoBatchCancelled = false;
+        demoBatchFiles = queue;
+        demoBatchIndex = -1;
+        demoBatchDone = 0;
+        demoBatchFailed = [];
+        demoBatchFinalMessage = "";
+        updateDemoControls(demoState, demoJob);
+
+        for (let index = 0; index < queue.length; index += 1) {
+            if (demoBatchCancelled) break;
+            const file = queue[index];
+            demoBatchIndex = index;
+            updateDemoControls(demoState, demoJob);
+
+            try {
+                startDemoUpload(file);
+                await waitForDemoBatch(
+                    () => !!demoJobId && ["ready", "finished", "stopped"].includes(demoState),
+                    DEMO_BATCH_PREPARE_TIMEOUT_MS,
+                    "przygotowanie " + file.name,
+                );
+
+                if (demoBatchCancelled) break;
+                await requestDemoExport();
+                await waitForDemoBatch(
+                    () => !!demoJob && demoJob.export_status === "ready" && !!demoJob.output_url,
+                    DEMO_BATCH_EXPORT_TIMEOUT_MS,
+                    "analiza AI " + file.name,
+                );
+
+                demoBatchDone += 1;
+                // Daj przeglądarce chwilę na rozpoczęcie pobierania.
+                await sleepDemoBatch(DEMO_BATCH_DOWNLOAD_GRACE_MS);
+            } catch (err) {
+                if (demoBatchCancelled) break;
+                demoBatchFailed.push({
+                    name: file.name,
+                    error: String((err && err.message) || err || "Nieznany błąd"),
+                });
+                await sleepDemoBatch(600);
+            }
+        }
+
+        const total = queue.length;
+        const failedCount = demoBatchFailed.length;
+        const cancelled = demoBatchCancelled;
+        demoBatchActive = false;
+        demoBatchFiles = [];
+        demoBatchIndex = -1;
+        demoBatchCancelled = false;
+
+        if (cancelled) {
+            demoBatchFinalMessage = "Kolejka AI zatrzymana · ukończono " + demoBatchDone + "/" + total;
+        } else if (failedCount) {
+            demoBatchFinalMessage = "Kolejka AI zakończona · gotowe " + demoBatchDone +
+                "/" + total + " · błędy " + failedCount;
+            console.warn("Perimetr AI batch failures:", demoBatchFailed);
+        } else {
+            demoBatchFinalMessage = "Kolejka AI zakończona · przetworzono " + demoBatchDone + "/" + total;
+        }
+        updateDemoControls(demoState, demoJob);
+    }
+
+    aiModeBtn.addEventListener("click", () => {
+        openDemoAiBatchPicker();
+    });
+
     demoVideoBtn.addEventListener("click", () => {
         if (["idle", "deleted"].includes(demoState)) {
             openDemoFilePicker();
@@ -1113,16 +1364,48 @@
     demoVideoChangeBtn.addEventListener("click", changeDemoVideo);
 
     demoVideoInput.addEventListener("change", () => {
-        const [file] = demoVideoInput.files || [];
-        if (file) startDemoUpload(file);
+        const files = Array.from(demoVideoInput.files || []);
+        if (!files.length) return;
+        if (demoPickerPurpose === "ai-batch") {
+            void runDemoAiBatch(files);
+            return;
+        }
+        startDemoUpload(files[0]);
     });
 
-    window.addEventListener("beforeunload", () => {
-        const oldJobId = demoJobId;
-        demoGeneration += 1;
-        cancelDemoRequests();
-        deleteDemoJobBestEffort(oldJobId);
-    });
+    function disposeDemoPageClient() {
+        if (demoPageDisposed) return;
+        demoPageDisposed = true;
+        clearDemoPollTimer();
+        clearDemoPreparationWatchdog();
+        abortDemoController(demoStatusController);
+        abortDemoController(demoControlController);
+        demoStatusController = null;
+        demoControlController = null;
+        demoActionPending = false;
+        disconnectWebSocketForPageLifecycle();
+        // Backendowe odtwarzanie pozostaje aktywne po zmianie podstrony.
+    }
+
+    function resumeDemoPageClient() {
+        if (!demoPageDisposed) return;
+        demoPageDisposed = false;
+        if (demoJobId) {
+            if (demoCameraId && State.cameraId !== demoCameraId) {
+                selectCamera(demoCameraId);
+                cameraSelect.value = demoCameraId;
+            } else {
+                connectWebSocket();
+            }
+            scheduleDemoStatusPoll(0, demoGeneration);
+            return;
+        }
+        connectWebSocket();
+        if (!demoUploadXhr) void restorePersistedDemoJob();
+    }
+
+    window.addEventListener("pagehide", disposeDemoPageClient);
+    window.addEventListener("pageshow", resumeDemoPageClient);
 
     const pairModal = document.getElementById("pairModal");
     const pairModalClose = document.getElementById("pairModalClose");
@@ -1673,6 +1956,23 @@ function showWorkerQrPreview(workerId) {
         };
     }
 
+    function disconnectWebSocketForPageLifecycle() {
+        wsGeneration += 1;
+        if (wsReconnectTimer) {
+            clearTimeout(wsReconnectTimer);
+            wsReconnectTimer = null;
+        }
+        const socket = ws;
+        ws = null;
+        pendingBinaryFrames.length = 0;
+        if (!socket) return;
+        socket.onopen = null;
+        socket.onmessage = null;
+        socket.onerror = null;
+        socket.onclose = null;
+        try { socket.close(); } catch (_) {}
+    }
+
     function queueBinaryMetadata(metadata) {
         pendingBinaryFrames.push(metadata);
         if (pendingBinaryFrames.length > 4) pendingBinaryFrames.shift();
@@ -1910,16 +2210,19 @@ function showWorkerQrPreview(workerId) {
                 "repeated_body_sway", "unstable_trajectory", "irregular_step_pattern",
                 "upper_body_instability", "sudden_balance_loss",
             ].includes(signal));
-            const smoking = signals.includes("hand_to_mouth_pattern") && !coordination;
+            const smoking = signals.includes("smoking_detected") ||
+                (signals.includes("hand_to_mouth_pattern") && !coordination);
             const title = fall ? "Wykryto upadek"
                         : lying ? "Wykryto osobę na ziemi"
                         : unstable ? "Niestabilny ruch — weryfikacja"
-                        : smoking ? "Możliwy gest palenia"
+                        : smoking ? "WYKRYTO PALENIE"
                         : "Nietypowa koordynacja";
             items.push({
                 severity: p.severity,
                 time: p.timestamp,
-                desc: title + (details.length ? ": " + details.join(", ") : ""),
+                desc: smoking
+                    ? title
+                    : title + (details.length ? ": " + details.join(", ") : ""),
                 kind: fall ? "fall_detected" : (smoking ? "smoking_gesture" : "posture_anomaly"),
                 thumb: p.frame_thumbnail_url,
             });
@@ -2021,6 +2324,7 @@ function showWorkerQrPreview(workerId) {
         sudden_balance_loss: "utrata równowagi",
         possible_fall: "możliwy upadek / osunięcie",
         hand_to_mouth_pattern: "powtarzalny gest ręka–usta",
+        smoking_detected: "WYKRYTO PALENIE",
         ml_fall_down: "TCN+GRU: upadek",
         ml_lying_down: "TCN+GRU: pozycja leżąca",
         fall_suspected: "podejrzenie upadku",
@@ -2073,15 +2377,14 @@ function showWorkerQrPreview(workerId) {
             confirmed: "ZDARZENIE POTWIERDZONE",
             cooldown: "ZDARZENIE W COOLDOWN",
         };
-        postureScore.textContent = (statusLabels[p.status] || p.status) +
-            " · " + Math.round((p.risk_score || 0) * 100) + "%";
+        const smoking = (p.signals || []).includes("smoking_detected");
+        postureScore.textContent = smoking
+            ? "WYKRYTO PALENIE"
+            : (statusLabels[p.status] || p.status);
         const labels = (p.signals || []).slice(0, 3).map(x => POSTURE_SIGNAL_LABELS[x] || x);
         if (p.behavior_label) {
             const behaviorName = BEHAVIOR_LABELS[p.behavior_label] || p.behavior_label;
-            labels.unshift(
-                "TCN: " + behaviorName + " " +
-                Math.round((p.behavior_confidence || 0) * 100) + "%"
-            );
+            labels.unshift("TCN: " + behaviorName);
         }
         postureSignals.textContent = labels.length ? labels.slice(0, 4).join(" · ") : "nietypowy wzorzec ruchu";
     }
@@ -2326,5 +2629,6 @@ function showWorkerQrPreview(workerId) {
     filterAlertsUI();
     syncRuntimeProcessing(0);
     connectWebSocket();
+    void restorePersistedDemoJob();
 
 })();

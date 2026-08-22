@@ -180,3 +180,81 @@ def test_behavior_classifier_loads_pose_event_v2_checkpoint(tmp_path, pose_colum
     assert set(result.probabilities) == set(ACTION_CLASSES)
     assert set(result.safety_probabilities) == set(SAFETY_CLASSES)
     assert torch.isfinite(torch.tensor(result.confidence))
+
+
+def test_behavior_classifier_loads_v32_motion_checkpoint(tmp_path):
+    torch = pytest.importorskip("torch")
+
+    from backend.behavior_classifier import BehaviorClassifier
+    from pose_event.labels import ACTION_CLASSES, SAFETY_CLASSES
+    from pose_event.model_v32_motion import V32MotionConfig, V32MotionModel
+
+    cfg = V32MotionConfig(
+        input_dim=387,
+        tcn_channels=16,
+        gru_hidden=16,
+        gru_layers=1,
+        dropout=0.0,
+        shared_dim=24,
+        action_classes=len(ACTION_CLASSES),
+        safety_classes=len(SAFETY_CLASSES),
+    )
+    model = V32MotionModel(cfg)
+    checkpoint = tmp_path / "best_motion.pt"
+    torch.save(
+        {
+            "format": "perimetr_pose_event_v3_2_motion_ablation",
+            "model_class": "DualBranchPoseEventModel",
+            "model_config": {
+                "input_dim": cfg.input_dim,
+                "tcn_channels": cfg.tcn_channels,
+                "gru_hidden": cfg.gru_hidden,
+                "gru_layers": cfg.gru_layers,
+                "dropout": cfg.dropout,
+                "shared_dim": cfg.shared_dim,
+                "action_classes": cfg.action_classes,
+                "safety_classes": cfg.safety_classes,
+            },
+            "motion_state_dict": {
+                "motion_branch": model.motion_branch.state_dict(),
+                "action_head": model.action_head.state_dict(),
+                "safety_head": model.safety_head.state_dict(),
+            },
+            "feature_mean": np.zeros(387, dtype=np.float32),
+            "feature_std": np.ones(387, dtype=np.float32),
+            "fps": 15.0,
+            "frame_count": 60,
+            "action_classes": list(ACTION_CLASSES),
+            "safety_classes": list(SAFETY_CLASSES),
+            "temperatures": {"action": 1.1, "safety": 1.2},
+            "metadata": {
+                "normalization_source": "motion_train_only:train_all_frames",
+                "behavior_trained": False,
+            },
+        },
+        checkpoint,
+    )
+
+    classifier = BehaviorClassifier(checkpoint, device="cpu")
+    pose = np.zeros((33, 4), dtype=np.float32)
+    pose[:, 3] = 1.0
+    pose[11, :3] = [0.45, 0.30, 0.0]
+    pose[12, :3] = [0.55, 0.30, 0.0]
+    pose[23, :3] = [0.47, 0.55, 0.0]
+    pose[24, :3] = [0.53, 0.55, 0.0]
+    pose[25, :3] = [0.47, 0.70, 0.0]
+    pose[26, :3] = [0.53, 0.70, 0.0]
+    pose[27, :3] = [0.46, 0.88, 0.0]
+    pose[28, :3] = [0.54, 0.88, 0.0]
+
+    history = [(index / 15.0, pose.copy()) for index in range(60)]
+    result = classifier.predict_history(history)
+
+    assert result is not None
+    assert result.label in ACTION_CLASSES
+    assert result.safety_label in SAFETY_CLASSES
+    assert set(result.probabilities) == set(ACTION_CLASSES)
+    assert set(result.safety_probabilities) == set(SAFETY_CLASSES)
+    assert classifier.runtime.ckpt["runtime_model_type"] == "v3_2_motion_only"
+    assert classifier.runtime.action_temperature == pytest.approx(1.1)
+    assert classifier.runtime.safety_temperature == pytest.approx(1.2)

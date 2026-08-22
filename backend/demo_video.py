@@ -146,6 +146,7 @@ class DemoVideoStatus(str, Enum):
 class CaptureLike(Protocol):
     def isOpened(self) -> bool: ...
     def read(self) -> tuple[bool, np.ndarray | None]: ...
+    def set(self, prop_id: int, value: float) -> bool: ...
     def get(self, prop_id: int) -> float: ...
     def release(self) -> None: ...
 
@@ -229,6 +230,7 @@ class _Job:
     status: DemoVideoStatus
     mime_type: str
     mode: str
+    asset_kind: str
     playback_mode: str
     error: str | None = None
     current_frame: int = 0
@@ -256,6 +258,9 @@ class _Job:
     run_started_monotonic: float = 0.0
     paused_total_sec: float = 0.0
     worker: threading.Thread | None = field(default=None, repr=False)
+    worker_kind: str | None = None
+    read_only_leases: int = 0
+    deleting: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -301,6 +306,55 @@ class _CaptureLease:
                 capture.release()
             except Exception:
                 logger.warning("Demo video capture release failed", exc_info=True)
+
+
+class DemoVideoInputLease:
+    """A small ref-counted lease protecting one uploaded source asset."""
+
+    __slots__ = ("_service", "job_id", "path", "_lock", "_released")
+
+    def __init__(self, service: "DemoVideoService", job_id: str, path: Path):
+        self._service = service
+        self.job_id = str(job_id)
+        self.path = path
+        self._lock = threading.Lock()
+        self._released = False
+
+    def release(self) -> None:
+        with self._lock:
+            if self._released:
+                return
+            self._released = True
+        self._service._release_input_lease(self.job_id)
+
+    def __enter__(self) -> "DemoVideoInputLease":
+        return self
+
+    def __exit__(self, _exc_type, _exc, _traceback) -> None:
+        self.release()
+
+
+class _LeasedCapture:
+    """Delegate capture operations and release its source lease exactly once."""
+
+    def __init__(self, capture: CaptureLike, lease: DemoVideoInputLease):
+        self._capture = capture
+        self._lease = lease
+        self._release_lock = threading.Lock()
+        self._released = False
+
+    def __getattr__(self, name: str):
+        return getattr(self._capture, name)
+
+    def release(self) -> None:
+        with self._release_lock:
+            if self._released:
+                return
+            self._released = True
+        try:
+            self._capture.release()
+        finally:
+            self._lease.release()
 
 
 _MIME_BY_EXTENSION: dict[str, frozenset[str]] = {
@@ -421,6 +475,8 @@ class DemoVideoService:
         self._janitor_stop = threading.Event()
         self._janitor_thread: threading.Thread | None = None
         self._helper_threads: set[threading.Thread] = set()
+        # Limit concurrent read-only metadata decoders.
+        self._read_only_probe_slot = threading.BoundedSemaphore(1)
 
         self._upload_ms = 0.0
         self._upload_size_bytes = 0
@@ -536,11 +592,15 @@ class DemoVideoService:
         camera_id: str = "demo_upload",
         mode: str = "site",
         playback_mode: str | None = None,
+        asset_kind: str = "demo",
     ) -> DemoVideoJobSnapshot:
         safe_filename = self.validate_upload(filename, content_type)
         normalized_camera = self._validate_camera_id(camera_id)
         normalized_mode = self._normalize_mode(mode)
         normalized_playback = self._normalize_playback_mode(playback_mode)
+        normalized_kind = str(asset_kind or "demo").strip().lower()
+        if normalized_kind not in {"demo", "distance"}:
+            raise DemoVideoValidationError("asset_kind is invalid")
         now = float(self._clock())
 
         with self._condition:
@@ -561,6 +621,7 @@ class DemoVideoService:
                 status=DemoVideoStatus.UPLOADING,
                 mime_type=str(content_type).split(";", 1)[0].strip().lower(),
                 mode=normalized_mode,
+                asset_kind=normalized_kind,
                 playback_mode=normalized_playback,
             )
             self._jobs[job_id] = job
@@ -588,6 +649,7 @@ class DemoVideoService:
             if job.worker is not None and job.worker.is_alive():
                 raise DemoVideoConflictError("This upload is already being written")
             job.worker = threading.current_thread()
+            job.worker_kind = "upload"
             job.stop_requested = False
             target = job.input_path
 
@@ -642,6 +704,7 @@ class DemoVideoService:
                     and current.worker is threading.current_thread()
                 ):
                     current.worker = None
+                    current.worker_kind = None
                     self._condition.notify_all()
             logger.warning(
                 "Demo video job failed during upload %s: %s",
@@ -667,11 +730,13 @@ class DemoVideoService:
                     )
                 if job.worker is threading.current_thread():
                     job.worker = None
+                    job.worker_kind = None
                     self._condition.notify_all()
                 raise DemoVideoConflictError("Upload was cancelled while being written")
             job.size_bytes = size
             if job.worker is threading.current_thread():
                 job.worker = None
+                job.worker_kind = None
             self._upload_ms = elapsed_ms
             self._upload_size_bytes = size
             self._transition_locked(job, DemoVideoStatus.UPLOADED)
@@ -689,6 +754,7 @@ class DemoVideoService:
         camera_id: str = "demo_upload",
         mode: str = "site",
         playback_mode: str | None = None,
+        asset_kind: str = "demo",
         chunk_size: int = 1024 * 1024,
     ) -> DemoVideoJobSnapshot:
         job = self.create_upload(
@@ -697,11 +763,45 @@ class DemoVideoService:
             camera_id=camera_id,
             mode=mode,
             playback_mode=playback_mode,
+            asset_kind=asset_kind,
         )
         return self.write_upload(job.job_id, source, chunk_size=chunk_size)
 
     def start_probe(self, job_id: str) -> DemoVideoJobSnapshot:
-        if not bool(self.config.processing_enabled):
+        return self._start_probe(
+            job_id,
+            reserve_worker_capacity=True,
+            allow_processing_disabled=False,
+            release_read_only_slot=False,
+        )
+
+    probe = start_probe
+
+    def start_read_only_probe(self, job_id: str) -> DemoVideoJobSnapshot:
+        """Probe one asset outside playback capacity, with a separate limit."""
+
+        if not self._read_only_probe_slot.acquire(blocking=False):
+            raise DemoVideoConflictError("Read-only video probe capacity is full")
+        try:
+            return self._start_probe(
+                job_id,
+                reserve_worker_capacity=False,
+                allow_processing_disabled=True,
+                release_read_only_slot=True,
+            )
+        except BaseException:
+            self._read_only_probe_slot.release()
+            raise
+
+    def _start_probe(
+        self,
+        job_id: str,
+        *,
+        reserve_worker_capacity: bool,
+        allow_processing_disabled: bool,
+        release_read_only_slot: bool,
+    ) -> DemoVideoJobSnapshot:
+        if not bool(self.config.processing_enabled) and not allow_processing_disabled:
             raise DemoVideoProcessingDisabledError(
                 "Demo video processing is disabled"
             )
@@ -718,7 +818,10 @@ class DemoVideoService:
                 )
             if not job.input_path.is_file():
                 raise DemoVideoValidationError("Uploaded video file is missing")
-            self._reserve_worker_locked(job)
+            if reserve_worker_capacity:
+                self._reserve_worker_locked(job)
+            elif job.worker is not None and job.worker.is_alive():
+                raise DemoVideoConflictError("This job already has an active worker")
             job.generation += 1
             generation = job.generation
             job.error = None
@@ -726,16 +829,31 @@ class DemoVideoService:
             job.queued_at_monotonic = self._monotonic()
             self._transition_locked(job, DemoVideoStatus.LOADING)
             thread = threading.Thread(
-                target=self._probe_supervisor,
+                target=(
+                    self._probe_supervisor_with_read_only_slot
+                    if release_read_only_slot
+                    else self._probe_supervisor
+                ),
                 args=(job.job_id, generation),
                 name=f"demo-video-probe-{job.job_id[:8]}",
                 daemon=True,
             )
             job.worker = thread
+            job.worker_kind = (
+                "read_only_probe" if release_read_only_slot else "probe"
+            )
             thread.start()
             return self._snapshot_locked(job)
 
-    probe = start_probe
+    def _probe_supervisor_with_read_only_slot(
+        self,
+        job_id: str,
+        generation: int,
+    ) -> None:
+        try:
+            self._probe_supervisor(job_id, generation)
+        finally:
+            self._read_only_probe_slot.release()
 
     def _probe_supervisor(self, job_id: str, generation: int) -> None:
         started = self._monotonic()
@@ -910,6 +1028,7 @@ class DemoVideoService:
                 and job.worker is threading.current_thread()
             ):
                 job.worker = None
+                job.worker_kind = None
             self._condition.notify_all()
 
     def play(self, job_id: str) -> DemoVideoJobSnapshot:
@@ -1009,6 +1128,7 @@ class DemoVideoService:
                 daemon=True,
             )
             job.worker = thread
+            job.worker_kind = "playback"
             thread.start()
             logger.info("Demo video job playing: %s", job.job_id)
             return self._snapshot_locked(job)
@@ -1174,9 +1294,13 @@ class DemoVideoService:
 
         with self._condition:
             job = self._get_locked(job_id)
-            if job.generation == generation and job.status is not DemoVideoStatus.STOPPED:
+            if job.generation != generation or job.worker is not worker:
+                # Do not clear state belonging to a newer worker generation.
+                return self._snapshot_locked(job)
+            if job.status is not DemoVideoStatus.STOPPED:
                 self._transition_locked(job, DemoVideoStatus.STOPPED)
             job.worker = None
+            job.worker_kind = None
             job.stop_requested = True
             job.pause_requested = False
             logger.info("Demo video job stopped: %s", job.job_id)
@@ -1192,34 +1316,158 @@ class DemoVideoService:
                 raise DemoVideoNotFoundError("Annotated video export was not found")
             return path
 
+    def input_path_for(self, job_id: str) -> Path:
+        """Return a validated path for metadata-only callers.
+
+        Code which keeps using the file after this method returns must instead
+        hold :meth:`acquire_input_lease` (or use :meth:`open_input_capture`).
+        """
+
+        with self._condition:
+            job = self._get_locked(job_id)
+            if job.status is DemoVideoStatus.UPLOADING:
+                raise DemoVideoConflictError("Video upload is not complete")
+            path = job.input_path.resolve()
+            if not self._inside(self.upload_dir, path):
+                raise DemoVideoValidationError("Video source escapes upload root")
+            if not path.is_file():
+                raise DemoVideoNotFoundError("Uploaded video source was not found")
+            return path
+
+    def asset_kind_for(self, job_id: str) -> str:
+        """Return the immutable internal purpose assigned during upload."""
+
+        with self._condition:
+            return self._get_locked(job_id).asset_kind
+
+    def acquire_input_lease(self, job_id: str) -> DemoVideoInputLease:
+        """Pin a source file against DELETE, TTL cleanup and shutdown cleanup."""
+
+        with self._condition:
+            self._ensure_open_locked()
+            job = self._get_locked(job_id)
+            if job.status is DemoVideoStatus.UPLOADING:
+                raise DemoVideoConflictError("Video upload is not complete")
+            path = job.input_path.resolve()
+            if not self._inside(self.upload_dir, path):
+                raise DemoVideoValidationError("Video source escapes upload root")
+            if not path.is_file():
+                raise DemoVideoNotFoundError("Uploaded video source was not found")
+            job.read_only_leases += 1
+            job.updated_at = float(self._clock())
+            self._condition.notify_all()
+            return DemoVideoInputLease(self, job.job_id, path)
+
+    def _release_input_lease(self, job_id: str) -> None:
+        with self._condition:
+            job = self._jobs.get(str(job_id))
+            if job is None:
+                return
+            job.read_only_leases = max(0, int(job.read_only_leases) - 1)
+            job.updated_at = float(self._clock())
+            self._condition.notify_all()
+
+    def open_input_capture(self, job_id: str) -> CaptureLike:
+        """Open an independent source decoder for read-only random access."""
+
+        lease = self.acquire_input_lease(job_id)
+        try:
+            capture = self._capture_factory(str(lease.path))
+            if capture is None:
+                raise DemoVideoValidationError("VideoCapture was not created")
+            return _LeasedCapture(capture, lease)
+        except BaseException:
+            lease.release()
+            raise
+
     def delete(
         self,
         job_id: str,
         *,
         timeout: float | None = None,
     ) -> DemoVideoJobSnapshot:
+        limit = (
+            float(self.config.control_timeout_seconds)
+            if timeout is None else max(0.0, float(timeout))
+        )
+        deadline = self._monotonic() + limit
         with self._condition:
             job = self._get_locked(job_id)
-            worker_alive = job.worker is not None and job.worker.is_alive()
-        if worker_alive:
-            self.stop(job_id, timeout=timeout)
-
-        with self._condition:
-            job = self._get_locked(job_id)
-            if job.worker is not None and job.worker.is_alive():
-                raise DemoVideoConflictError("Cannot delete a video in use")
             job_dir = job.input_path.parent.resolve()
             output_dir = (self.output_dir / job.job_id).resolve()
             if not self._inside(self.upload_dir, job_dir):
                 raise DemoVideoValidationError("Job directory escapes upload root")
             if not self._inside(self.output_dir, output_dir):
                 raise DemoVideoValidationError("Output directory escapes output root")
+            # Block new leases while the asset is being removed.
+            job.deleting = True
+            generation = job.generation
+            job.stop_requested = True
+            job.pause_requested = False
+            job.prepared_run = False
+            worker = job.worker
+            self._condition.notify_all()
 
-        self._remove_path(job_dir)
-        self._remove_path(output_dir)
+        if worker is not None and worker.is_alive():
+            if worker is threading.current_thread():
+                with self._condition:
+                    current = self._jobs.get(str(job_id))
+                    if current is not None:
+                        current.deleting = False
+                        self._condition.notify_all()
+                raise DemoVideoConflictError("A video worker cannot delete its own job")
+            worker.join(timeout=max(0.0, deadline - self._monotonic()))
+            if worker.is_alive():
+                with self._condition:
+                    current = self._jobs.get(str(job_id))
+                    if current is not None:
+                        current.deleting = False
+                        self._condition.notify_all()
+                raise DemoVideoTimeoutError(
+                    "Demo video worker did not stop before the delete timeout"
+                )
 
         with self._condition:
-            job = self._get_locked(job_id)
+            job = self._jobs.get(str(job_id))
+            if job is None or job.status is DemoVideoStatus.DELETED:
+                raise DemoVideoNotFoundError(f"Unknown demo video job: {job_id}")
+            if job.generation != generation:
+                job.deleting = False
+                self._condition.notify_all()
+                raise DemoVideoConflictError("Job generation changed during delete")
+            if job.worker is not None and job.worker is not worker and job.worker.is_alive():
+                job.deleting = False
+                self._condition.notify_all()
+                raise DemoVideoConflictError("Cannot delete a video in use")
+            if job.worker is worker and (worker is None or not worker.is_alive()):
+                job.worker = None
+                job.worker_kind = None
+            leases_released = self._condition.wait_for(
+                lambda: job.read_only_leases == 0,
+                timeout=max(0.0, deadline - self._monotonic()),
+            )
+            if not leases_released:
+                job.deleting = False
+                self._condition.notify_all()
+                raise DemoVideoTimeoutError(
+                    "Video source is still being streamed or decoded"
+                )
+
+        try:
+            self._remove_path(job_dir)
+            self._remove_path(output_dir)
+        except BaseException:
+            with self._condition:
+                current = self._jobs.get(str(job_id))
+                if current is not None:
+                    current.deleting = False
+                    self._condition.notify_all()
+            raise
+
+        with self._condition:
+            job = self._jobs.get(str(job_id))
+            if job is None:
+                raise DemoVideoNotFoundError(f"Unknown demo video job: {job_id}")
             self._transition_locked(job, DemoVideoStatus.DELETED)
             snapshot = self._snapshot_locked(job)
             self._jobs.pop(job_id, None)
@@ -1561,6 +1809,7 @@ class DemoVideoService:
                     and job.worker is threading.current_thread()
                 ):
                     job.worker = None
+                    job.worker_kind = None
                 self._condition.notify_all()
 
     def _skip_frames(
@@ -1608,6 +1857,8 @@ class DemoVideoService:
                 for job in self._jobs.values()
                 if current - job.updated_at >= ttl
                 and not job.starting
+                and not job.deleting
+                and job.read_only_leases == 0
                 and (job.worker is None or not job.worker.is_alive())
                 and job.status not in {
                     DemoVideoStatus.LOADING,
@@ -1700,6 +1951,24 @@ class DemoVideoService:
             raise DemoVideoTimeoutError(
                 f"Demo video workers did not stop: {', '.join(alive)}"
             )
+        with self._condition:
+            leases_released = self._condition.wait_for(
+                lambda: all(job.read_only_leases == 0 for job in self._jobs.values()),
+                timeout=(
+                    None
+                    if deadline is None
+                    else max(0.0, deadline - self._monotonic())
+                ),
+            )
+            leased_jobs = [
+                job.job_id
+                for job in self._jobs.values()
+                if job.read_only_leases > 0
+            ]
+        if not leases_released:
+            raise DemoVideoTimeoutError(
+                "Demo video source leases did not close: " + ", ".join(leased_jobs)
+            )
         # Remove process-local demo files after all workers have stopped.
         with self._condition:
             cleanup_paths = [
@@ -1731,6 +2000,8 @@ class DemoVideoService:
         for other in self._jobs.values():
             if other.job_id == requested.job_id or other.camera_id != requested.camera_id:
                 continue
+            if other.worker_kind == "read_only_probe":
+                continue
             active = (
                 other.starting
                 or (other.worker is not None and other.worker.is_alive())
@@ -1750,6 +2021,7 @@ class DemoVideoService:
             1
             for job in self._jobs.values()
             if job.job_id != requested.job_id
+            and job.worker_kind != "read_only_probe"
             and (
                 job.starting
                 or (job.worker is not None and job.worker.is_alive())
@@ -1818,10 +2090,12 @@ class DemoVideoService:
             output_filename=(job.output_path.name if job.output_path else None),
         )
 
-    def _get_locked(self, job_id: str) -> _Job:
+    def _get_locked(self, job_id: str, *, allow_deleting: bool = False) -> _Job:
         job = self._jobs.get(str(job_id))
         if job is None or job.status is DemoVideoStatus.DELETED:
             raise DemoVideoNotFoundError(f"Unknown demo video job: {job_id}")
+        if job.deleting and not allow_deleting:
+            raise DemoVideoConflictError(f"Demo video job is being deleted: {job_id}")
         return job
 
     def _ensure_open_locked(self) -> None:

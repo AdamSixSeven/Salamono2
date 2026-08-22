@@ -554,6 +554,7 @@ class WorkerIDWorker:
         timestamp: float,
         *,
         _copy_frame: bool = True,
+        _force_scan: bool = False,
     ) -> list[Detection]:
         """Track people and enqueue only the newest due marker scan."""
 
@@ -622,7 +623,7 @@ class WorkerIDWorker:
                 camera_id,
                 float("-inf"),
             )
-            if now - last_started < interval:
+            if not _force_scan and now - last_started < interval:
                 return tracked_people
 
         # Copy outside the condition so readers of cached results remain fast.
@@ -668,6 +669,29 @@ class WorkerIDWorker:
             persons,
             timestamp,
             _copy_frame=False,
+        )
+
+    def submit_for_export(
+        self,
+        camera_id: str,
+        frame: np.ndarray,
+        persons: list[Detection],
+        timestamp: float,
+    ) -> list[Detection]:
+        """Queue an owned frame for deterministic offline rendering.
+
+        Export waits for this scan before releasing the source frame.  The
+        identity decoder, tracker and confirmation state remain exactly the
+        same as in live mode; only the real-time sampling throttle is bypassed.
+        """
+
+        return self.submit_latest(
+            camera_id,
+            frame,
+            persons,
+            timestamp,
+            _copy_frame=True,
+            _force_scan=True,
         )
 
     def current_identities(

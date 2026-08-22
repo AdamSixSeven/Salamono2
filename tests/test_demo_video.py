@@ -14,12 +14,23 @@ import pytest
 from backend.demo_video import (
     DemoVideoConflictError,
     DemoVideoNotFoundError,
+    DemoVideoProcessingDisabledError,
     DemoVideoService,
     DemoVideoStatus,
     DemoVideoTimeoutError,
     DemoVideoTooLargeError,
     DemoVideoValidationError,
 )
+from backend.detector import Detection
+from backend.posture_detector import PostureAssessment
+from backend.routes.ingest import (
+    _annotate_posture,
+    _annotate_site,
+    _annotate_unidentified,
+    _annotate_worker_ids,
+)
+from backend.worker_identification import UnidentifiedWorkerEvent, WorkerIdentity
+from backend.worker_store import WorkerRecord
 from config import DemoVideoConfig
 
 
@@ -420,6 +431,90 @@ def test_stop_keeps_upload_and_delete_releases_and_removes_job(tmp_path):
         close(service)
 
 
+def test_stop_join_aba_never_clears_replacement_generation_worker(tmp_path):
+    factory = CaptureFactory([frame(1), frame(2)], fps=20.0)
+    first_entered = threading.Event()
+    release_first = threading.Event()
+    replacement_entered = threading.Event()
+    release_replacement = threading.Event()
+    call_count = [0]
+    call_lock = threading.Lock()
+
+    def process(_context, _frame):
+        with call_lock:
+            call_count[0] += 1
+            number = call_count[0]
+        if number == 1:
+            first_entered.set()
+            assert release_first.wait(1.0)
+        else:
+            replacement_entered.set()
+            assert release_replacement.wait(1.0)
+
+    service = DemoVideoService(
+        config(tmp_path),
+        capture_factory=factory,
+        process_frame=process,
+        start_janitor=False,
+    )
+    stop_result = []
+    stop_errors = []
+    allow_old_stop_to_reenter = threading.Event()
+    try:
+        job = ready(service)
+        service.play(job.job_id)
+        assert first_entered.wait(0.5)
+        with service._condition:
+            old_worker = service._jobs[job.job_id].worker
+        assert old_worker is not None
+        original_join = old_worker.join
+        old_join_completed = threading.Event()
+
+        def delayed_join(timeout=None):
+            original_join(timeout=timeout)
+            assert not old_worker.is_alive()
+            old_join_completed.set()
+            assert allow_old_stop_to_reenter.wait(1.0)
+
+        old_worker.join = delayed_join
+
+        def do_stop():
+            try:
+                stop_result.append(service.stop(job.job_id, timeout=1.0))
+            except BaseException as exc:
+                stop_errors.append(exc)
+
+        stopping = threading.Thread(target=do_stop)
+        stopping.start()
+        deadline = time.time() + 0.5
+        while not service.get(job.job_id).stop_requested and time.time() < deadline:
+            time.sleep(0.005)
+        release_first.set()
+        assert old_join_completed.wait(0.5)
+
+        replacement = service.restart(job.job_id, autoplay=True)
+        assert replacement_entered.wait(0.5)
+        with service._condition:
+            replacement_worker = service._jobs[job.job_id].worker
+        assert replacement_worker is not None and replacement_worker is not old_worker
+
+        allow_old_stop_to_reenter.set()
+        stopping.join(timeout=1.0)
+        assert not stopping.is_alive()
+        assert stop_errors == []
+        assert stop_result[0].run_id == replacement.run_id
+        current = service.get(job.job_id)
+        assert current.status == "playing"
+        assert current.stop_requested is False
+        with service._condition:
+            assert service._jobs[job.job_id].worker is replacement_worker
+    finally:
+        release_first.set()
+        release_replacement.set()
+        allow_old_stop_to_reenter.set()
+        close(service)
+
+
 def test_realtime_mode_drops_late_frames_without_processing_backlog(tmp_path):
     frames = [frame(index) for index in range(30)]
     factory = CaptureFactory(frames, fps=100.0)
@@ -584,6 +679,122 @@ def test_export_processes_every_frame_and_writes_annotated_mp4(tmp_path):
         close(service)
 
 
+def test_short_offline_export_renders_live_person_identity_and_posture_labels(
+    tmp_path,
+    monkeypatch,
+):
+    source_path = tmp_path / "overlay-source.avi"
+    writer = cv2.VideoWriter(
+        str(source_path),
+        cv2.VideoWriter_fourcc(*"MJPG"),
+        8.0,
+        (320, 180),
+    )
+    if not writer.isOpened():
+        pytest.skip("OpenCV build has no MJPG VideoWriter")
+    for value in (20, 40, 60):
+        writer.write(np.full((180, 320, 3), value, dtype=np.uint8))
+    writer.release()
+
+    person = Detection(
+        class_id=0,
+        class_name="person",
+        category="person",
+        box=(80, 30, 180, 165),
+        confidence=0.87,
+        track_id=7,
+    )
+    posture = PostureAssessment(
+        track_id=7,
+        person=person,
+        risk_score=0.0,
+        severity="OK",
+        status="normal",
+        signals=[],
+        metrics={},
+        frame_timestamp=1.0,
+        pose_confidence=0.9,
+        history_seconds=2.0,
+        behavior_label="walking",
+    )
+    identity = WorkerIdentity(
+        worker_id="W-002",
+        person=person,
+        source="cache",
+        tag_polygon=[],
+        frame_timestamp=1.0,
+        cached=True,
+        track_id=7,
+        identity_status="held",
+    )
+    profile = WorkerRecord(
+        "W-002", "Jan", "Kowalski", "Operator", "Budowa", 1.0, 1.0,
+    )
+    unidentified = UnidentifiedWorkerEvent(person=person, frame_timestamp=1.0)
+    observed_labels: list[str] = []
+    original_put_text = cv2.putText
+
+    def recording_put_text(image, text, *args, **kwargs):
+        observed_labels.append(str(text))
+        return original_put_text(image, text, *args, **kwargs)
+
+    monkeypatch.setattr("backend.routes.ingest.cv2.putText", recording_put_text)
+
+    def render(context, source_frame):
+        rendered = _annotate_site(source_frame, [person], [], [])
+        rendered = _annotate_posture(rendered, [posture])
+        if context.frame_index == 1:
+            return _annotate_unidentified(rendered, [unidentified])
+        return _annotate_worker_ids(
+            rendered,
+            [identity],
+            {identity.worker_id: profile},
+        )
+
+    service = DemoVideoService(
+        config(tmp_path / "overlay-service", playback_mode="realtime"),
+        process_frame=render,
+        start_janitor=False,
+    )
+    try:
+        uploaded = service.upload_stream(
+            "overlay-source.avi",
+            "video/x-msvideo",
+            BytesIO(source_path.read_bytes()),
+        )
+        service.start_probe(uploaded.job_id)
+        service.wait_for_status(uploaded.job_id, "ready", timeout=2.0)
+        service.export(uploaded.job_id)
+        service.wait_for_status(uploaded.job_id, "finished", timeout=3.0)
+        deadline = time.time() + 2.0
+        while service.get(uploaded.job_id).export_status != "ready" and time.time() < deadline:
+            time.sleep(0.01)
+
+        output = cv2.VideoCapture(str(service.output_path_for(uploaded.job_id)))
+        decoded_frames = 0
+        try:
+            while True:
+                ok, frame = output.read()
+                if not ok or frame is None:
+                    break
+                decoded_frames += 1
+        finally:
+            output.release()
+
+        assert decoded_frames == 3
+        assert observed_labels.count("walking") == 3
+        assert observed_labels.count("person 87%") == 3
+        assert observed_labels.count("ID W-002 · Jan Kowalski") == 2
+        assert observed_labels.count("ID BRAK") == 1
+        assert not any(
+            forbidden in label
+            for label in observed_labels
+            for forbidden in ("POSTURE #", "TEL", "SMOKE")
+        )
+    finally:
+        close(service)
+
+
 def test_only_one_active_job_may_use_camera_id(tmp_path):
     factory = CaptureFactory([frame(index) for index in range(20)], fps=2.0)
     service = DemoVideoService(
@@ -637,6 +848,165 @@ def test_ttl_cleanup_removes_inactive_job_and_files(tmp_path):
         assert not path.parent.exists()
         with pytest.raises(DemoVideoNotFoundError):
             service.get(job.job_id)
+    finally:
+        close(service)
+
+
+def test_input_lease_blocks_delete_and_new_run_until_reader_releases(tmp_path):
+    service = DemoVideoService(
+        config(tmp_path, control_timeout_seconds=1.0),
+        capture_factory=CaptureFactory([frame(1), frame(2)]),
+        start_janitor=False,
+    )
+    lease = None
+    delete_result = []
+    delete_errors = []
+    try:
+        job = ready(service)
+        path = Path(job.input_path)
+        lease = service.acquire_input_lease(job.job_id)
+
+        def do_delete():
+            try:
+                delete_result.append(service.delete(job.job_id, timeout=1.0))
+            except BaseException as exc:
+                delete_errors.append(exc)
+
+        deleting = threading.Thread(target=do_delete)
+        deleting.start()
+        deadline = time.time() + 0.5
+        while time.time() < deadline:
+            with service._condition:
+                if service._jobs[job.job_id].deleting:
+                    break
+            time.sleep(0.005)
+        with service._condition:
+            assert service._jobs[job.job_id].deleting is True
+        assert path.is_file()
+        with pytest.raises(DemoVideoConflictError, match="being deleted"):
+            service.play(job.job_id)
+        with pytest.raises(DemoVideoConflictError, match="being deleted"):
+            service.acquire_input_lease(job.job_id)
+
+        lease.release()
+        lease = None
+        deleting.join(timeout=1.0)
+        assert not deleting.is_alive()
+        assert delete_errors == []
+        assert delete_result[0].status == "deleted"
+        assert not path.parent.exists()
+    finally:
+        if lease is not None:
+            lease.release()
+        close(service)
+
+
+def test_ttl_skips_leased_source_and_release_refreshes_activity(tmp_path):
+    now = [1000.0]
+    service = DemoVideoService(
+        config(tmp_path, job_ttl_seconds=10.0),
+        clock=lambda: now[0],
+        start_janitor=False,
+    )
+    lease = None
+    try:
+        job = upload(service)
+        lease = service.acquire_input_lease(job.job_id)
+        now[0] += 11.0
+        assert service.cleanup_expired() == 0
+        assert Path(job.input_path).is_file()
+
+        lease.release()
+        lease = None
+        # Release touches updated_at, so an immediately following janitor pass
+        # cannot erase a clip that has only just finished streaming.
+        assert service.cleanup_expired() == 0
+        now[0] += 11.0
+        assert service.cleanup_expired() == 1
+    finally:
+        if lease is not None:
+            lease.release()
+        close(service)
+
+
+def test_read_only_probe_is_bounded_but_independent_from_playback_capacity(tmp_path):
+    probe_entered = threading.Event()
+    release_probe = threading.Event()
+
+    class BlockingProbeCapture(FakeCapture):
+        def read(self):
+            probe_entered.set()
+            assert release_probe.wait(1.0)
+            return super().read()
+
+    def capture_factory(path):
+        if path.endswith("manual-one.mp4"):
+            return BlockingProbeCapture([frame(1), frame(2)])
+        return FakeCapture([frame(1), frame(2)])
+
+    service = DemoVideoService(
+        config(tmp_path, max_pending_jobs=1),
+        capture_factory=capture_factory,
+        start_janitor=False,
+    )
+    try:
+        demo = ready(service, name="demo.mp4", camera_id="demo_upload")
+        first = service.upload_stream(
+            "manual-one.mp4",
+            "video/mp4",
+            BytesIO(b"one"),
+            camera_id="distance-one",
+            asset_kind="distance",
+        )
+        second = service.upload_stream(
+            "manual-two.mp4",
+            "video/mp4",
+            BytesIO(b"two"),
+            camera_id="distance-two",
+            asset_kind="distance",
+        )
+        service.start_read_only_probe(first.job_id)
+        assert probe_entered.wait(0.5)
+
+        # A read-only probe does not consume the sole playback slot.
+        assert service.play(demo.job_id).status in {"playing", "finished"}
+        with pytest.raises(DemoVideoConflictError, match="probe capacity"):
+            service.start_read_only_probe(second.job_id)
+
+        release_probe.set()
+        service.wait_for_status(first.job_id, "ready", timeout=1.0)
+        with service._condition:
+            first_worker = service._jobs[first.job_id].worker
+        if first_worker is not None:
+            first_worker.join(timeout=1.0)
+        service.wait_for_status(demo.job_id, "finished", timeout=1.0)
+
+        service.start_read_only_probe(second.job_id)
+        assert service.wait_for_status(second.job_id, "ready", timeout=1.0).status == "ready"
+    finally:
+        release_probe.set()
+        close(service)
+
+
+def test_read_only_probe_works_when_demo_processing_is_disabled(tmp_path):
+    service = DemoVideoService(
+        config(tmp_path, processing_enabled=False),
+        capture_factory=CaptureFactory([frame(1)]),
+        start_janitor=False,
+    )
+    try:
+        normal = upload(service, name="normal.mp4")
+        with pytest.raises(DemoVideoProcessingDisabledError, match="processing is disabled"):
+            service.start_probe(normal.job_id)
+
+        manual = service.upload_stream(
+            "manual.mp4",
+            "video/mp4",
+            BytesIO(b"manual"),
+            asset_kind="distance",
+        )
+        service.start_read_only_probe(manual.job_id)
+        assert service.wait_for_status(manual.job_id, "ready", timeout=1.0).status == "ready"
     finally:
         close(service)
 

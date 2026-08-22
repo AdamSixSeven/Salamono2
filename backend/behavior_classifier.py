@@ -1,4 +1,4 @@
-"""Runtime adapter for the occlusion-aware TCN+GRU pose-event model.
+"""Runtime adapter for compatible occlusion-aware TCN+GRU pose-event models.
 
 The classifier consumes a four-second history of MediaPipe landmarks for one
 tracked person.  It preserves the public fields used by the existing Perimetr
@@ -16,6 +16,7 @@ from typing import Iterable, Sequence
 import numpy as np
 
 from pose_event.runtime import PoseEventRuntime
+from pose_event.v32_behavior_runtime import V32BehaviorRuntime
 
 
 @dataclass(frozen=True)
@@ -33,10 +34,14 @@ class BehaviorPrediction:
     upper_body_quality: float
     lower_body_quality: float
     visible_ratio: float
+    secondary_probabilities: dict[str, float]
+    secondary_valid_ratio: float
+    secondary_window_seconds: float
+    secondary_inference_ms: float
 
 
 class BehaviorClassifier:
-    """Load and run a pose-event v2 checkpoint.
+    """Load and run a compatible pose-event action/safety checkpoint.
 
     ``predict_history`` is kept for drop-in compatibility with the previous behavior-classifier adapter.  The checkpoint defines the action/safety class
     names, feature normalization, FPS and window length, so deployment cannot
@@ -52,6 +57,9 @@ class BehaviorClassifier:
         min_valid_ratio: float = 0.45,
         min_window_coverage: float = 0.70,
         max_sample_gap_seconds: float = 0.50,
+        secondary_enabled: bool = False,
+        secondary_model_path: str | Path | None = None,
+        secondary_device: str | None = None,
     ) -> None:
         path = Path(model_path)
         if not path.is_file():
@@ -91,6 +99,30 @@ class BehaviorClassifier:
         self.class_names = list(self.runtime.action_classes)
         self.safety_labels = list(self.runtime.safety_classes)
         self.window_frames = int(self.runtime.frame_count)
+        self.secondary_runtime: V32BehaviorRuntime | None = None
+        self.secondary_error: str | None = None
+        if secondary_enabled and secondary_model_path:
+            try:
+                self.secondary_runtime = V32BehaviorRuntime(
+                    secondary_model_path,
+                    device=secondary_device or requested,
+                    min_valid_ratio=self.min_valid_ratio,
+                    max_sample_gap_seconds=self.max_sample_gap_seconds,
+                )
+                if abs(self.secondary_runtime.fps - self.feature_fps) > 1e-3:
+                    raise ValueError(
+                        f"Secondary checkpoint FPS={self.secondary_runtime.fps}, "
+                        f"configured feature_fps={self.feature_fps}"
+                    )
+                if self.secondary_runtime.frame_count != self.runtime.frame_count:
+                    raise ValueError(
+                        "Primary/secondary pose windows differ: "
+                        f"{self.runtime.frame_count} != "
+                        f"{self.secondary_runtime.frame_count}"
+                    )
+            except Exception as exc:
+                self.secondary_runtime = None
+                self.secondary_error = str(exc)
         self.warmup_ms = self._warmup(torch)
 
     @property
@@ -151,6 +183,22 @@ class BehaviorClassifier:
         if prediction is None:
             return None
 
+        secondary_probabilities: dict[str, float] = {}
+        secondary_valid_ratio = 0.0
+        secondary_window_seconds = 0.0
+        secondary_inference_ms = 0.0
+        if self.secondary_runtime is not None:
+            try:
+                secondary = self.secondary_runtime.predict_history(timestamps, poses)
+            except Exception as exc:
+                self.secondary_error = str(exc)
+                secondary = None
+            if secondary is not None:
+                secondary_probabilities = dict(secondary.probabilities)
+                secondary_valid_ratio = float(secondary.valid_ratio)
+                secondary_window_seconds = float(secondary.window_seconds)
+                secondary_inference_ms = float(secondary.inference_ms)
+
         return BehaviorPrediction(
             label=prediction.action_label,
             confidence=prediction.action_confidence,
@@ -165,6 +213,10 @@ class BehaviorClassifier:
             upper_body_quality=prediction.upper_body_quality,
             lower_body_quality=prediction.lower_body_quality,
             visible_ratio=prediction.visible_ratio,
+            secondary_probabilities=secondary_probabilities,
+            secondary_valid_ratio=secondary_valid_ratio,
+            secondary_window_seconds=secondary_window_seconds,
+            secondary_inference_ms=secondary_inference_ms,
         )
 
     def predict(
