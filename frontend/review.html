@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Perimetr — Historia zdarzeń</title>
+    <link rel="stylesheet" href="style.css">
+    <link rel="stylesheet" href="review.css?v=2.3.0">
+    <script src="https://unpkg.com/lucide@latest" defer></script>
+</head>
+<body class="review-body">
+
+<header class="px-header">
+    <div class="px-header-left">
+        <a href="/" style="text-decoration:none"><span class="px-logo">perimetr</span></a>
+        <nav class="px-nav">
+            <a href="/">Podgląd</a>
+            <a href="/review.html" class="active">Historia</a>
+            <a href="/calibrate.html">Kalibracja</a>
+            <a href="/distance.html">Dystans</a>
+            <a href="/depth3d.html">Głębia</a>
+        </nav>
+    </div>
+    <div class="px-header-right">
+        <a href="/" class="px-btn">← Panel na żywo</a>
+    </div>
+</header>
+
+<section class="summary-bar">
+    <div class="summary-tile total">
+        <div class="tile-label">Zdarzenia w okresie</div>
+        <div class="tile-value" id="sumTotal">—</div>
+    </div>
+    <div class="summary-tile danger">
+        <div class="tile-label">Danger</div>
+        <div class="tile-value" id="sumDanger">—</div>
+    </div>
+    <div class="summary-tile warning">
+        <div class="tile-label">Warning</div>
+        <div class="tile-value" id="sumWarning">—</div>
+    </div>
+    <div class="summary-tile">
+        <div class="tile-label">Do weryfikacji</div>
+        <div class="tile-value" id="sumNew">—</div>
+    </div>
+    <div class="summary-tile split">
+        <div class="tile-label">Rozkład</div>
+        <div class="tile-split">
+            <span><b id="sumPpe">—</b> PPE</span>
+            <span><b id="sumZone">—</b> Strefa</span>
+            <span><b id="sumSite">—</b> Pojazdy</span>
+            <span><b id="sumPosture">—</b> Postura</span>
+            <span><b id="sumFall">—</b> Upadek</span>
+            <span><b id="sumSmoking">—</b> Gest palenia</span>
+            <span><b id="sumUnknown">—</b> Brak ID</span>
+        </div>
+    </div>
+</section>
+
+<div class="review-filters">
+    <div class="quick-dates">
+        <button data-range="today" class="chip">Dziś</button>
+        <button data-range="24h" class="chip">24h</button>
+        <button data-range="7d" class="chip">7 dni</button>
+        <button data-range="all" class="chip active">Wszystko</button>
+    </div>
+    <div class="filter-group">
+        <label>Typ</label>
+        <select id="filterKind">
+            <option value="">Wszystkie</option>
+            <option value="ppe_missing">Brak PPE</option>
+            <option value="zone_breach">Strefa niebezpieczna</option>
+            <option value="site_hazard">Osoba przy pojeździe</option>
+            <option value="posture_anomaly">Nietypowa koordynacja</option>
+            <option value="fall_detected">Możliwy upadek</option>
+            <option value="smoking_gesture">WYKRYTO PALENIE</option>
+            <option value="unidentified_worker">Brak identyfikatora QR</option>
+            <option value="zone_approach">Zbliżanie do strefy</option>
+        </select>
+    </div>
+    <div class="filter-group">
+        <label>Tryb</label>
+        <select id="filterMode">
+            <option value="">Wszystkie</option>
+            <option value="site">Plac (pojazdy)</option>
+            <option value="checkpoint">Bramka (PPE)</option>
+        </select>
+    </div>
+    <div class="filter-group">
+        <label>Poziom</label>
+        <select id="filterSeverity">
+            <option value="">Wszystkie</option>
+            <option value="DANGER">Danger</option>
+            <option value="WARNING">Warning</option>
+        </select>
+    </div>
+    <div class="filter-group">
+        <label>Pracownik / ID</label>
+        <input type="text" id="filterWorker" placeholder="np. W-001" maxlength="64">
+    </div>
+    <div class="filter-group">
+        <label>Weryfikacja</label>
+        <select id="filterReviewStatus">
+            <option value="">Wszystkie</option>
+            <option value="new">Nowe</option>
+            <option value="acknowledged">Przyjęte</option>
+            <option value="confirmed">Potwierdzone</option>
+            <option value="false_positive">Fałszywy alarm</option>
+            <option value="escalated">Eskalowane</option>
+        </select>
+    </div>
+    <div class="filter-group">
+        <label>Od</label>
+        <input type="datetime-local" id="filterSince">
+    </div>
+    <div class="filter-group">
+        <label>Do</label>
+        <input type="datetime-local" id="filterUntil">
+    </div>
+    <button id="applyFilters" class="btn-primary">Filtruj</button>
+    <button id="clearFilters" class="btn-secondary">Wyczyść</button>
+    <button id="exportCsv" class="btn-secondary" title="Pobierz aktualną listę jako CSV">Eksport CSV</button>
+    <button id="exportTraining" class="btn-secondary" title="Pobierz potwierdzone zdarzenia jako JSONL do przyszłego uczenia">Dane AI JSONL</button>
+    <div class="filter-stats">
+        <span id="resultCount">—</span>
+    </div>
+</div>
+
+<main class="review-main">
+    <div id="reviewGrid" class="review-grid"></div>
+    <div id="reviewEmpty" class="review-empty hidden">
+        <p>Brak zdarzeń do wyświetlenia</p>
+        <p class="hint">Zmień filtry lub uruchom kamerę aby wygenerować zdarzenia.</p>
+    </div>
+</main>
+
+<div id="lightbox" class="lightbox hidden">
+    <button id="lightboxClose" class="lightbox-close" aria-label="Zamknij">×</button>
+    <div class="lightbox-inner">
+        <div class="lightbox-media">
+            <img id="lightboxImg" alt="Snapshot zdarzenia">
+            <video id="lightboxVideo" class="hidden" controls preload="metadata" playsinline>
+                <source id="lightboxVideoSource" src="" type="video/mp4">
+            </video>
+            <p id="lightboxVideoStatus" class="media-status"></p>
+        </div>
+        <div class="lightbox-info">
+            <h2 id="lightboxTitle">—</h2>
+            <div class="lightbox-meta">
+                <div class="meta-row"><span class="meta-key">Czas</span><span class="meta-val" id="lightboxTime">—</span></div>
+                <div class="meta-row"><span class="meta-key">Tryb</span><span class="meta-val" id="lightboxMode">—</span></div>
+                <div class="meta-row"><span class="meta-key">Kamera</span><span class="meta-val" id="lightboxCamera">—</span></div>
+                <div class="meta-row"><span class="meta-key">Reguła</span><span class="meta-val" id="lightboxRule">—</span></div>
+                <div class="meta-row"><span class="meta-key">Poziom</span><span class="meta-val" id="lightboxSeverity">—</span></div>
+                <div class="meta-row"><span class="meta-key">Pracownik</span><span class="meta-val" id="lightboxWorker">—</span></div>
+                <div class="meta-row"><span class="meta-key">Track ID</span><span class="meta-val" id="lightboxTrack">—</span></div>
+                <div class="meta-row"><span class="meta-key">Akcja</span><span class="meta-val" id="lightboxAction">—</span></div>
+                <div class="meta-row"><span class="meta-key">Safety</span><span class="meta-val" id="lightboxSafety">—</span></div>
+                <div class="meta-row"><span class="meta-key">Confidence</span><span class="meta-val" id="lightboxConfidence">—</span></div>
+                <div class="meta-row"><span class="meta-key">Marker ID</span><span class="meta-val" id="lightboxMarker">—</span></div>
+                <div class="meta-row"><span class="meta-key">Weryfikacja</span><span class="meta-val" id="lightboxReviewStatus">—</span></div>
+            </div>
+            <div class="review-actions">
+                <input id="reviewedBy" type="text" maxlength="80" placeholder="Operator (opcjonalnie)">
+                <textarea id="reviewNote" maxlength="1000" placeholder="Notatka z weryfikacji"></textarea>
+                <div class="review-action-buttons">
+                    <button type="button" data-review="acknowledged" class="btn-secondary">Przyjmij</button>
+                    <button type="button" data-review="confirmed" class="btn-primary">Potwierdź</button>
+                    <button type="button" data-review="false_positive" class="btn-secondary">Fałszywy alarm</button>
+                    <button type="button" data-review="escalated" class="btn-secondary">Eskaluj</button>
+                </div>
+                <span id="reviewSaveStatus" class="review-save-status"></span>
+            </div>
+            <details class="lightbox-details">
+                <summary>Szczegóły techniczne</summary>
+                <pre id="lightboxDetails">—</pre>
+            </details>
+        </div>
+    </div>
+</div>
+
+<script src="review.js?v=2.3.0"></script>
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+    if (window.lucide) window.lucide.createIcons();
+});
+</script>
+</body>
+</html>

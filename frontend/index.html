@@ -3,44 +3,346 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Salamono Safety — Panel</title>
-    <link rel="stylesheet" href="style.css">
+    <title>Perimetr — Panel kierownika</title>
+    <link rel="stylesheet" href="style.css?v=2.3.0">
+    <script src="https://unpkg.com/lucide@latest" defer></script>
 </head>
 <body>
-    <header>
-        <div class="header-left">
-            <h1>SALAMONO SAFETY</h1>
-            <span id="connectionStatus" class="status disconnected">Rozlaczono</span>
-        </div>
-        <div class="header-right">
-            <span id="statsBar">
-                Klatki: <strong id="frameCount">0</strong> |
-                FPS: <strong id="fpsDisplay">0</strong> |
-                Alarmy: <strong id="alertCount">0</strong> |
-                Czas detekcji: <strong id="processingTime">0</strong>ms
-            </span>
-        </div>
-    </header>
 
-    <div id="alarmBanner" class="alarm-banner hidden">
-        <span class="alarm-icon">&#9888;</span>
-        <span id="alarmText">ALARM — Wykryto zagrozenie!</span>
+<header class="px-header">
+    <div class="px-header-left">
+        <span class="px-logo">perimetr</span>
+        <nav class="px-nav">
+            <a href="/" class="active">Podgląd</a>
+            <a href="/review.html">Historia</a>
+            <a href="/calibrate.html">Kalibracja</a>
+            <a href="/distance.html">Dystans</a>
+            <a href="/depth3d.html">Głębia</a>
+        </nav>
     </div>
-
-    <main>
-        <div class="live-view">
-            <canvas id="liveCanvas"></canvas>
-            <div id="noSignal" class="no-signal">
-                <p>Brak sygnalu</p>
-                <p class="hint">Uruchom kamere lub symulator</p>
+    <div class="px-header-right">
+        <div class="px-mode-tools">
+            <button class="px-ai-mode-btn" id="aiModeBtn" type="button"
+                    aria-label="Seryjna analiza AI filmów" title="Wybierz jeden lub wiele filmów do pełnej analizy AI">
+                <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                    <path d="M9.5 4.5A3 3 0 0 0 5 7.1a3.2 3.2 0 0 0-1 5.9 3.5 3.5 0 0 0 4 5.5c.5 1 1.5 1.5 2.5 1.5V4.5Z"/>
+                    <path d="M14.5 4.5A3 3 0 0 1 19 7.1a3.2 3.2 0 0 1 1 5.9 3.5 3.5 0 0 1-4 5.5c-.5 1-1.5 1.5-2.5 1.5V4.5Z"/>
+                    <path d="M5 9.5h2.2M17 9.5h2M7.5 15c1.2 0 2-.8 2-2M16.5 15c-1.2 0-2-.8-2-2"/>
+                </svg>
+            </button>
+            <div class="px-segmented" id="modeSegmented">
+                <button type="button" data-mode="site" class="active">Plac</button>
+                <button type="button" data-mode="checkpoint">Bramka</button>
             </div>
         </div>
-        <div class="alert-panel">
-            <h2>Historia alarmow <span id="alertTotal" class="badge">0</span></h2>
-            <div id="alertList" class="alert-list"></div>
+        <div class="px-status" id="connectionStatus">
+            <span class="px-status-dot"></span>
+            <span id="connectionText">Łączenie…</span>
         </div>
-    </main>
+        <span class="px-alarm-tag hidden" id="headerAlarmTag">1 aktywny alarm</span>
+        <button class="px-btn" id="demoVideoBtn" type="button">
+            <i data-lucide="file-video"></i>Wczytaj film
+        </button>
+        <button class="px-btn px-btn--danger hidden" id="demoVideoStopBtn" type="button">
+            <i data-lucide="square"></i>Zatrzymaj
+        </button>
+        <button class="px-btn hidden" id="demoVideoChangeBtn" type="button">
+            <i data-lucide="folder-open"></i>Zmień film
+        </button>
+        <input id="demoVideoInput" type="file"
+               accept=".mp4,.avi,.mov,.mkv,video/mp4,video/quicktime,video/x-msvideo,video/x-matroska"
+               multiple hidden>
+        <button class="px-btn" id="pairPhoneBtn" type="button">
+            <i data-lucide="qr-code"></i>Podłącz telefon
+        </button>
+    </div>
+</header>
 
-    <script src="app.js"></script>
+<div class="px-demo-job hidden" id="demoVideoStatusPanel" role="status" aria-live="polite">
+    <span class="px-demo-job-label">Film demonstracyjny</span>
+    <strong id="demoVideoStatusText">—</strong>
+    <span class="px-demo-job-meta" id="demoVideoStatusMeta"></span>
+    <progress class="px-demo-progress hidden" id="demoVideoProgress" max="100" value="0">0%</progress>
+</div>
+
+<div class="px-alarm-banner hidden" id="alarmBanner">
+    <div>
+        <div class="px-alarm-title" id="alarmTitle">STOP — Osoba w strefie</div>
+        <div class="px-alarm-meta" id="alarmMeta">—</div>
+    </div>
+    <div class="px-alarm-actions">
+        <button class="px-btn px-btn--solid" id="alarmAckBtn">Potwierdź alarm</button>
+        <button class="px-btn" id="alarmMuteBtn">Wycisz 5 min</button>
+    </div>
+</div>
+
+<main class="px-main">
+
+    <section class="px-col-left">
+
+        <div class="px-cam-bar">
+            <div class="px-cam-card">
+                <span class="px-status-dot"></span>
+                <div>
+                    <select id="cameraSelect" class="px-camera-select" aria-label="Aktywna kamera">
+                        <option value="cam_default">cam_default</option>
+                    </select>
+                    <div class="px-cam-card-meta" id="camMeta">1920×1080 · 0 kl/s</div>
+                </div>
+            </div>
+            <button class="px-cam-add" id="addCameraBtn" type="button">
+                <i data-lucide="plus"></i>Dodaj kamerę
+            </button>
+            <div class="px-layers">
+                <span class="px-layers-label">Moduły</span>
+                <span class="msbp-tag msbp-tag--solid msbp-tag--btn" data-layer="boxes">Bboxy</span>
+                <span class="msbp-tag msbp-tag--solid msbp-tag--btn"
+                      data-layer="posture" title="Szkielet MediaPipe">POS</span>
+                <span class="msbp-tag msbp-tag--solid msbp-tag--btn" data-layer="zones">Strefy</span>
+                <span class="msbp-tag msbp-tag--solid msbp-tag--btn" data-layer="markers">Markery</span>
+                <span class="msbp-tag msbp-tag--solid msbp-tag--btn" data-layer="distances">Odległości</span>
+                <span class="msbp-tag msbp-tag--solid msbp-tag--btn" data-layer="worker_id" title="Identyfikacja pracownika znacznikiem">ID</span>
+            </div>
+        </div>
+
+        <div class="px-video" id="canvasStack">
+            <canvas id="liveCanvas"></canvas>
+            <canvas id="zoneCanvas" class="px-canvas-overlay"></canvas>
+
+            <div class="px-video-no-signal" id="noSignal">
+                <p>Brak sygnału</p>
+                <p class="hint">Brak aktywnego obrazu</p>
+            </div>
+
+            <div class="px-video-chip px-video-chip--tl" id="liveChip">
+                <span class="px-live-dot"></span>
+                <span id="liveText">LIVE · cam_default · —</span>
+            </div>
+
+            <div class="px-video-chip px-video-chip--br" id="markerChip">ArUco 0 · homografia —</div>
+
+            <div class="px-ppe-badge hidden" id="ppeBadge">
+                <div class="px-ppe-headline" id="ppeHeadline">—</div>
+                <div class="px-ppe-items">
+                    <div class="px-ppe-item" id="ppeHardhat">
+                        <span class="px-ppe-mark">—</span>
+                        <span>KASK</span>
+                    </div>
+                    <div class="px-ppe-item" id="ppeVest">
+                        <span class="px-ppe-mark">—</span>
+                        <span>KAMIZELKA</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="px-posture-badge hidden" id="postureBadge">
+                <div class="px-posture-title">ANALIZA KOORDYNACJI</div>
+                <div class="px-posture-score" id="postureScore">—</div>
+                <div class="px-posture-signals" id="postureSignals">—</div>
+            </div>
+
+            <div class="px-worker-badge hidden" id="workerBadge">
+                <div class="px-worker-title">IDENTYFIKACJA ZNACZNIKIEM</div>
+                <div class="px-worker-ids" id="workerIds">—</div>
+                <div class="px-worker-meta" id="workerMeta">—</div>
+            </div>
+        </div>
+
+        <div class="px-video-status" id="videoStatus">
+            <span>WS: <span id="wsStatus">łączenie</span></span>
+            <span class="sep">·</span>
+            <span>klatki <span id="frameCount">0</span></span>
+            <span class="sep">·</span>
+            <span>detekcja <span id="processingTime">0</span> ms</span>
+            <span class="sep">·</span>
+            <span id="fpsLine">— kl/s</span>
+            <span class="sep">·</span>
+            <span>YOLOv11n</span>
+            <span class="sep">·</span>
+            <span id="postureStatus">postura —</span>
+            <span class="sep">·</span>
+            <span id="workerStatus">Znacznik —</span>
+            <span class="grow"></span>
+            <button type="button" class="px-btn px-btn--link" id="snapshotBtn">Zrzut klatki</button>
+        </div>
+
+    </section>
+
+    <aside class="px-col-right">
+
+        <div class="px-card" id="zonesCard">
+            <div class="px-card-hd">
+                <span class="px-card-title">Strefy niebezpieczne</span>
+                <span class="px-mono" style="color:var(--msbp-red);font-weight:600;font-size:12px" id="zonesCount">0</span>
+            </div>
+            <div class="px-zone-actions">
+                <button type="button" class="px-btn" id="zoneDrawBtn">
+                    <i data-lucide="pentagon"></i>Rysuj polygon
+                </button>
+                <button type="button" class="px-btn" id="markerZoneBtn">
+                    <i data-lucide="scan"></i>Z markerów
+                </button>
+            </div>
+
+            <div class="px-zone-list" id="zoneList"></div>
+
+            <div class="px-draw-panel hidden" id="zoneDrawPanel">
+                <input id="zoneName" type="text" placeholder="Nazwa (np. Wykop A)" maxlength="40">
+                <select id="zoneSeverity">
+                    <option value="DANGER">Danger</option>
+                    <option value="WARNING">Warning</option>
+                </select>
+                <label class="px-field-label" for="zoneWarningDistance">Ostrzegaj przed strefą [m]</label>
+                <input id="zoneWarningDistance" type="number" min="0" max="100" step="0.1" value="1.5">
+                <div class="px-draw-actions">
+                    <button type="button" class="px-btn px-btn--solid" id="zoneSaveBtn" disabled>Zapisz</button>
+                    <button type="button" class="px-btn" id="zoneCancelBtn">Anuluj</button>
+                </div>
+            </div>
+
+            <div class="px-marker-panel hidden" id="markerZonePanel">
+                <input id="markerZoneName" type="text" placeholder="Nazwa (np. Strefa dźwigu)" maxlength="40">
+                <input id="markerZoneIds" type="text" placeholder="ID markerów: 10, 20, 30, 40" maxlength="80">
+                <select id="markerZoneSeverity">
+                    <option value="DANGER">Danger</option>
+                    <option value="WARNING">Warning</option>
+                </select>
+                <label class="px-field-label" for="markerZoneWarningDistance">Ostrzegaj przed strefą [m]</label>
+                <input id="markerZoneWarningDistance" type="number" min="0" max="100" step="0.1" value="1.5">
+                <div class="px-draw-actions">
+                    <button type="button" class="px-btn px-btn--solid" id="markerZoneSaveBtn">Zapisz</button>
+                    <button type="button" class="px-btn" id="markerZoneCancelBtn">Anuluj</button>
+                </div>
+            </div>
+        </div>
+
+        <div class="px-card px-worker-tools px-worker-tools--collapsed" id="workerToolsCard">
+            <button type="button"
+                    class="px-card-hd px-worker-tools-toggle"
+                    id="workerToolsToggle"
+                    aria-expanded="false"
+                    aria-controls="workerToolsBody">
+                <span class="px-card-title">Identyfikator pracownika</span>
+                <span class="px-worker-tools-toggle-meta">
+                    <span class="px-worker-count" id="workerRegistryCount">0 wpisów</span>
+                    <i class="px-worker-tools-chevron" data-lucide="chevron-down" aria-hidden="true"></i>
+                </span>
+            </button>
+
+            <div class="px-worker-tools-body" id="workerToolsBody" aria-hidden="true">
+                <div class="px-worker-tools-body-inner">
+            <div class="px-worker-picker">
+                <label class="px-field-label" for="workerRegistrySelect">Rejestr pracowników</label>
+                <div class="px-worker-picker-row">
+                    <select id="workerRegistrySelect" aria-label="Wybierz pracownika">
+                        <option value="">Nowy pracownik…</option>
+                    </select>
+                    <button type="button" class="px-btn px-worker-new-btn" id="workerNewBtn" title="Nowy pracownik">
+                        <i data-lucide="user-plus"></i><span>Nowy</span>
+                    </button>
+                </div>
+            </div>
+
+            <form class="px-worker-form" id="workerRegistryForm" novalidate>
+                <label class="px-worker-field px-worker-field--id">
+                    <span>ID pracownika *</span>
+                    <input id="workerQrInput" name="worker_id" type="text" placeholder="np. W-001"
+                           maxlength="64" autocomplete="off" required>
+                </label>
+                <div class="px-worker-form-grid">
+                    <label class="px-worker-field">
+                        <span>Imię *</span>
+                        <input id="workerFirstName" name="first_name" type="text" maxlength="120"
+                               autocomplete="given-name" required>
+                    </label>
+                    <label class="px-worker-field">
+                        <span>Nazwisko *</span>
+                        <input id="workerLastName" name="last_name" type="text" maxlength="120"
+                               autocomplete="family-name" required>
+                    </label>
+                    <label class="px-worker-field">
+                        <span>Stanowisko *</span>
+                        <input id="workerPosition" name="position" type="text" maxlength="160" required>
+                    </label>
+                    <label class="px-worker-field">
+                        <span>Dział *</span>
+                        <input id="workerDepartment" name="department" type="text" maxlength="160" required>
+                    </label>
+                </div>
+
+                <div class="px-worker-feedback" id="workerRegistryStatus" role="status" aria-live="polite"></div>
+                <div class="px-worker-actions">
+                    <button type="submit" class="px-btn px-btn--solid" id="workerSaveBtn">
+                        <i data-lucide="save"></i><span>Zapisz</span>
+                    </button>
+                    <button type="button" class="px-btn" id="workerQrOpenBtn">
+                        <i data-lucide="download"></i><span>Generuj PNG</span>
+                    </button>
+                    <button type="button" class="px-btn px-btn--danger hidden" id="workerDeleteBtn">
+                        <i data-lucide="trash-2"></i><span>Usuń</span>
+                    </button>
+                </div>
+            </form>
+
+            <div class="px-worker-qr-preview hidden" id="workerQrPreview">
+                <div class="px-worker-qr-image-wrap">
+                    <img id="workerQrPreviewImg" alt="Znacznik identyfikatora pracownika">
+                </div>
+                <div class="px-worker-qr-preview-info">
+                    <strong id="workerQrPreviewTitle">Znacznik pracownika</strong>
+                    <span id="workerQrPreviewPayload" class="px-mono">tag:—</span>
+                    <a class="px-btn" id="workerQrDownloadBtn" href="#" download>
+                        <i data-lucide="download"></i><span>Pobierz ponownie</span>
+                    </a>
+                </div>
+            </div>
+
+                </div>
+            </div>
+        </div>
+
+        <div class="px-card" style="flex:1;min-height:0">
+            <div class="px-card-hd">
+                <span class="px-card-title">Historia alarmów <span class="px-mono" style="color:var(--msbp-red);font-weight:600;font-size:12px" id="alertTotal">0</span></span>
+                <a href="/review.html" class="px-btn--red-link" style="font-size:11px;font-weight:600;letter-spacing:0.1em;text-transform:uppercase;text-decoration:none">Pełna historia →</a>
+            </div>
+            <div class="px-alarms-filters" id="alarmsFilters">
+                <span class="msbp-tag msbp-tag--solid msbp-tag--btn active" data-filter="">Wszystkie</span>
+                <span class="msbp-tag msbp-tag--outline msbp-tag--btn" data-filter="DANGER">Danger</span>
+                <span class="msbp-tag msbp-tag--outline msbp-tag--btn" data-filter="WARNING">Warning</span>
+            </div>
+            <div class="px-alarms-list" id="alertList">
+                <div class="px-alarms-empty" id="alertsEmpty">Brak alarmów</div>
+            </div>
+        </div>
+
+    </aside>
+
+</main>
+
+<div class="px-modal-backdrop hidden" id="pairModal">
+    <div class="px-modal" role="dialog" aria-modal="true" aria-labelledby="pairModalTitle">
+        <button class="px-modal-close" id="pairModalClose" aria-label="Zamknij">
+            <i data-lucide="x"></i>
+        </button>
+        <div class="px-modal-title" id="pairModalTitle">Podłącz telefon</div>
+        <div class="px-qr-frame">
+            <img id="pairQrImg" alt="Kod QR do sparowania telefonu" width="240" height="240">
+        </div>
+        <div class="px-modal-urlrow">
+            <input type="text" id="pairUrl" readonly>
+            <button class="px-btn" id="pairCopyBtn">Kopiuj</button>
+        </div>
+    </div>
+</div>
+
+<script src="posture_interpolation.js?v=2.3.0"></script>
+<script src="app.js?v=2.3.0"></script>
+<script src="zones.js?v=2.3.0"></script>
+<script>
+  document.addEventListener("DOMContentLoaded", () => {
+    if (window.lucide) window.lucide.createIcons();
+  });
+</script>
 </body>
 </html>

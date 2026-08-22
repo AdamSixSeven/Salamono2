@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Perimetr — Dystans</title>
+    <link rel="stylesheet" href="style.css?v=2.3.0">
+    <link rel="stylesheet" href="distance.css?v=2.0.0">
+    <script src="https://unpkg.com/lucide@latest" defer></script>
+</head>
+<body>
+<header class="px-header">
+    <div class="px-header-left">
+        <a href="/" style="text-decoration:none"><span class="px-logo">perimetr</span></a>
+        <nav class="px-nav">
+            <a href="/">Podgląd</a>
+            <a href="/review.html">Historia</a>
+            <a href="/calibrate.html">Kalibracja</a>
+            <a href="/distance.html" class="active">Dystans</a>
+            <a href="/depth3d.html">Głębia</a>
+        </nav>
+    </div>
+    <div class="px-header-right"><a class="px-btn" href="/">← Wróć do panelu</a></div>
+</header>
+
+<main class="dist-wrap">
+    <section class="dist-hero">
+        <h1>Dystans osoba ↔ maszyna</h1>
+        <p>Integracja prototypu Distance z bieżącym pipeline'em Perimetr. Moduł korzysta z istniejących detekcji sceny, rzutuje dolne krawędzie bboxów na skalibrowaną płaszczyznę gruntu i liczy najkrótszą odległość pomiędzy osobą a maszyną.</p>
+    </section>
+
+    <section class="dist-mode-switch" aria-label="Tryb pomiaru dystansu">
+        <div class="px-segmented dist-tabs" role="tablist" aria-label="Tryb pomiaru">
+            <button id="distanceLiveTab" class="active" type="button" role="tab" aria-selected="true" aria-controls="distanceLivePanel">Bieżąca kamera / demo</button>
+            <button id="distanceClipTab" type="button" role="tab" aria-selected="false" aria-controls="distanceClipPanel">Analiza klipu</button>
+        </div>
+        <p>Tryb klipu analizuje tylko wskazaną klatkę. Upload nie uruchamia automatycznej analizy całego filmu.</p>
+    </section>
+
+    <section id="distanceLivePanel" class="dist-mode-panel" role="tabpanel" aria-labelledby="distanceLiveTab">
+        <section class="dist-card">
+            <h2>Sterowanie</h2>
+            <div class="dist-row">
+                <div class="dist-field"><label for="distanceCamera">Kamera</label><select id="distanceCamera"><option value="cam_default">cam_default</option></select></div>
+                <div class="dist-field"><label for="distanceMax">Maks. rysowana odległość [m]</label><input id="distanceMax" type="number" min="0.1" max="500" step="0.5" value="20"></div>
+                <div class="dist-field"><label for="distanceRate">Odświeżanie</label><select id="distanceRate"><option value="500">2 Hz</option><option value="1000">1 Hz</option><option value="2000">0.5 Hz</option></select></div>
+            </div>
+            <div class="dist-actions">
+                <button class="px-btn px-btn--solid" id="distanceStart" type="button">Uruchom</button>
+                <button class="px-btn" id="distanceOnce" type="button">Odśwież raz</button>
+                <button class="px-btn" id="distanceStop" type="button" disabled>Stop</button>
+            </div>
+            <div class="dist-status" id="distanceStatus" role="status" aria-live="polite">Ładowanie stanu modułu…</div>
+            <div class="dist-meta">
+                <div><span>Klatka</span><strong id="metaFrame">—</strong></div>
+                <div><span>Osoby</span><strong id="metaPersons">—</strong></div>
+                <div><span>Maszyny</span><strong id="metaHazards">—</strong></div>
+                <div><span>Pary</span><strong id="metaPairs">—</strong></div>
+            </div>
+        </section>
+
+        <div class="dist-grid">
+            <section class="dist-card">
+                <h2>Podgląd</h2>
+                <div class="dist-view" id="distanceView">
+                    <div class="dist-empty" id="distanceEmpty">Wybierz kamerę i uruchom podgląd.</div>
+                    <img id="distanceImage" alt="Podgląd dystansu" hidden>
+                </div>
+                <div class="dist-note">Kolor linii korzysta z progów stref bezpieczeństwa Perimetr. Dystans jest wyliczany na płaszczyźnie gruntu, nie z mapy Depth Anything.</div>
+            </section>
+            <section class="dist-card">
+                <h2>Najbliższe pary</h2>
+                <div class="dist-list" id="distancePairs"><div class="dist-empty">Brak pomiarów.</div></div>
+            </section>
+        </div>
+    </section>
+
+    <section id="distanceClipPanel" class="dist-mode-panel" role="tabpanel" aria-labelledby="distanceClipTab" hidden>
+        <section class="dist-card">
+            <h2>Plik wideo</h2>
+            <form id="clipUploadForm">
+                <div class="dist-row">
+                    <div class="dist-field dist-field--file">
+                        <label for="clipFile">Klip MP4 / MOV / AVI / MKV</label>
+                        <input id="clipFile" name="video" type="file" accept=".mp4,.mov,.avi,.mkv,video/mp4,video/quicktime,video/x-msvideo,video/x-matroska" required>
+                    </div>
+                    <button class="px-btn px-btn--solid" id="clipUpload" type="submit">Wczytaj klip</button>
+                </div>
+            </form>
+            <div class="dist-status" id="clipUploadStatus" role="status" aria-live="polite">Wybierz plik. Film zostanie zapisany bez analizy klatek.</div>
+            <div class="dist-meta dist-meta--clip" id="clipMetadata" hidden>
+                <div><span>Plik</span><strong id="clipMetaName">—</strong></div>
+                <div><span>Rozdzielczość</span><strong id="clipMetaResolution">—</strong></div>
+                <div><span>FPS</span><strong id="clipMetaFps">—</strong></div>
+                <div><span>Klatki</span><strong id="clipMetaFrames">—</strong></div>
+                <div><span>Czas</span><strong id="clipMetaDuration">—</strong></div>
+            </div>
+        </section>
+
+        <div id="clipWorkspace" class="dist-clip-workspace" hidden>
+            <section class="dist-card">
+                <div class="dist-heading-row">
+                    <h2>Odtwarzacz</h2>
+                    <button class="px-btn px-btn--danger" id="clipRemove" type="button">Usuń klip</button>
+                </div>
+                <div class="dist-video-wrap">
+                    <video id="clipVideo" controls preload="metadata" playsinline>Ta przeglądarka nie obsługuje odtwarzacza HTML5 video.</video>
+                </div>
+                <div class="dist-player-message" id="clipPlayerMessage" hidden></div>
+                <div class="dist-timeline">
+                    <output id="clipCurrentTime" for="clipSeek">00:00.00</output>
+                    <input id="clipSeek" type="range" min="0" max="0" step="0.001" value="0" aria-label="Pozycja filmu">
+                    <output id="clipDuration" for="clipSeek">00:00.00</output>
+                </div>
+                <div class="dist-row dist-clip-controls">
+                    <div class="dist-actions">
+                        <button class="px-btn" id="clipPreviousFrame" type="button">−1 klatka</button>
+                        <button class="px-btn" id="clipNextFrame" type="button">+1 klatka</button>
+                    </div>
+                    <div class="dist-field dist-field--compact">
+                        <label for="clipMaxDistance">Maks. odległość [m]</label>
+                        <input id="clipMaxDistance" type="number" min="0.1" max="500" step="0.5" value="20">
+                    </div>
+                    <button class="px-btn px-btn--solid dist-analyze" id="clipAnalyze" type="button">Analizuj tę klatkę</button>
+                </div>
+                <p class="dist-note">Czas z odtwarzacza jest żądaniem. Dokładny numer i czas odczytanej klatki potwierdza backend po analizie.</p>
+                <div class="dist-status" id="clipAnalysisStatus" role="status" aria-live="polite">Przewiń film do wybranego momentu i uruchom analizę jednej klatki.</div>
+                <div class="dist-meta dist-meta--analysis" id="clipAnalysisMetadata" hidden>
+                    <div><span>Żądany czas</span><strong id="clipRequestedTime">—</strong></div>
+                    <div><span>Faktyczny czas</span><strong id="clipActualTime">—</strong></div>
+                    <div><span>Klatka</span><strong id="clipFrameIndex">—</strong></div>
+                    <div><span>Status</span><strong id="clipAnalysisState">—</strong></div>
+                    <div><span>Osoby / maszyny</span><strong id="clipAnalysisCounts">—</strong></div>
+                </div>
+            </section>
+
+            <div class="dist-grid dist-grid--clip">
+                <section class="dist-card">
+                    <h2>Wynik analizy</h2>
+                    <div class="dist-view" id="clipResultView">
+                        <div class="dist-empty" id="clipResultEmpty">Nie analizowano jeszcze żadnej klatki.</div>
+                        <img id="clipResultImage" alt="Wybrana klatka z detekcjami i pomiarami dystansu" hidden>
+                    </div>
+                </section>
+                <section class="dist-card dist-results-card">
+                    <h2>Najbliższe pary</h2>
+                    <div class="dist-list" id="clipPairs"><div class="dist-empty">Brak pomiarów.</div></div>
+                    <h3>Detekcje</h3>
+                    <div class="dist-list dist-list--detections" id="clipDetections"><div class="dist-empty">Brak detekcji.</div></div>
+                </section>
+            </div>
+        </div>
+    </section>
+</main>
+<script src="distance.js?v=2.0.0"></script>
+</body>
+</html>

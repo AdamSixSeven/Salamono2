@@ -1,0 +1,5 @@
+# Optional monocular metric-depth module used by /depth3d.html
+# Install after the main requirements in the same virtual environment.
+transformers>=4.45.0,<5
+safetensors>=0.4.5
+Pillow>=10.0

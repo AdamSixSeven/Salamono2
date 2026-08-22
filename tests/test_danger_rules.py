@@ -71,15 +71,13 @@ class TestDangerDetector:
         assert events[0].severity == "DANGER"
         assert events[0].rule_name == "person_vehicle_overlap"
 
-    def test_proximity_triggers_warning(self):
+    def test_intermediate_proximity_does_not_trigger_warning(self):
         cfg = DangerConfig(proximity_px=50, overlap_iou=0.01)
         dd = DangerDetector(cfg)
         person = _make_det("person", [0, 0, 50, 100], cls_id=0)
         truck = _make_det("vehicle", [80, 0, 200, 100], cls_id=7)
         events = dd.evaluate([person, truck], 0.0)
-        assert len(events) == 1
-        assert events[0].severity == "WARNING"
-        assert events[0].rule_name == "person_near_vehicle"
+        assert events == []
 
     def test_far_apart_no_danger(self):
         cfg = DangerConfig(proximity_px=50, overlap_iou=0.01)
@@ -159,3 +157,23 @@ class TestTemporalFilter:
         tf.update([evt], 2.0)  # confirmed
         confirmed = tf.update([evt], 8.0)  # after cooldown
         assert len(confirmed) == 1
+
+    def test_camera_scopes_do_not_clear_each_others_streaks(self):
+        tf = TemporalFilter(required=2, cooldown_sec=5.0)
+        evt = self._make_event([50, 50, 150, 200], [100, 100, 300, 300])
+
+        assert tf.update([evt], 1.0, "live") == []
+        assert tf.update([evt], 1.1, "demo") == []
+        assert len(tf.update([evt], 2.0, "live")) == 1
+        assert len(tf.update([evt], 2.1, "demo")) == 1
+
+    def test_reset_camera_only_discards_requested_scope(self):
+        tf = TemporalFilter(required=2, cooldown_sec=5.0)
+        evt = self._make_event([50, 50, 150, 200], [100, 100, 300, 300])
+        tf.update([evt], 1.0, "live")
+        tf.update([evt], 1.0, "demo")
+
+        tf.reset_camera("demo")
+
+        assert len(tf.update([evt], 2.0, "live")) == 1
+        assert tf.update([evt], 2.0, "demo") == []

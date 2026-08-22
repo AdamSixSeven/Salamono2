@@ -1,0 +1,217 @@
+/* ============================================================
+   MSBP Design System — Colors & Type
+   biuro projektów · architectural / design office
+   ============================================================ */
+
+/* Webfonts — Google Fonts fallback for wordmark feel.
+   The MSBP wordmark "biuro projektów" appears set in a thin,
+   narrow humanist sans. Closest Google Fonts match: Barlow Condensed
+   (Light/Regular). Body copy uses Barlow for cohesion.
+   FLAG TO USER: substitute with original brand font when supplied. */
+@import url('https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@200;300;400;500;600;700&family=Barlow:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
+
+:root {
+  /* -------- Brand color -------- */
+  --msbp-red:        #DD211C;   /* sampled from logo */
+  --msbp-red-ink:    #B6160F;   /* pressed / hover-darker */
+  --msbp-red-tint:   #FBE6E5;   /* very light wash for highlights */
+  --msbp-red-glow:   rgba(221, 33, 28, 0.18);
+
+  /* -------- Neutrals -------- */
+  --ink:             #0A0A0A;   /* primary text */
+  --ink-2:           #2B2B2B;   /* secondary text */
+  --ink-3:           #6B6B6B;   /* tertiary / captions */
+  --ink-4:           #A8A8A8;   /* disabled / placeholders */
+  --rule:            #E6E6E6;   /* hairline borders */
+  --rule-strong:     #1A1A1A;   /* heavy rule, frames */
+  --surface:         #FFFFFF;
+  --surface-2:       #FAFAF8;   /* off-white paper */
+  --surface-3:       #F2F1ED;   /* card / panel */
+
+  /* -------- Semantic foreground/background tokens -------- */
+  --fg-1: var(--ink);
+  --fg-2: var(--ink-2);
+  --fg-3: var(--ink-3);
+  --fg-4: var(--ink-4);
+  --fg-accent: var(--msbp-red);
+  --fg-on-red: #FFFFFF;
+
+  --bg-1: var(--surface);
+  --bg-2: var(--surface-2);
+  --bg-3: var(--surface-3);
+  --bg-accent: var(--msbp-red);
+
+  --border-1: var(--rule);
+  --border-2: #D0D0D0;
+  --border-strong: var(--rule-strong);
+
+  /* -------- Type families -------- */
+  --font-display: "Barlow Condensed", "Helvetica Neue", Arial, sans-serif;
+  --font-sans:    "Barlow", "Helvetica Neue", Arial, sans-serif;
+  --font-mono:    "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+
+  /* -------- Type scale (modular, 1.250 / major third) -------- */
+  --fs-12: 0.75rem;
+  --fs-14: 0.875rem;
+  --fs-16: 1rem;
+  --fs-18: 1.125rem;
+  --fs-22: 1.375rem;
+  --fs-28: 1.75rem;
+  --fs-36: 2.25rem;
+  --fs-48: 3rem;
+  --fs-64: 4rem;
+  --fs-80: 5rem;
+
+  /* -------- Weights -------- */
+  --w-thin:    200; /* @kind font */
+  --w-light:   300; /* @kind font */
+  --w-regular: 400; /* @kind font */
+  --w-medium:  500; /* @kind font */
+  --w-semi:    600; /* @kind font */
+  --w-bold:    700; /* @kind font */
+
+  /* -------- Spacing scale (4px base) -------- */
+  --space-0: 0;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --space-7: 48px;
+  --space-8: 64px;
+  --space-9: 96px;
+  --space-10: 128px;
+
+  /* -------- Radii (minimal — brand favours hard corners) -------- */
+  --radius-0: 0px;
+  --radius-1: 2px;
+  --radius-2: 4px;
+  --radius-3: 8px;
+  --radius-frame: 14px;  /* matches logo's rounded square frame */
+
+  /* -------- Borders -------- */
+  --bw-hair:  1px;
+  --bw-rule:  2px;
+  --bw-heavy: 4px;       /* the signature MSBP red frame */
+
+  /* -------- Shadows — used sparingly, brand prefers flat -------- */
+  --shadow-1: 0 1px 0 rgba(0,0,0,0.04);
+  --shadow-2: 0 2px 8px rgba(0,0,0,0.06);
+  --shadow-3: 0 8px 24px rgba(0,0,0,0.08);
+  --shadow-focus: 0 0 0 3px var(--msbp-red-glow);
+
+  /* -------- Motion -------- */
+  --ease-out: cubic-bezier(0.2, 0.7, 0.2, 1); /* @kind other */
+  --ease-in-out: cubic-bezier(0.6, 0, 0.4, 1); /* @kind other */
+  --dur-1: 120ms; /* @kind other */
+  --dur-2: 220ms; /* @kind other */
+  --dur-3: 360ms; /* @kind other */
+}
+
+/* ============================================================
+   Semantic type styles
+   ============================================================ */
+
+html { font-family: var(--font-sans); color: var(--fg-1); background: var(--bg-1); }
+body { margin: 0; font-size: var(--fs-16); line-height: 1.55; -webkit-font-smoothing: antialiased; }
+
+.msbp-eyebrow {
+  font-family: var(--font-sans);
+  font-size: var(--fs-12);
+  font-weight: var(--w-medium);
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--fg-3);
+}
+
+.msbp-h1, h1.msbp {
+  font-family: var(--font-display);
+  font-weight: var(--w-light);
+  font-size: var(--fs-80);
+  line-height: 0.95;
+  letter-spacing: -0.01em;
+  color: var(--fg-1);
+  margin: 0;
+}
+
+.msbp-h2, h2.msbp {
+  font-family: var(--font-display);
+  font-weight: var(--w-light);
+  font-size: var(--fs-48);
+  line-height: 1.02;
+  letter-spacing: -0.005em;
+  margin: 0;
+}
+
+.msbp-h3, h3.msbp {
+  font-family: var(--font-display);
+  font-weight: var(--w-regular);
+  font-size: var(--fs-28);
+  line-height: 1.15;
+  margin: 0;
+}
+
+.msbp-h4, h4.msbp {
+  font-family: var(--font-sans);
+  font-weight: var(--w-semi);
+  font-size: var(--fs-18);
+  line-height: 1.3;
+  letter-spacing: 0.01em;
+  text-transform: uppercase;
+  margin: 0;
+}
+
+.msbp-lead {
+  font-family: var(--font-sans);
+  font-weight: var(--w-light);
+  font-size: var(--fs-22);
+  line-height: 1.45;
+  color: var(--fg-2);
+}
+
+.msbp-body, p.msbp {
+  font-family: var(--font-sans);
+  font-weight: var(--w-regular);
+  font-size: var(--fs-16);
+  line-height: 1.6;
+  color: var(--fg-1);
+}
+
+.msbp-small {
+  font-size: var(--fs-14);
+  color: var(--fg-3);
+  line-height: 1.5;
+}
+
+.msbp-caption {
+  font-size: var(--fs-12);
+  color: var(--fg-3);
+  letter-spacing: 0.04em;
+  line-height: 1.4;
+}
+
+.msbp-mono, code.msbp {
+  font-family: var(--font-mono);
+  font-size: var(--fs-14);
+  letter-spacing: -0.01em;
+}
+
+/* Highlight — the brand's signature treatment.
+   Red highlight on key words within otherwise-black text. */
+.msbp-mark {
+  background: var(--msbp-red);
+  color: var(--fg-on-red);
+  padding: 0.02em 0.25em 0.06em;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}
+
+/* Underline accent — alternative emphasis */
+.msbp-underline {
+  background-image: linear-gradient(var(--msbp-red), var(--msbp-red));
+  background-size: 100% 0.18em;
+  background-position: 0 88%;
+  background-repeat: no-repeat;
+  padding: 0 0.05em;
+}

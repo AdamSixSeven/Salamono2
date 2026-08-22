@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Perimetr — Głębia</title>
+    <link rel="stylesheet" href="style.css?v=2.3.0">
+    <script src="https://unpkg.com/lucide@latest" defer></script>
+    <style>
+        .d3-wrap{width:min(1240px,calc(100% - 32px));margin:0 auto;padding:26px 0 50px;display:grid;gap:18px}
+        .d3-hero{padding-bottom:18px;border-bottom:1px solid var(--rule)}
+        .d3-hero h1{margin:0 0 8px;font-family:var(--font-display);font-size:clamp(30px,4vw,44px);font-weight:300;color:var(--ink)}
+        .d3-hero p{max-width:900px;margin:0;color:var(--ink-3);font-size:13px;line-height:1.55}
+        .d3-warning{padding:12px 14px;border:1px solid #C78300;background:#FFF7E6;color:#6E4900;font-size:12px;line-height:1.5}
+        .d3-card{padding:18px;background:var(--surface);border:1px solid var(--rule);border-radius:3px}
+        .d3-card h2{margin:0;color:var(--msbp-red);font-family:var(--font-display);font-size:18px;font-weight:400;letter-spacing:.06em;text-transform:uppercase}
+        
+        .d3-row{display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end}
+        .d3-field{display:flex;flex:1 1 145px;flex-direction:column;gap:5px;min-width:0}
+        .d3-field label{color:var(--ink-3);font-size:10px;font-weight:650;letter-spacing:.12em;text-transform:uppercase}
+        .d3-field input,.d3-field select{min-height:36px;padding:8px 10px;color:var(--ink);background:var(--surface);border:1px solid var(--border-2);font-family:var(--font-mono);font-size:12px}
+        .d3-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}
+        .d3-progress{height:5px;margin-top:12px;overflow:hidden;background:var(--bg-3)}
+        .d3-progress>span{display:block;width:0;height:100%;background:var(--msbp-red);transition:width .2s}
+        .d3-status{margin-top:10px;color:var(--ink-3);font-family:var(--font-mono);font-size:11px;line-height:1.55;white-space:pre-wrap}
+        .d3-status.error{color:#B42318}.d3-status.success{color:#177245}
+        .d3-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+        .d3-view{position:relative;min-height:310px;overflow:hidden;background:#111;border:1px solid #292929;border-radius:3px;display:grid;place-items:center}
+        .d3-view canvas{display:block;width:100%;height:auto;max-height:650px;object-fit:contain;cursor:crosshair}
+        .d3-view-title{position:absolute;top:10px;left:10px;padding:5px 8px;background:rgba(0,0,0,.72);color:#fff;font-family:var(--font-mono);font-size:10px;letter-spacing:.08em;text-transform:uppercase;z-index:2}
+        .d3-empty{color:#aaa;font-family:var(--font-mono);font-size:12px;text-align:center;padding:22px}
+        .d3-meta{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:1px;margin-top:12px;background:var(--rule);border:1px solid var(--rule)}
+        .d3-meta div{background:var(--surface);padding:10px;min-width:0}
+        .d3-meta span{display:block;color:var(--ink-4);font-size:9px;letter-spacing:.1em;text-transform:uppercase}
+        .d3-meta strong{display:block;margin-top:4px;color:var(--ink-2);font-family:var(--font-mono);font-size:11px;overflow-wrap:anywhere}
+        .d3-measure{margin-top:10px;padding:12px;white-space:pre-wrap;border:1px solid var(--rule);background:var(--bg-2);font-family:var(--font-mono);font-size:12px;line-height:1.55}
+        .d3-tip{margin-top:10px;color:var(--ink-4);font-size:11px;line-height:1.55}
+        .d3-profile-bar{display:grid;grid-template-columns:minmax(220px,1fr) auto auto auto auto;gap:8px;align-items:end;margin-bottom:14px;padding-bottom:14px;border-bottom:1px solid var(--rule)}
+        .d3-views-head{display:flex;justify-content:space-between;gap:12px;align-items:center;margin-top:14px}
+        .d3-views-head strong{font-family:var(--font-display);font-size:14px;font-weight:400;letter-spacing:.05em;text-transform:uppercase}
+        .d3-views{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:10px;margin-top:9px}
+        .d3-view-card{overflow:hidden;border:1px solid var(--rule);background:var(--bg-2)}
+        .d3-view-card img{display:block;width:100%;aspect-ratio:4/3;object-fit:cover;background:#111}
+        .d3-view-card-body{padding:8px;display:grid;gap:5px}
+        .d3-view-card-meta{color:var(--ink-3);font-family:var(--font-mono);font-size:9px;line-height:1.45}
+        .d3-view-card-actions{display:flex;justify-content:flex-end}
+        .d3-empty-views{padding:12px;border:1px dashed var(--rule);color:var(--ink-4);font-size:11px}.d3-point-list{display:grid;gap:8px;margin-top:12px}.d3-point-item{display:flex;justify-content:space-between;gap:10px;align-items:flex-start;padding:10px;border:1px solid var(--rule);background:var(--bg-2)}.d3-point-meta{color:var(--ink-3);font-family:var(--font-mono);font-size:11px;line-height:1.5}.d3-inline-note{color:var(--ink-4);font-size:11px;line-height:1.5}
+        @media(max-width:950px){.d3-meta{grid-template-columns:repeat(2,1fr)}}
+        @media(max-width:850px){.d3-grid{grid-template-columns:1fr}}
+        @media(max-width:700px){.d3-profile-bar{grid-template-columns:1fr 1fr}.d3-profile-bar .d3-field{grid-column:1/-1}}
+        @media(max-width:560px){.d3-meta{grid-template-columns:1fr}.d3-profile-bar{grid-template-columns:1fr}}
+    </style>
+</head>
+<body>
+<header class="px-header">
+    <div class="px-header-left">
+        <span class="px-logo">perimetr</span>
+        <nav class="px-nav">
+            <a href="/">Podgląd</a>
+            <a href="/review.html">Historia</a>
+            <a href="/calibrate.html">Kalibracja</a>
+            <a href="/distance.html">Dystans</a>
+            <a href="/depth3d.html" class="active">Głębia</a>
+        </nav>
+    </div>
+    <div class="px-header-right"><a class="px-btn" href="/">← Wróć do panelu</a></div>
+</header>
+
+<main class="d3-wrap">
+    <section class="d3-hero">
+        <h1>Odległość osób z jednej kamery</h1>
+        <p>Depth Anything V2 Metric Indoor estymuje głębokość każdego piksela, a YOLO przypisuje odległość do wykrytych osób. Klasyczna szachownica służy wyłącznie do kalibracji obiektywu i korekcji dystorsji; pomiar głębi może działać także przed kalibracją.</p>
+    </section>
+
+    <div class="d3-warning"><strong>Ograniczenie:</strong> wynik jest estymacją monokularną, nie bezpośrednim pomiarem stereo, ToF ani LiDAR. Wartość należy zweryfikować na rzeczywistych dystansach i stosować margines bezpieczeństwa.</div>
+
+    <section class="d3-card">
+        <h2>1 · Kalibracja obiektywu — zwykła szachownica</h2>
+        <div class="d3-profile-bar">
+            <div class="d3-field"><label>Profil kalibracji</label><select id="profileSelect"><option value="">Ładowanie…</option></select></div>
+            <button class="px-btn" id="newProfile">Nowy profil</button>
+            <button class="px-btn" id="renameProfile">Zmień nazwę</button>
+            <button class="px-btn" id="exportProfile">Eksportuj</button>
+            <button class="px-btn" id="deleteProfile">Usuń profil</button>
+        </div>
+        <div class="d3-row">
+            <div class="d3-field" style="flex-basis:260px"><label>Kamera</label><select id="cameraSelect"><option value="cam_default">cam_default</option></select></div>
+            <div class="d3-field"><label>Narożniki poziomo</label><input id="cornersX" type="number" min="3" max="20" value="9"></div>
+            <div class="d3-field"><label>Narożniki pionowo</label><input id="cornersY" type="number" min="3" max="20" value="6"></div>
+            <div class="d3-field"><label>Bok pola [mm]</label><input id="squareLengthMm" type="number" min="5" max="300" step="1" value="30"></div>
+            <div class="d3-field"><label>Model obiektywu</label><select id="lensModel"><option value="pinhole">Standardowy / 1×</option><option value="fisheye">Ultraszeroki / fisheye</option></select></div>
+        </div>
+        <div class="d3-actions">
+            <button class="px-btn" id="downloadBoard">Pobierz szachownicę PNG</button>
+            <button class="px-btn" id="detectBoard">Sprawdź wykrywanie</button>
+            <button class="px-btn" id="captureView">Zapisz bieżący widok</button>
+            <button class="px-btn" id="resetViews">Wyczyść widoki</button>
+            <button class="px-btn px-btn--solid" id="calibrateBtn">Oblicz kalibrację</button>
+        </div>
+        <div class="d3-progress"><span id="captureProgress"></span></div>
+        <div class="d3-status" id="calibrationStatus">Ładowanie stanu…</div>
+        <div class="d3-views-head"><strong>Zapisane widoki</strong><span id="viewsSummary" class="d3-tip" style="margin:0">0 widoków</span></div>
+        <div class="d3-views" id="viewsList"><div class="d3-empty-views">Brak zapisanych widoków w tym profilu.</div></div>
+        <div class="d3-tip">Po kalibracji nie zmieniaj obiektywu, orientacji telefonu, rozdzielczości ani cropu. Usunięcie pojedynczego widoku unieważnia wynik profilu — kliknij wtedy ponownie „Oblicz kalibrację”.</div>
+    </section>
+
+    <section class="d3-card">
+        <h2>2 · Głębia na GPU i odległość od kamery</h2>
+        <div class="d3-actions">
+            <button class="px-btn px-btn--solid" id="startDepth">Uruchom na żywo</button>
+            <button class="px-btn" id="singleDepth">Jedna inferencja</button>
+            <button class="px-btn" id="stopDepth" disabled>Stop</button>
+        </div>
+        <div class="d3-grid" style="margin-top:14px">
+            <div class="d3-view"><span class="d3-view-title" id="rgbTitle">RGB</span><canvas id="rgbCanvas"></canvas><div class="d3-empty" id="rgbEmpty">Brak wyniku</div></div>
+            <div class="d3-view"><span class="d3-view-title">Mapa głębi [m]</span><canvas id="depthCanvas"></canvas><div class="d3-empty" id="depthEmpty">Brak mapy głębi</div></div>
+        </div>
+        <div class="d3-meta">
+            <div><span>Model</span><strong id="modelMeta">—</strong></div>
+            <div><span>Urządzenie</span><strong id="deviceMeta">—</strong></div>
+            <div><span>Inferencja</span><strong id="timeMeta">—</strong></div>
+            <div><span>FPS modelu</span><strong id="modelFpsMeta">—</strong></div>
+            <div><span>FPS podglądu</span><strong id="streamFpsMeta">—</strong></div>
+            <div><span>Zakres głębi</span><strong id="rangeMeta">—</strong></div>
+            <div><span>YOLO osoby</span><strong id="personMeta">—</strong></div>
+            <div><span>Backend łącznie</span><strong id="pipelineMeta">—</strong></div>
+        </div>
+        <div class="d3-measure" id="peopleResult">Automatyczne odległości osób pojawią się po pierwszej inferencji.</div>
+        <div class="d3-measure" id="measureResult">Kliknij wybrany obiekt. Zostanie pokazana estymowana głębokość Z względem kamery.</div>
+        <div class="d3-status" id="depthStatus">Moduł oczekuje.</div>
+    </section>
+
+
+    <section class="d3-card">
+        <h2>3 · Korekcja metryczna z punktów kontrolnych</h2>
+        <div class="d3-row">
+            <div class="d3-field"><label>Etykieta punktu</label><input id="metricPointLabel" type="text" placeholder="Etykieta"></div>
+            <div class="d3-field" style="max-width:220px"><label>Rzeczywista odległość [m]</label><input id="metricDistance" type="number" min="0.05" max="200" step="0.01" value="3.00"></div>
+            <div class="d3-field" style="max-width:240px"><label>Metoda dopasowania</label><select id="metricMethod"><option value="auto">Auto (najmniejszy błąd)</option><option value="affine">Affine · z = a·pred + b</option><option value="inverse_affine">Inverse affine · 1/z = a·1/pred + b</option></select></div>
+        </div>
+        <div class="d3-actions">
+            <button class="px-btn" id="addMetricPoint">Dodaj punkt z kliknięcia</button>
+            <button class="px-btn px-btn--solid" id="fitMetricCorrection">Oblicz korekcję</button>
+            <button class="px-btn" id="clearMetricPoints">Wyczyść punkty</button>
+        </div>
+        <div class="d3-inline-note" id="metricHint">Brak wybranego punktu.</div>
+        <div class="d3-measure" id="metricCorrectionStatus">Brak korekcji.</div>
+        <div class="d3-point-list" id="metricPointsList"><div class="d3-empty-views">Brak zapisanych punktów kontrolnych.</div></div>
+    </section>
+
+</main>
+<script src="depth3d.js?v=2.3.0"></script>
+</body>
+</html>

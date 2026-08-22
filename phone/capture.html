@@ -3,23 +3,51 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Salamono — Kamera</title>
+    <title>Perimetr — Kamera on-site</title>
+    <link rel="stylesheet" href="/tokens/msbp.css">
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
-            font-family: system-ui, sans-serif;
-            background: #111;
-            color: #eee;
+            font-family: var(--font-sans, system-ui, sans-serif);
+            background: #0A0A0A;
+            color: #FAFAF8;
             display: flex;
             flex-direction: column;
             align-items: center;
             min-height: 100vh;
             padding: 16px;
         }
-        h1 { font-size: 18px; margin-bottom: 12px; letter-spacing: 1px; }
+        .brand {
+            display: inline-flex;
+            align-items: center;
+            border: 3px solid #DD211C;
+            border-radius: 12px;
+            padding: 1px 14px 5px;
+            margin-bottom: 12px;
+        }
+        .brand-word {
+            font-family: var(--font-display, "Barlow Condensed", sans-serif);
+            font-size: 27px;
+            font-weight: 300;
+            line-height: 1;
+            letter-spacing: 0.045em;
+            color: #DD211C;
+            text-transform: lowercase;
+        }
+        h1 {
+            font-family: var(--font-display, "Barlow Condensed", sans-serif);
+            font-size: 14px;
+            font-weight: 400;
+            letter-spacing: 0.24em;
+            text-transform: uppercase;
+            color: #A8A8A8;
+            margin-bottom: 12px;
+        }
         #preview {
             width: 100%;
             max-width: 640px;
+            aspect-ratio: 4 / 3;
+            object-fit: cover;
             border-radius: 8px;
             background: #222;
         }
@@ -38,8 +66,8 @@
             border-radius: 6px;
             cursor: pointer;
         }
-        #startBtn { background: #4caf50; color: white; }
-        #stopBtn { background: #f44336; color: white; }
+        #startBtn { background: #DD211C; color: #FAFAF8; letter-spacing: 0.14em; text-transform: uppercase; border-radius: 2px; }
+        #stopBtn { background: #2B2B2B; color: #FAFAF8; letter-spacing: 0.14em; text-transform: uppercase; border-radius: 2px; }
         #stopBtn:disabled, #startBtn:disabled {
             opacity: 0.4;
             cursor: not-allowed;
@@ -69,6 +97,10 @@
             background: #222;
             color: #eee;
         }
+        #cameraSelect {
+            width: 260px;
+            max-width: 100%;
+        }
         #statusBar {
             font-size: 13px;
             margin-top: 12px;
@@ -76,24 +108,103 @@
             border-radius: 6px;
             text-align: center;
         }
-        .status-ok { background: #0a3d0a; color: #4caf50; }
-        .status-err { background: #3d0a0a; color: #f44336; }
-        .status-idle { background: #222; color: #666; }
-        #stats { font-size: 12px; color: #666; margin-top: 8px; }
+        .status-ok { background: rgba(31, 122, 77, 0.15); color: #64d38c; }
+        .status-err { background: rgba(221, 33, 28, 0.15); color: #ff8480; }
+        .status-idle { background: #1a1a1a; color: #6B6B6B; }
+        #stats { font-size: 12px; color: #6B6B6B; margin-top: 8px; font-family: var(--font-mono, monospace); }
+        .voice-toggle {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 13px;
+            color: #eee;
+            padding: 6px 10px;
+            border: 1px solid #333;
+            border-radius: 4px;
+            background: #222;
+            cursor: pointer;
+        }
+        .voice-toggle input { accent-color: #4caf50; }
+
+        .depth-calibration {
+            width: 100%;
+            max-width: 640px;
+            margin-top: 14px;
+            padding: 12px;
+            border: 1px solid #333;
+            border-radius: 4px;
+            background: #151515;
+        }
+        .depth-calibration summary {
+            cursor: pointer;
+            color: #ddd;
+            font-size: 13px;
+            font-weight: 650;
+            letter-spacing: .06em;
+            text-transform: uppercase;
+        }
+        .depth-calibration-grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 8px;
+            margin-top: 12px;
+        }
+        .depth-calibration-grid label { color: #888; font-size: 11px; }
+        .depth-calibration-grid input,
+        .depth-calibration-grid select {
+            width: 100%;
+            margin-top: 4px;
+            padding: 7px 8px;
+            border: 1px solid #333;
+            border-radius: 3px;
+            color: #eee;
+            background: #222;
+        }
+        .depth-calibration-actions { display:flex; flex-wrap:wrap; gap:8px; margin-top:10px; }
+        .depth-calibration-actions button,
+        .depth-calibration-actions a {
+            flex: 1 1 180px;
+            padding: 9px 12px;
+            border: 0;
+            border-radius: 2px;
+            text-align: center;
+            text-decoration: none;
+            font-size: 13px;
+            font-weight: 650;
+        }
+        #depthCaptureBtn { background:#DD211C; color:#fff; }
+        #depthBoardDownload { background:#2B2B2B; color:#fff; }
+        #depthCaptureStatus { margin-top:9px; color:#888; font-family:var(--font-mono, monospace); font-size:11px; line-height:1.45; }
     </style>
 </head>
 <body>
-    <h1>SALAMONO KAMERA</h1>
+    <span class="brand"><span class="brand-word">perimetr</span></span>
+    <h1>Kamera on-site</h1>
 
     <div class="config">
         <label>Serwer:</label>
         <input type="text" id="serverUrl" placeholder="http://localhost:8000">
+        <label for="cameraSelect">Kamera:</label>
+        <select id="cameraSelect">
+            <option value="">Automatycznie (główna tylna)</option>
+        </select>
         <label>FPS:</label>
         <select id="fpsSelect">
-            <option value="1">1</option>
-            <option value="2" selected>2</option>
-            <option value="3">3</option>
+            <option value="5" selected>5</option>
+            <option value="8">8</option>
+            <option value="15">15</option>
+            <option value="22">22</option>
+            <option value="30">30</option>
         </select>
+        <label>Tryb:</label>
+        <select id="modeSelect">
+            <option value="site">Plac (pojazdy)</option>
+            <option value="checkpoint">Bramka (PPE)</option>
+        </select>
+        <label class="voice-toggle">
+            <input type="checkbox" id="voiceToggle" checked>
+            <span>Ostrzeżenia głosowe</span>
+        </label>
     </div>
 
     <video id="preview" autoplay playsinline muted></video>
@@ -103,8 +214,34 @@
         <button id="stopBtn" disabled>Stop</button>
     </div>
 
-    <div id="statusBar" class="status-idle">Gotowy do uruchomienia</div>
+    <div id="statusBar" class="status-idle">Gotowy</div>
     <div id="stats"></div>
+
+    <details class="depth-calibration">
+        <summary>Kalibracja głębi — zapisz widok szachownicy</summary>
+        <div class="depth-calibration-grid">
+            <label>Narożniki poziomo
+                <input id="depthCornersX" type="number" min="3" max="20" value="9">
+            </label>
+            <label>Narożniki pionowo
+                <input id="depthCornersY" type="number" min="3" max="20" value="6">
+            </label>
+            <label>Bok pola [mm]
+                <input id="depthSquareMm" type="number" min="5" max="300" value="30">
+            </label>
+            <label>Obiektyw
+                <select id="depthLensModel">
+                    <option value="pinhole">Standardowy / 1×</option>
+                    <option value="fisheye">Ultraszeroki / fisheye</option>
+                </select>
+            </label>
+        </div>
+        <div class="depth-calibration-actions">
+            <button id="depthCaptureBtn" type="button">Zapisz ten widok</button>
+            <a id="depthBoardDownload" href="#">Pobierz szachownicę</a>
+        </div>
+        <div id="depthCaptureStatus">Brak zapisanych widoków.</div>
+    </details>
 
     <script>
     (function() {
@@ -112,100 +249,709 @@
         var startBtn = document.getElementById("startBtn");
         var stopBtn = document.getElementById("stopBtn");
         var serverInput = document.getElementById("serverUrl");
+        var cameraSelect = document.getElementById("cameraSelect");
         var fpsSelect = document.getElementById("fpsSelect");
+        var modeSelect = document.getElementById("modeSelect");
+        var voiceToggle = document.getElementById("voiceToggle");
         var statusBar = document.getElementById("statusBar");
         var statsEl = document.getElementById("stats");
+
+        var depthCornersX = document.getElementById("depthCornersX");
+        var depthCornersY = document.getElementById("depthCornersY");
+        var depthSquareMm = document.getElementById("depthSquareMm");
+        var depthLensModel = document.getElementById("depthLensModel");
+        var depthCaptureBtn = document.getElementById("depthCaptureBtn");
+        var depthBoardDownload = document.getElementById("depthBoardDownload");
+        var depthCaptureStatus = document.getElementById("depthCaptureStatus");
+        var voiceSupported = "speechSynthesis" in window;
+        var voiceCooldownMs = 5000;
+        var lastSpokenAt = {}; // message-key → epoch ms
+        var plVoice = null;
+
+        var storedVoice = localStorage.getItem("salamonoVoice");
+        if (storedVoice !== null) voiceToggle.checked = storedVoice === "1";
+        voiceToggle.onchange = function() {
+            localStorage.setItem("salamonoVoice", voiceToggle.checked ? "1" : "0");
+            if (!voiceToggle.checked && voiceSupported) speechSynthesis.cancel();
+        };
+
+        function pickPolishVoice() {
+            if (!voiceSupported) return;
+            var voices = speechSynthesis.getVoices();
+            plVoice = voices.find(function(v) { return v.lang === "pl-PL"; })
+                   || voices.find(function(v) { return v.lang && v.lang.startsWith("pl"); })
+                   || null;
+        }
+        if (voiceSupported) {
+            pickPolishVoice();
+            speechSynthesis.onvoiceschanged = pickPolishVoice;
+        }
+        var COOLDOWN_MS = { shout: 2000, danger: 5000, warning: 5000 };
+
+        function speak(text, key, priority) {
+            if (!voiceSupported || !voiceToggle.checked) return;
+            var now = Date.now();
+            var last = lastSpokenAt[key] || 0;
+            var cd = COOLDOWN_MS[priority] || 5000;
+            if (now - last < cd) return;
+            lastSpokenAt[key] = now;
+            if (priority === "danger" || priority === "shout") {
+                speechSynthesis.cancel();
+            }
+            var u = new SpeechSynthesisUtterance(text);
+            u.lang = "pl-PL";
+            if (plVoice) u.voice = plVoice;
+            if (priority === "shout") {
+                u.rate = 1.25;
+                u.pitch = 1.35;
+            } else if (priority === "danger") {
+                u.rate = 1.15;
+                u.pitch = 1.15;
+            } else {
+                u.rate = 1.0;
+                u.pitch = 1.0;
+            }
+            u.volume = 1.0;
+            speechSynthesis.speak(u);
+        }
+
+        function announceAlerts(data) {
+            if (!voiceToggle.checked) return;
+            (data.confirmed_zone_breaches || []).forEach(function(b) {
+                var isApproach = b.rule_name === "zone_approach";
+                var isDanger = b.severity === "DANGER" && !isApproach;
+                var distance = (b.distance_m !== null && b.distance_m !== undefined)
+                    ? ", odległość " + Math.abs(Number(b.distance_m)).toFixed(1) + " metra"
+                    : "";
+                var text = isDanger
+                    ? "Stop! Strefa niebezpieczna: " + b.zone_name
+                    : "Uwaga: zbliżasz się do strefy " + b.zone_name + distance;
+                speak(text, "zone_" + b.zone_id + "_" + b.rule_name + "_" + b.severity,
+                      isDanger ? "danger" : "warning");
+            });
+            (data.confirmed_alerts || []).forEach(function(a) {
+                var isOverlap = a.rule_name === "person_vehicle_overlap";
+                var isDanger = a.severity === "DANGER";
+                var distance = (a.distance_m !== null && a.distance_m !== undefined)
+                    ? ", odległość " + Number(a.distance_m).toFixed(1) + " metra"
+                    : "";
+                var text = isOverlap
+                    ? "Stop! Osoba w obrysie maszyny"
+                    : (isDanger
+                        ? "Stop! Krytyczna odległość od maszyny" + distance
+                        : "Uwaga: osoba zbyt blisko maszyny" + distance);
+                speak(text, "hazard_" + a.rule_name,
+                      isDanger ? "danger" : "warning");
+            });
+            (data.confirmed_posture_alerts || []).forEach(function(p) {
+                var danger = p.severity === "DANGER";
+                var signals = p.signals || [];
+                var fall = signals.indexOf("possible_fall") >= 0;
+                var coordination = signals.some(function(signal) {
+                    return ["repeated_body_sway", "unstable_trajectory", "irregular_step_pattern",
+                            "upper_body_instability", "sudden_balance_loss"].indexOf(signal) >= 0;
+                });
+                var smoking = signals.indexOf("hand_to_mouth_pattern") >= 0 && !coordination;
+                var text = fall
+                    ? "Stop! Możliwy upadek lub osunięcie pracownika. Sprawdź natychmiast."
+                    : (smoking
+                        ? "Uwaga. Powtarzalny gest ręka usta. Zweryfikuj możliwe palenie."
+                        : (danger
+                            ? "Stop! Możliwa utrata równowagi. Sprawdź pracownika."
+                            : "Uwaga. Sprawdź koordynację ruchową pracownika."));
+                var keyPrefix = fall ? "fall_" : (smoking ? "smoking_" : "posture_");
+                speak(text, keyPrefix + p.track_id + "_" + p.severity,
+                      danger ? "danger" : "warning");
+            });
+
+            (data.unidentified_workers || []).forEach(function(u) {
+                speak("Uwaga: osoba bez rozpoznanego identyfikatora", "worker_id_missing", "warning");
+            });
+            (data.ppe_checks || []).forEach(function(c) {
+                if (c.severity !== "DANGER" || !c.missing || !c.missing.length) return;
+                var missing = c.missing.slice().sort();
+                var text;
+                if (missing.indexOf("hardhat") >= 0 && missing.indexOf("vest") >= 0) {
+                    text = "HEJ! Kask i kamizelka natychmiast!";
+                } else if (missing.indexOf("hardhat") >= 0) {
+                    text = "HEJ! Załóż kask!";
+                } else if (missing.indexOf("vest") >= 0) {
+                    text = "HEJ! Ubierz kamizelkę!";
+                } else {
+                    text = "HEJ! Załóż sprzęt ochronny!";
+                }
+                speak(text, "ppe_" + missing.join("_"), "shout");
+            });
+        }
 
         var params = new URLSearchParams(location.search);
         if (params.get("server")) {
             serverInput.value = params.get("server");
         } else {
-            serverInput.value = location.protocol + "//" + location.hostname + ":8000";
+            serverInput.value = location.origin;
         }
+        var initialMode = params.get("mode") || localStorage.getItem("salamonoMode") || "site";
+        if (initialMode === "checkpoint" || initialMode === "site") {
+            modeSelect.value = initialMode;
+        }
+        modeSelect.onchange = function() {
+            localStorage.setItem("salamonoMode", modeSelect.value);
+        };
 
-        var intervalId = null;
+        var loopTimer = null;
         var captureCanvas = document.createElement("canvas");
-        captureCanvas.width = 640;
-        captureCanvas.height = 480;
         var captureCtx = captureCanvas.getContext("2d");
         var framesSent = 0;
+        var framesSkipped = 0;
         var errorsCount = 0;
+        var inFlight = false;      // true dopóki poprzednia klatka nie wróciła
+        var running = false;
+        var lastProcMs = 0;
+        var activeStream = null;
+        var cameraBusy = false;
+        var cameraListAvailable = false;
+        var analysisSocket = null;
+        var analysisSocketGeneration = 0;
+        var analysisSocketConnected = false;
+        var analysisReconnectTimer = null;
+        var TARGET_WIDTH = 960;
+        var TARGET_HEIGHT = 720;
+        var CAMERA_STORAGE_KEY = "perimetr:capture_device_id";
+
+        function getStoredCameraId() {
+            try { return localStorage.getItem(CAMERA_STORAGE_KEY) || ""; }
+            catch (_) { return ""; }
+        }
+
+        function storeCameraId(deviceId) {
+            try {
+                if (deviceId) localStorage.setItem(CAMERA_STORAGE_KEY, deviceId);
+                else localStorage.removeItem(CAMERA_STORAGE_KEY);
+            } catch (_) {}
+        }
+
+        function cameraConstraints(deviceId) {
+            var constraints = {
+                width: { ideal: 1280 },
+                height: { ideal: 960 },
+                aspectRatio: { ideal: 4 / 3 }
+            };
+            if (deviceId) {
+                constraints.deviceId = { exact: deviceId };
+            } else {
+                constraints.facingMode = { ideal: "environment" };
+            }
+            return { video: constraints, audio: false };
+        }
+
+        function stopStream(stream) {
+            if (!stream) return;
+            stream.getTracks().forEach(function(track) { track.stop(); });
+        }
+
+        function stopActiveStream() {
+            stopStream(activeStream || video.srcObject);
+            activeStream = null;
+            video.srcObject = null;
+        }
+
+        function activeDeviceId(stream) {
+            if (!stream) return "";
+            var tracks = stream.getVideoTracks();
+            if (!tracks.length || typeof tracks[0].getSettings !== "function") return "";
+            return tracks[0].getSettings().deviceId || "";
+        }
+
+        function cameraLabel(device, index) {
+            return device.label || ("Kamera " + (index + 1));
+        }
+
+        function isAuxiliaryLens(label) {
+            return /ultra[\s-]*wide|ultraszer|0[.,]5x|tele(photo)?|macro|depth/i.test(label || "");
+        }
+
+        function isFrontCamera(label) {
+            return /front|selfie|user|przedni/i.test(label || "");
+        }
+
+        function mainCameraScore(device) {
+            var label = device.label || "";
+            if (isFrontCamera(label)) return -100;
+            if (isAuxiliaryLens(label)) return -50;
+            var score = 0;
+            if (/main|primary|głów|glown/i.test(label)) score += 60;
+            if (/back|rear|environment|tyln/i.test(label)) score += 30;
+            return score;
+        }
+
+        function preferredMainCamera(devices, currentId) {
+            var current = devices.find(function(device) {
+                return device.deviceId === currentId;
+            });
+            var ranked = devices.slice().sort(function(a, b) {
+                return mainCameraScore(b) - mainCameraScore(a);
+            });
+            var preferred = ranked[0];
+            if (!preferred || preferred.deviceId === currentId || mainCameraScore(preferred) <= 0) {
+                return null;
+            }
+            var currentLabel = current ? current.label : "";
+            var preferredIsExplicitMain = /main|primary|głów|glown/i.test(preferred.label || "");
+            if (isAuxiliaryLens(currentLabel) || isFrontCamera(currentLabel) || preferredIsExplicitMain) {
+                return preferred;
+            }
+            return null;
+        }
+
+        function populateCameraSelect(devices, selectedId, currentId) {
+            cameraSelect.innerHTML = "";
+            var current = devices.find(function(device) {
+                return device.deviceId === currentId;
+            });
+            var autoOption = document.createElement("option");
+            autoOption.value = "";
+            autoOption.textContent = "Automatycznie (główna tylna)"
+                + (!selectedId && current && current.label ? " · " + current.label : "");
+            cameraSelect.appendChild(autoOption);
+
+            devices.forEach(function(device, index) {
+                var option = document.createElement("option");
+                option.value = device.deviceId;
+                option.textContent = cameraLabel(device, index);
+                cameraSelect.appendChild(option);
+            });
+
+            if (selectedId && !devices.some(function(device) {
+                return device.deviceId === selectedId;
+            })) {
+                var rememberedOption = document.createElement("option");
+                rememberedOption.value = selectedId;
+                rememberedOption.textContent = "Zapamiętana kamera";
+                cameraSelect.appendChild(rememberedOption);
+            }
+            cameraSelect.value = selectedId || "";
+        }
+
+        function refreshCameraList(selectedId, currentId) {
+            if (!navigator.mediaDevices
+                    || typeof navigator.mediaDevices.enumerateDevices !== "function") {
+                cameraSelect.disabled = true;
+                return Promise.resolve([]);
+            }
+            return navigator.mediaDevices.enumerateDevices().then(function(devices) {
+                var cameras = devices.filter(function(device) {
+                    return device.kind === "videoinput";
+                });
+                cameraListAvailable = true;
+                populateCameraSelect(cameras, selectedId, currentId);
+                cameraSelect.disabled = cameraBusy;
+                return cameras;
+            }).catch(function() {
+                cameraListAvailable = false;
+                cameraSelect.disabled = true;
+                return [];
+            });
+        }
+
+        function requestCamera(deviceId) {
+            return navigator.mediaDevices.getUserMedia(cameraConstraints(deviceId));
+        }
+
+        function waitForVideo(stream) {
+            activeStream = stream;
+            video.srcObject = stream;
+            return new Promise(function(resolve, reject) {
+                function cleanup() {
+                    video.removeEventListener("loadedmetadata", ready);
+                    video.removeEventListener("error", failed);
+                }
+                function ready() {
+                    cleanup();
+                    sizeCaptureCanvas();
+                    var playResult = video.play();
+                    if (playResult && typeof playResult.catch === "function") {
+                        playResult.catch(function() {});
+                    }
+                    resolve(stream);
+                }
+                function failed() {
+                    cleanup();
+                    reject(new Error("Nie udało się odczytać obrazu z kamery"));
+                }
+                if (video.readyState >= 1 && video.videoWidth && video.videoHeight) {
+                    ready();
+                    return;
+                }
+                video.addEventListener("loadedmetadata", ready);
+                video.addEventListener("error", failed);
+            });
+        }
+
+        function openCamera(selectedId, preferMainLens) {
+            stopActiveStream();
+            return requestCamera(selectedId).catch(function(error) {
+                if (!selectedId) throw error;
+                storeCameraId("");
+                selectedId = "";
+                cameraSelect.value = "";
+                return requestCamera("");
+            }).then(function(stream) {
+                var currentId = activeDeviceId(stream);
+                return refreshCameraList(selectedId, currentId).then(function(devices) {
+                    var preferred = preferMainLens && !selectedId
+                        ? preferredMainCamera(devices, currentId)
+                        : null;
+                    if (!preferred) return stream;
+
+                    stopStream(stream);
+                    return requestCamera(preferred.deviceId).catch(function() {
+                        return requestCamera("");
+                    }).then(function(replacement) {
+                        return refreshCameraList("", activeDeviceId(replacement)).then(function() {
+                            return replacement;
+                        });
+                    });
+                });
+            }).then(waitForVideo);
+        }
+
+        function setCameraError(err) {
+            stopCapture();
+            stopActiveStream();
+            startBtn.disabled = false;
+            stopBtn.disabled = true;
+            statusBar.textContent = "Błąd kamery: " + (err && err.message ? err.message : "brak dostępu");
+            statusBar.className = "status-err";
+        }
+
+        function beginCamera(selectedId, preferMainLens) {
+            if (!navigator.mediaDevices
+                    || typeof navigator.mediaDevices.getUserMedia !== "function") {
+                setCameraError(new Error("przeglądarka nie obsługuje dostępu do kamery"));
+                return;
+            }
+            cameraBusy = true;
+            startBtn.disabled = true;
+            cameraSelect.disabled = true;
+            statusBar.textContent = "Uruchamianie kamery…";
+            statusBar.className = "status-idle";
+            openCamera(selectedId, preferMainLens).then(function() {
+                startCapture();
+                stopBtn.disabled = false;
+                statusBar.textContent = "Kamera gotowa";
+                statusBar.className = "status-ok";
+            }).catch(setCameraError).finally(function() {
+                cameraBusy = false;
+                cameraSelect.disabled = !cameraListAvailable;
+            });
+        }
 
         startBtn.onclick = function() {
-            navigator.mediaDevices.getUserMedia({
-                video: { facingMode: "environment", width: 640, height: 480 }
-            }).then(function(stream) {
-                video.srcObject = stream;
-                startCapture();
-                startBtn.disabled = true;
-                stopBtn.disabled = false;
-            }).catch(function(err) {
-                statusBar.textContent = "Blad kamery: " + err.message;
-                statusBar.className = "status-err";
-            });
+            beginCamera(cameraSelect.value, !cameraSelect.value);
         };
+
+        function sizeCaptureCanvas() {
+            captureCanvas.width = TARGET_WIDTH;
+            captureCanvas.height = TARGET_HEIGHT;
+        }
+
+        function drawVideoCover(source, context, targetWidth, targetHeight) {
+            var sourceWidth = source.videoWidth;
+            var sourceHeight = source.videoHeight;
+            if (!sourceWidth || !sourceHeight) return false;
+
+            var sourceRatio = sourceWidth / sourceHeight;
+            var targetRatio = targetWidth / targetHeight;
+            var sx = 0;
+            var sy = 0;
+            var sw = sourceWidth;
+            var sh = sourceHeight;
+
+            if (sourceRatio > targetRatio) {
+                sw = sourceHeight * targetRatio;
+                sx = (sourceWidth - sw) / 2;
+            } else {
+                sh = sourceWidth / targetRatio;
+                sy = (sourceHeight - sh) / 2;
+            }
+
+            context.drawImage(
+                source,
+                sx, sy, sw, sh,
+                0, 0, targetWidth, targetHeight
+            );
+            return true;
+        }
 
         stopBtn.onclick = function() {
             stopCapture();
-            if (video.srcObject) {
-                video.srcObject.getTracks().forEach(function(t) { t.stop(); });
-                video.srcObject = null;
-            }
+            stopActiveStream();
             startBtn.disabled = false;
             stopBtn.disabled = true;
             statusBar.textContent = "Zatrzymano";
             statusBar.className = "status-idle";
         };
 
-        function startCapture() {
-            var fps = parseInt(fpsSelect.value);
-            var interval = 1000 / fps;
-            framesSent = 0;
-            errorsCount = 0;
+        function scheduleNext(minInterval) {
+            if (!running) return;
+            loopTimer = setTimeout(sendOneFrame, minInterval);
+        }
 
-            intervalId = setInterval(function() {
-                captureCtx.drawImage(video, 0, 0, 640, 480);
-                captureCanvas.toBlob(function(blob) {
-                    if (!blob) return;
-                    var form = new FormData();
-                    form.append("image", blob, "frame.jpg");
-                    form.append("camera_id", "phone_1");
-                    form.append("timestamp", String(Date.now() / 1000));
+        function streamCameraId() {
+            return new URLSearchParams(location.search).get("camera_id") || "cam_default";
+        }
 
-                    var serverUrl = serverInput.value.replace(/\/$/, "");
+        function consumeAnalysis(data) {
+            if (!data || (data.camera_id || "cam_default") !== streamCameraId()) return;
+            announceAlerts(data);
+            lastProcMs = data.processing_ms || 0;
+            var alerts = (data.confirmed_alerts ? data.confirmed_alerts.length : 0)
+                       + (data.confirmed_zone_breaches ? data.confirmed_zone_breaches.length : 0)
+                       + (data.confirmed_posture_alerts ? data.confirmed_posture_alerts.length : 0)
+                       + (data.ppe_checks ? data.ppe_checks.filter(function(c){return c.severity==="DANGER";}).length : 0);
+            var workers = data.worker_identifications ? data.worker_identifications.length : 0;
+            statsEl.textContent =
+                "Tryb: " + (data.mode || "?") +
+                " | Wyslane: " + framesSent +
+                " | Detekcja: " + lastProcMs.toFixed(0) + "ms" +
+                " | Alarmy: " + alerts +
+                " | ID QR: " + workers +
+                " | Pominiete: " + framesSkipped +
+                " | Bledy: " + errorsCount;
+        }
 
-                    fetch(serverUrl + "/api/frame", {
-                        method: "POST",
-                        body: form
-                    }).then(function(resp) {
-                        if (resp.ok) {
-                            framesSent++;
-                            statusBar.textContent = "Wysylanie — klatka " + framesSent;
-                            statusBar.className = "status-ok";
-                            return resp.json();
-                        }
-                        throw new Error("HTTP " + resp.status);
-                    }).then(function(data) {
-                        var alerts = data.confirmed_alerts ? data.confirmed_alerts.length : 0;
+        function stopAnalysisSocket() {
+            analysisSocketGeneration++;
+            analysisSocketConnected = false;
+            if (analysisReconnectTimer) {
+                clearTimeout(analysisReconnectTimer);
+                analysisReconnectTimer = null;
+            }
+            var socket = analysisSocket;
+            analysisSocket = null;
+            if (socket) {
+                socket.onopen = null;
+                socket.onmessage = null;
+                socket.onerror = null;
+                socket.onclose = null;
+                try { socket.close(); } catch (_) {}
+            }
+        }
+
+        function connectAnalysisSocket() {
+            stopAnalysisSocket();
+            var generation = ++analysisSocketGeneration;
+            var target;
+            try {
+                target = new URL(serverInput.value.replace(/\/$/, "") + "/ws/live");
+            } catch (_) {
+                return;
+            }
+            target.protocol = target.protocol === "https:" ? "wss:" : "ws:";
+            target.searchParams.set("camera_id", streamCameraId());
+            target.searchParams.set("include_frame", "false");
+            var socket;
+            try {
+                socket = new WebSocket(target.toString());
+            } catch (_) {
+                return;
+            }
+            analysisSocket = socket;
+            socket.onopen = function() {
+                if (generation !== analysisSocketGeneration) return;
+                analysisSocketConnected = true;
+            };
+            socket.onmessage = function(event) {
+                if (generation !== analysisSocketGeneration ||
+                    typeof event.data !== "string") return;
+                var data;
+                try { data = JSON.parse(event.data); } catch (_) { return; }
+                consumeAnalysis(data);
+            };
+            socket.onerror = function() {
+                if (generation !== analysisSocketGeneration) return;
+                analysisSocketConnected = false;
+            };
+            socket.onclose = function() {
+                if (generation !== analysisSocketGeneration) return;
+                analysisSocket = null;
+                analysisSocketConnected = false;
+                if (running) {
+                    analysisReconnectTimer = setTimeout(connectAnalysisSocket, 1500);
+                }
+            };
+        }
+
+        function sendOneFrame() {
+            if (!running) return;
+            // Backpressure: jeśli poprzednia klatka jeszcze leci, poczekaj.
+            // Tempo wysyłania samo dostraja się do throughput backendu.
+            if (inFlight) {
+                framesSkipped++;
+                scheduleNext(20);
+                return;
+            }
+            var cycleStartedAt = performance.now();
+            if (!captureCanvas.width || !captureCanvas.height) sizeCaptureCanvas();
+            if (!drawVideoCover(
+                    video,
+                    captureCtx,
+                    captureCanvas.width,
+                    captureCanvas.height)) {
+                scheduleNext(50);
+                return;
+            }
+            captureCanvas.toBlob(function(blob) {
+                if (!blob || !running) { scheduleNext(50); return; }
+                inFlight = true;
+                var parsedFps = parseInt(fpsSelect.value, 10);
+                var fps = parsedFps > 0 ? parsedFps : 5;
+                var targetInterval = 1000 / fps;
+
+                var form = new FormData();
+                form.append("image", blob, "frame.jpg");
+                var cameraId = streamCameraId();
+                form.append("camera_id", cameraId);
+                form.append("timestamp", String(Date.now() / 1000));
+                form.append("mode", modeSelect.value);
+                form.append("include_frame", "false");
+                form.append(
+                    "async_processing",
+                    analysisSocketConnected ? "true" : "false"
+                );
+                var serverUrl = serverInput.value.replace(/\/$/, "");
+
+                fetch(serverUrl + "/api/frame", {
+                    method: "POST",
+                    body: form,
+                    credentials: "same-origin"
+                }).then(function(resp) {
+                    if (resp.ok) {
+                        framesSent++;
+                        statusBar.textContent = "Wysylanie — klatka " + framesSent;
+                        statusBar.className = "status-ok";
+                        return resp.json();
+                    }
+                    throw new Error("HTTP " + resp.status);
+                }).then(function(data) {
+                    if (data && data.accepted) {
                         statsEl.textContent =
-                            "Wyslane: " + framesSent +
-                            " | Detekcja: " + (data.processing_ms || 0).toFixed(0) + "ms" +
-                            " | Alarmy: " + alerts +
-                            " | Bledy: " + errorsCount;
-                    }).catch(function() {
-                        errorsCount++;
-                        statusBar.textContent = "Blad polaczenia (" + errorsCount + ")";
-                        statusBar.className = "status-err";
-                    });
-                }, "image/jpeg", 0.7);
-            }, interval);
+                            "Tryb: " + modeSelect.value +
+                            " | Wyslane: " + framesSent +
+                            " | Kolejka: " + (data.queue_depth || 0) +
+                            " | Odrzucone stare: " + (data.dropped_frames || 0) +
+                            " | Ostatnia detekcja: " + lastProcMs.toFixed(0) + "ms";
+                    } else {
+                        consumeAnalysis(data);
+                    }
+                }).catch(function() {
+                    errorsCount++;
+                    statusBar.textContent = "Blad polaczenia (" + errorsCount + ")";
+                    statusBar.className = "status-err";
+                }).finally(function() {
+                    inFlight = false;
+                    var cycleElapsed = performance.now() - cycleStartedAt;
+                    var wait = Math.max(0, targetInterval - cycleElapsed);
+                    scheduleNext(wait);
+                });
+            }, "image/jpeg", 0.85);
+        }
+
+        function startCapture() {
+            framesSent = 0;
+            framesSkipped = 0;
+            errorsCount = 0;
+            inFlight = false;
+            running = true;
+            connectAnalysisSocket();
+            sendOneFrame();
         }
 
         function stopCapture() {
-            if (intervalId) {
-                clearInterval(intervalId);
-                intervalId = null;
+            running = false;
+            if (loopTimer) { clearTimeout(loopTimer); loopTimer = null; }
+            inFlight = false;
+            stopAnalysisSocket();
+        }
+
+
+        function depthCheckerboardBody() {
+            return {
+                inner_corners_x: parseInt(depthCornersX.value, 10) || 9,
+                inner_corners_y: parseInt(depthCornersY.value, 10) || 6,
+                square_length_m: (parseFloat(depthSquareMm.value) || 30) / 1000,
+                lens_model: depthLensModel.value || "pinhole"
+            };
+        }
+
+        function updateDepthBoardLink() {
+            var body = depthCheckerboardBody();
+            var query = new URLSearchParams({
+                inner_corners_x: String(body.inner_corners_x),
+                inner_corners_y: String(body.inner_corners_y),
+                square_length_m: String(body.square_length_m),
+                dpi: "300"
+            });
+            depthBoardDownload.href = serverInput.value.replace(/\/$/, "") + "/api/depth3d/checkerboard.png?" + query.toString();
+        }
+
+        function saveDepthCalibrationView() {
+            if (!running) {
+                depthCaptureStatus.textContent = "Najpierw kliknij Start, aby backend otrzymywał świeże klatki.";
+                return;
             }
+            depthCaptureBtn.disabled = true;
+            depthCaptureStatus.textContent = "Wykrywanie pełnej szachownicy…";
+            var serverUrl = serverInput.value.replace(/\/$/, "");
+            fetch(serverUrl + "/api/depth3d/" + encodeURIComponent(streamCameraId()) + "/checkerboard/capture", {
+                method: "POST",
+                headers: {"Content-Type": "application/json"},
+                body: JSON.stringify(depthCheckerboardBody()),
+                credentials: "same-origin"
+            }).then(function(response) {
+                return response.json().then(function(payload) {
+                    if (!response.ok) throw new Error(payload && payload.detail ? payload.detail : "HTTP " + response.status);
+                    return payload;
+                });
+            }).then(function(data) {
+                depthCaptureStatus.textContent = data.accepted
+                    ? "Zapisano widok " + data.capture_count + " · narożniki " + data.corner_count + "/" + data.expected_corners + " · pokrycie " + (data.coverage_ratio * 100).toFixed(1) + "% · ostrość " + data.blur_score.toFixed(0)
+                    : (data.warning || "Widok nie został zapisany.");
+            }).catch(function(error) {
+                depthCaptureStatus.textContent = "Błąd: " + error.message;
+            }).finally(function() {
+                depthCaptureBtn.disabled = false;
+            });
+        }
+
+        depthCaptureBtn.addEventListener("click", saveDepthCalibrationView);
+        [depthCornersX, depthCornersY, depthSquareMm, depthLensModel, serverInput].forEach(function(element) {
+            element.addEventListener("change", updateDepthBoardLink);
+        });
+        updateDepthBoardLink();
+
+        var storedCameraId = getStoredCameraId();
+        if (storedCameraId) {
+            var storedOption = document.createElement("option");
+            storedOption.value = storedCameraId;
+            storedOption.textContent = "Zapamiętana kamera";
+            cameraSelect.appendChild(storedOption);
+            cameraSelect.value = storedCameraId;
+        }
+        cameraSelect.onchange = function() {
+            var selectedId = cameraSelect.value;
+            storeCameraId(selectedId);
+            if (!activeStream || !running || cameraBusy) return;
+            stopCapture();
+            beginCamera(selectedId, !selectedId);
+        };
+
+        refreshCameraList(storedCameraId, "");
+        if (navigator.mediaDevices
+                && typeof navigator.mediaDevices.addEventListener === "function") {
+            navigator.mediaDevices.addEventListener("devicechange", function() {
+                refreshCameraList(cameraSelect.value, activeDeviceId(activeStream));
+            });
         }
     })();
     </script>

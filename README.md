@@ -1,159 +1,86 @@
-# Salamono Safety — MVP
+# Perimetr
 
-System bezpieczenstwa na budowie oparty o AI i wizje komputerowa.
-Automatycznie wykrywa niebezpieczne sytuacje (pracownik za blisko pojazdu)
-i alarmuje kierownika budowy w czasie rzeczywistym.
+Perimetr to system analizy obrazu dla nadzoru BHP na placu budowy. Obsługuje
+kamerę, telefon i pliki wideo, wykrywa osoby oraz maszyny, analizuje zachowanie
+i zapisuje zdarzenia do późniejszej weryfikacji.
 
-## Architektura
+System raportuje obserwowalne zdarzenia i nie diagnozuje stanu zdrowia ani
+przyczyny zachowania.
 
-```
-[Telefon/kamera]  ──HTTP POST──>  [Backend FastAPI + YOLO]  ──WebSocket──>  [Panel web]
-   2-3 kl/s                        detekcja obiektow                        podglad na zywo
-                                   analiza zagrozen                         alarm + historia
-                                   filtr temporalny
-```
+## Główne moduły
 
-## Szybki start
+- własny detektor YOLO dla osoby oraz dziewięciu klas pojazdów i maszyn;
+- pojedyncza dynamiczna strefa `DANGER` wokół maszyny;
+- pomiar odległości osoba–maszyna z kalibracją ground-plane;
+- ręczna analiza wybranej klatki z wgranego klipu w zakładce Dystans;
+- PPE w trybie bramki;
+- MediaPipe Pose Heavy oraz model action/safety long300;
+- dodatkowy model zachowania V4 dla sygnałów palenia/telefonu;
+- identyfikacja pracownika przez ArUco i rejestr SQLite;
+- historia alarmów, zrzuty i klipy dowodowe;
+- odtwarzanie demo oraz seryjna analiza AI filmów;
+- opcjonalny moduł Depth Anything V2.
 
-### 1. Instalacja
+## Uruchomienie na Windows
 
-```bash
+Projekt jest przygotowany dla Pythona 3.11.
+
+```powershell
+py -3.11 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
 pip install -r requirements.txt
+Copy-Item .env.example .env
+python -m uvicorn backend.main:app --host 0.0.0.0 --port 8000 --env-file .env
 ```
 
-### 2. Etap 0 — Test na nagraniu
+Panel: `http://127.0.0.1:8000`.
 
-```bash
-python etap0/detect_video.py --input wideo.mp4 --output wynik.mp4
+## Modele
+
+W repozytorium pozostają modele potrzebne przez aktualny runtime:
+
+```text
+ppe.pt
+models/perimetr_scene_v3_best.pt
+models/pose_landmarker_heavy.task
+models/behavior/tcn_gru_pose_event_v2/best_motion.pt
+models/behavior/pose_event_v4_dual_norm_raw/best.pt
 ```
 
-Opcje:
-- `--sample-fps 3` — klatki na sekunde do analizy (domyslnie 3)
-- `--model yolo11n.pt` — model YOLO (domyslnie nano)
-- `--show` — podglad na zywo (wymaga GUI)
+`models/behavior/tcn_gru_pose_event_v2/model.pt` pozostaje jako zgodny checkpoint
+starszego runtime. Pozostałe warianty i eksporty modeli są ignorowane przez Git.
 
-### 3. Etap 1 — System real-time
+## Dane uruchomieniowe
 
-**Uruchom serwer:**
-```bash
-uvicorn backend.main:app --host 0.0.0.0 --port 8000
+`data/workers.sqlite3` jest celowo wersjonowany, ponieważ zawiera rejestr
+pracowników używany przez identyfikację ArUco. Alerty, kalibracje, eksporty,
+klipy, zrzuty i pliki tymczasowe są generowane lokalnie i ignorowane.
+
+Kalibracja modułu Dystans znajduje się w `distance_assets/`.
+
+## Struktura
+
+```text
+backend/          API i pipeline analizy
+frontend/         panel, historia, kalibracja, dystans i głębia
+phone/            klient kamery telefonu
+pose_event/       modele i runtime analizy sekwencji pozy
+models/           modele runtime
+distance_assets/  kalibracja ground-plane
+data/             rejestr pracowników i dane uruchomieniowe
+tests/            testy
+tools/            narzędzia instalacyjne i diagnostyczne
 ```
 
-**Otworz panel:** `http://localhost:8000`
+## Szybka weryfikacja
 
-**Uruchom symulator (zamiast telefonu):**
-```bash
-python tools/simulate_phone.py --video wideo.mp4 --fps 2 --loop
+```powershell
+pytest -q
+python -m compileall backend pose_event
+node --check frontend/app.js
+node --check frontend/distance.js
+node --check frontend/depth3d.js
 ```
 
-**Lub uzyj telefonu:** Otworz `http://<adres-serwera>:8000/phone/capture.html`
-na telefonie w tej samej sieci.
-
-## Konfiguracja
-
-Parametry mozna ustawic przez zmienne srodowiskowe:
-
-| Zmienna | Domyslnie | Opis |
-|---|---|---|
-| `YOLO_MODEL` | `yolo11n.pt` | Model YOLO |
-| `YOLO_CONFIDENCE` | `0.35` | Prog pewnosci detekcji |
-| `YOLO_DEVICE` | `cpu` | Urzadzenie (`cpu` lub `cuda:0`) |
-| `DANGER_PROXIMITY_PX` | `50` | Odleglosc w pikselach = "za blisko" |
-| `DANGER_CONSECUTIVE_FRAMES` | `3` | Ile klatek z rzedu = alarm |
-| `DANGER_COOLDOWN_SEC` | `10` | Przerwa miedzy powtornymi alarmami |
-| `SERVER_PORT` | `8000` | Port serwera |
-
-## API
-
-| Endpoint | Metoda | Opis |
-|---|---|---|
-| `/api/frame` | POST | Wyslij klatke (multipart: image + camera_id) |
-| `/api/alerts` | GET | Historia alarmow |
-| `/api/stats` | GET | Statystyki systemu |
-| `/api/health` | GET | Health check |
-| `/ws/live` | WebSocket | Stream wynikow do panelu |
-
-## Testy
-
-```bash
-pytest tests/
-```
-
-## Struktura projektu
-
-```
-etap0/          — proof of concept na nagraniu
-backend/        — serwer FastAPI + detekcja + logika zagrozen
-frontend/       — panel web kierownika budowy
-phone/          — strona do przechwytywania z kamery telefonu
-tools/          — narzedzia do testowania (symulator kamery)
-config.py       — centralna konfiguracja
-```
-
-## Wdrozenie w chmurze (Docker)
-
-### Szybki start z Docker (CPU)
-
-```bash
-cp .env.example .env        # dostosuj konfiguracje
-docker compose up --build
-```
-
-Serwer dostepny na `http://<adres-ip>:8000`
-
-### Z GPU (produkcja / wiele kamer)
-
-Wymaga [nvidia-container-toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html).
-
-```bash
-cp .env.example .env
-# Ustaw w .env: YOLO_DEVICE=cuda:0
-docker compose --profile gpu up --build
-```
-
-### Z HTTPS (wymagane dla kamery przez internet)
-
-Przegladarki blokuja dostep do kamery (`getUserMedia`) na stronach bez HTTPS.
-Dwie opcje:
-
-**Opcja A — Cloudflare Tunnel (najlatwiej, darmowe):**
-```bash
-# 1. Uruchom backend
-docker compose up -d
-
-# 2. Zainstaluj cloudflared
-curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o /usr/local/bin/cloudflared
-chmod +x /usr/local/bin/cloudflared
-
-# 3. Stworz tunel (darmowe, bez domeny)
-cloudflared tunnel --url http://localhost:8000
-# Dostaniesz URL typu https://xxx-xxx.trycloudflare.com
-```
-
-**Opcja B — Nginx + Let's Encrypt (wlasna domena):**
-```bash
-# 1. Umiesc certyfikaty w nginx/certs/
-#    fullchain.pem + privkey.pem (np. z certbot)
-# 2. Uruchom z profilem https
-docker compose --profile https up --build
-```
-
-### Rekomendowane VM do GPU
-
-| Dostawca | GPU | Koszt | Uwagi |
-|---|---|---|---|
-| Runpod | RTX A4000 | ~$0.20/h | On-demand, latwy start |
-| Vast.ai | RTX 3060 | ~$0.15/h | Najtanszy, auction-based |
-| Hetzner | GTX 1080 | ~40 EUR/mies. | Staly serwer, EU |
-| Lambda | A10 | ~$0.60/h | Stabilny, US |
-
-Z GPU: YOLO przetwarza klatke w ~5-10ms (vs ~150ms na CPU).
-Jeden GPU obsluguje 5-10 kamer jednoczesnie przy 3 fps.
-
-## Reguly zagrozen (MVP)
-
-1. **person_vehicle_overlap** — bounding box osoby naklada sie z pojazdem (DANGER)
-2. **person_near_vehicle** — osoba w odleglosci < 50px od pojazdu (WARNING)
-
-Filtr temporalny: alarm dopiero po 3 kolejnych klatkach z zagrozeniem,
-co eliminuje falszywe alarmy z pojedynczych bledow detekcji.
+Moduł głębi ma dodatkowe zależności w `requirements-depth3d.txt`.
